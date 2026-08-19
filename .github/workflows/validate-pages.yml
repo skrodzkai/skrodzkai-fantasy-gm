@@ -1,0 +1,22 @@
+name: Validate Pages site
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate static artifact
+        run: |
+          test -s docs/index.html
+          grep -Fq '<title>SKRODZKai Fantasy Football GM</title>' docs/index.html
+          grep -Fq 'Yahoo data requested' docs/index.html
+          if grep -Eiq '<script|<form|https?://|analytics|tracker|cookie' docs/index.html; then
+            echo 'Unexpected executable, form, tracking, or external URL content found.'
+            exit 1
+          fi
