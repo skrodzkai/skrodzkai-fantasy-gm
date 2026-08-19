@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="A private, single-user decision-support system for one Yahoo Fantasy Football team."
+    />
+    <title>SKRODZKai Fantasy Football GM</title>
+    <style>
+      :root {
+        --ink: #102019;
+        --paper: #f1f0e9;
+        --line: rgba(16, 32, 25, 0.2);
+        --green: #12a564;
+        --muted: #5d6862;
+        --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      }
+
+      * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; }
+      body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--sans); }
+      main { min-height: 100vh; }
+      .site-header { min-height: 82px; display: flex; align-items: center; justify-content: space-between; padding: 0 clamp(24px, 6vw, 96px); border-bottom: 1px solid var(--line); }
+      .wordmark { color: var(--ink); font-weight: 760; letter-spacing: -0.05em; text-decoration: none; font-size: 19px; }
+      .wordmark span { color: var(--green); }
+      .status { display: flex; align-items: center; gap: 9px; color: var(--muted); font: 500 12px/1 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; }
+      .status i { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px rgba(18, 165, 100, 0.12); }
+      .hero { padding: clamp(72px, 12vw, 160px) clamp(24px, 10vw, 160px) clamp(72px, 10vw, 136px); border-bottom: 1px solid var(--line); }
+      .eyebrow, .section-number { margin: 0 0 25px; color: var(--green); font: 600 12px/1.3 var(--mono); text-transform: uppercase; letter-spacing: 0.12em; }
+      h1 { max-width: 960px; margin: 0; font-size: clamp(58px, 9.8vw, 144px); line-height: 0.88; letter-spacing: -0.078em; font-weight: 690; }
+      .lede { max-width: 780px; margin: clamp(44px, 7vw, 86px) 0 0 auto; font-size: clamp(20px, 2.15vw, 31px); line-height: 1.38; letter-spacing: -0.026em; }
+      .facts { margin: 45px 0 0 auto; max-width: 780px; display: flex; flex-wrap: wrap; gap: 12px 26px; color: var(--muted); font: 500 12px/1.4 var(--mono); text-transform: uppercase; letter-spacing: 0.06em; }
+      .facts span::before { content: "↳ "; color: var(--green); }
+      .purpose, .privacy { display: grid; grid-template-columns: minmax(180px, 0.62fr) minmax(0, 1.38fr); gap: 42px; padding: clamp(64px, 9vw, 120px) clamp(24px, 8vw, 128px); border-bottom: 1px solid var(--line); }
+      h2 { margin: 0; max-width: 760px; font-size: clamp(38px, 5vw, 72px); line-height: 0.98; letter-spacing: -0.055em; font-weight: 650; }
+      .purpose div > p, .privacy div > p { max-width: 690px; margin: 36px 0 0; color: var(--muted); font-size: clamp(18px, 1.6vw, 23px); line-height: 1.55; }
+      .data-section, .principles { padding: clamp(64px, 9vw, 120px) clamp(24px, 8vw, 128px); border-bottom: 1px solid var(--line); }
+      .section-heading { display: grid; grid-template-columns: minmax(180px, 0.62fr) minmax(0, 1.38fr); gap: 42px; margin-bottom: clamp(54px, 7vw, 92px); }
+      .data-list { margin: 0 0 0 calc(31% + 42px); padding: 0; list-style: none; border-top: 1px solid var(--line); }
+      .data-list li { display: grid; grid-template-columns: 60px 1fr; gap: 20px; padding: 24px 0; border-bottom: 1px solid var(--line); font-size: clamp(19px, 2vw, 28px); letter-spacing: -0.025em; }
+      .data-list span { padding-top: 6px; color: var(--green); font: 500 11px/1 var(--mono); }
+      .principle-grid { display: grid; grid-template-columns: repeat(2, 1fr); margin-left: calc(31% + 42px); border-top: 1px solid var(--line); border-left: 1px solid var(--line); }
+      .principle-grid article { min-height: 235px; padding: 28px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+      h3 { margin: 0; font-size: 22px; letter-spacing: -0.035em; }
+      .principle-grid p { margin: 48px 0 0; color: var(--muted); line-height: 1.55; }
+      .privacy { background: var(--ink); color: var(--paper); }
+      .privacy .section-number { color: #60d49a; }
+      .privacy div > p { color: rgba(241, 240, 233, 0.66); }
+      footer { display: flex; justify-content: space-between; gap: 24px; padding: 30px clamp(24px, 6vw, 96px); background: var(--ink); color: rgba(241, 240, 233, 0.62); border-top: 1px solid rgba(241, 240, 233, 0.16); font: 500 11px/1.4 var(--mono); text-transform: uppercase; letter-spacing: 0.06em; }
+      footer p { margin: 0; }
+
+      @media (max-width: 760px) {
+        .site-header { min-height: 68px; }
+        .status { font-size: 10px; }
+        .hero { padding-top: 72px; }
+        h1 { font-size: clamp(51px, 16vw, 88px); }
+        .purpose, .privacy, .section-heading { grid-template-columns: 1fr; gap: 20px; }
+        .data-list, .principle-grid { margin-left: 0; }
+        .principle-grid { grid-template-columns: 1fr; }
+        .principle-grid article { min-height: auto; }
+        .principle-grid p { margin-top: 24px; }
+        footer { flex-direction: column; }
+      }
+
+      @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header class="site-header">
+        <a class="wordmark" href="#top" aria-label="SKRODZKai home">SKRODZK<span>AI</span></a>
+        <div class="status"><i></i> Private project</div>
+      </header>
+
+      <section class="hero" id="top">
+        <p class="eyebrow">Fantasy Football General Manager</p>
+        <h1>One league.<br />Twenty seasons of context.</h1>
+        <p class="lede">SKRODZKai Fantasy Football GM is a private, single-user decision-support system for managing one Yahoo Fantasy Football team with better preparation, clearer probabilities, and disciplined weekly decisions.</p>
+        <div class="facts" aria-label="Project facts">
+          <span>Personal use only</span><span>1 expected user</span><span>No commercial resale</span>
+        </div>
+      </section>
+
+      <section class="purpose" aria-labelledby="purpose-title">
+        <p class="section-number">01 / Purpose</p>
+        <div>
+          <h2 id="purpose-title">Turn league context into better decisions.</h2>
+          <p>The application combines league-specific rules and current team state with independently sourced football research. It supports draft preparation, player rankings, lineup choices, waiver analysis, and performance review.</p>
+        </div>
+      </section>
+
+      <section class="data-section" aria-labelledby="data-title">
+        <div class="section-heading">
+          <p class="section-number">02 / Yahoo data requested</p>
+          <h2 id="data-title">Only what the league requires.</h2>
+        </div>
+        <ul class="data-list">
+          <li><span>01</span>League settings and scoring rules</li>
+          <li><span>02</span>Team rosters and available players</li>
+          <li><span>03</span>Draft results and league transactions</li>
+          <li><span>04</span>Standings, matchups, and weekly results</li>
+        </ul>
+      </section>
+
+      <section class="principles" aria-labelledby="principles-title">
+        <div class="section-heading">
+          <p class="section-number">03 / Operating principles</p>
+          <h2 id="principles-title">Small scope. Clear boundaries.</h2>
+        </div>
+        <div class="principle-grid">
+          <article><h3>One manager</h3><p>Built for a single owner in one private, long-running league.</p></article>
+          <article><h3>Least privilege</h3><p>Read-only access to the minimum Yahoo Fantasy data needed for decisions.</p></article>
+          <article><h3>No redistribution</h3><p>Yahoo data will not be sold, syndicated, or published for other users.</p></article>
+          <article><h3>Owner controlled</h3><p>The system advises; the account owner remains responsible for every decision.</p></article>
+        </div>
+      </section>
+
+      <section class="privacy" aria-labelledby="privacy-title">
+        <p class="section-number">04 / Data posture</p>
+        <div>
+          <h2 id="privacy-title">Private by design.</h2>
+          <p>Yahoo Fantasy data is used solely to provide personal decision support to the account owner. The project will follow Yahoo's access, attribution, security, and retention requirements and will not create a public fantasy data product or competing service.</p>
+        </div>
+      </section>
+
+      <footer><p>SKRODZKai Fantasy Football GM</p><p>Private single-user application · 2026</p></footer>
+    </main>
+  </body>
+</html>
