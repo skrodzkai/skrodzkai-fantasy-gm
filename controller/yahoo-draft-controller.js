@@ -1,7 +1,7 @@
 (function installYahooDraftController(root) {
   "use strict";
 
-  const VERSION = "1.0.0";
+  const VERSION = "1.1.1";
   const GLOBAL_KEY = "__skrodzkaiYahooDraftControllerV1";
   const RECEIPT_KEY = "skrodzkai-yahoo-draft-controller-receipts-v1";
   const POSITIONS = new Set(["QB", "RB", "WR", "TE", "K", "DEF", "LB", "DB", "DE"]);
@@ -79,13 +79,15 @@
     if (!player) return null;
     const lines = textLines(player.innerText);
     const positionIndex = lines.findIndex((line) => POSITIONS.has(normalize(line)));
-    if (positionIndex < 1 || positionIndex + 1 >= lines.length) return null;
+    if (positionIndex < 1) return null;
     const titledImage = player.querySelector("img[title]");
+    const position = normalize(lines[positionIndex]);
+    const nextLine = lines[positionIndex + 1] ?? "";
     return {
       yahooId: String(player.getAttribute("data-id") ?? ""),
       name: String(titledImage?.getAttribute("title") ?? lines[0]),
-      position: normalize(lines[positionIndex]),
-      team: normalize(lines[positionIndex + 1]),
+      position,
+      team: /^BYE\s+\d+$/i.test(nextLine) ? "" : normalize(nextLine),
       player,
       row,
     };
@@ -153,11 +155,34 @@
 
     const room = parseRoom(locationRef.pathname);
     if (!room) throw new Error("controller must be created on a Yahoo NFL draftclient room");
+    const expectedRoomId = options.expectedRoomId == null ? room.roomId : String(options.expectedRoomId);
+    const expectedSeat = options.expectedSeat == null ? room.seat : Number(options.expectedSeat);
+    const expectedRosterTotal = options.expectedRosterTotal == null ? null : Number(options.expectedRosterTotal);
+    const failureAction = String(options.failureAction ?? "mock_lobby");
+    if (room.roomId !== expectedRoomId || room.seat !== expectedSeat) {
+      throw new Error("draft room or seat does not match the approved preflight");
+    }
+    if (expectedRosterTotal != null && (!Number.isInteger(expectedRosterTotal) || expectedRosterTotal <= 0)) {
+      throw new Error("expectedRosterTotal must be a positive integer");
+    }
+    if (!new Set(["mock_lobby", "stay"]).has(failureAction)) {
+      throw new Error("failureAction must be mock_lobby or stay");
+    }
     const targets = validateTargets(options.targets);
     const pollMs = Number(options.pollMs ?? 50);
     const selectionDeadlineMs = Number(options.selectionDeadlineMs ?? 5000);
     const confirmationDeadlineMs = Number(options.confirmationDeadlineMs ?? 5000);
-    if (pollMs < 25 || selectionDeadlineMs <= 0 || confirmationDeadlineMs <= 0) {
+    const minimumAvailableTargets = Number(options.minimumAvailableTargets ?? 1);
+    const maxConfirmedPicks = Number(options.maxConfirmedPicks ?? Number.MAX_SAFE_INTEGER);
+    if (
+      pollMs < 25 ||
+      selectionDeadlineMs <= 0 ||
+      confirmationDeadlineMs <= 0 ||
+      !Number.isInteger(minimumAvailableTargets) ||
+      minimumAvailableTargets <= 0 ||
+      !Number.isInteger(maxConfirmedPicks) ||
+      maxConfirmedPicks <= 0
+    ) {
       throw new Error("invalid timing configuration");
     }
 
@@ -209,7 +234,7 @@
       } catch (error) {
         failure.receiptError = String(error?.message ?? error);
       } finally {
-        if (code !== "room_changed" && typeof locationRef.assign === "function") {
+        if (failureAction === "mock_lobby" && code !== "room_changed" && typeof locationRef.assign === "function") {
           locationRef.assign("/f1/mock_lobby");
         }
       }
@@ -239,23 +264,40 @@
       const detectedAt = Date.now();
       const rosterBefore = parseRosterCount(documentRef.body?.innerText);
       if (!rosterBefore) throw new Error("roster_count_missing");
-      let selection = null;
+      const selections = [];
+
+      assertSafeTurn(turn, rosterBefore);
+      const players = [...documentRef.querySelectorAll("tr")]
+        .map(readPlayerRow)
+        .filter(Boolean);
+      const playersById = new Map();
+      const playersByIdentity = new Map();
+      for (const player of players) {
+        const idKey = `ID:${player.yahooId}`;
+        const identityKey = targetKey(player);
+        playersById.set(idKey, [...(playersById.get(idKey) ?? []), player]);
+        playersByIdentity.set(identityKey, [...(playersByIdentity.get(identityKey) ?? []), player]);
+      }
 
       for (const target of targets) {
         const key = targetKey(target);
         if (usedTargets.has(key)) continue;
-        assertSafeTurn(turn, rosterBefore);
-        const matches = findTargetRows(documentRef, target);
+        const matches = target.yahooId
+          ? playersById.get(key) ?? []
+          : playersByIdentity.get(key) ?? [];
         if (matches.length > 1) throw new Error(`ambiguous_target:${key}`);
         if (matches.length === 0) continue;
         const draftButtons = findDraftButtons(matches[0].row);
         if (draftButtons.length > 1) throw new Error("ambiguous_draft_button");
         if (draftButtons.length === 0) continue;
-        selection = { target, key, player: matches[0], draftButton: draftButtons[0] };
-        break;
+        selections.push({ target, key, player: matches[0], draftButton: draftButtons[0] });
+        if (selections.length >= minimumAvailableTargets) break;
       }
 
-      if (!selection) throw new Error("no_approved_target_available");
+      if (selections.length < minimumAvailableTargets) {
+        throw new Error(`fewer_than_${minimumAvailableTargets}_approved_targets_available`);
+      }
+      const selection = selections[0];
       if (Date.now() - detectedAt > selectionDeadlineMs) throw new Error("selection_deadline_exceeded");
       assertSafeTurn(turn, rosterBefore);
       receipt("draft_click", {
@@ -273,6 +315,7 @@
       let sawRosterIncrement = false;
       while (Date.now() - confirmationStart < confirmationDeadlineMs) {
         await delay(25);
+        if (state !== "running") return;
         if (isAutodraftActive(documentRef)) throw new Error("autodraft_activated_after_click");
         const rosterAfter = parseRosterCount(documentRef.body?.innerText);
         if (rosterAfter && rosterAfter.filled !== rosterBefore.filled) {
@@ -295,6 +338,10 @@
             rosterAfter,
             clickToConfirmationMs: Date.now() - confirmationStart,
           });
+          if (confirmedPicks >= maxConfirmedPicks) {
+            stopInterval();
+            state = "completed";
+          }
           return;
         }
       }
@@ -332,8 +379,23 @@
       if (isAutodraftActive(documentRef)) throw new Error("Autodraft is active at start");
       const activeBlockers = blockers(documentRef, environment);
       if (activeBlockers.length) throw new Error(`blocking UI at start: ${activeBlockers.join("|")}`);
+      const roster = parseRosterCount(documentRef.body?.innerText);
+      if (expectedRosterTotal != null && (!roster || roster.total !== expectedRosterTotal)) {
+        throw new Error("roster total does not match the approved preflight");
+      }
       state = "running";
-      receipt("controller_started", { targetCount: targets.length, pollMs, selectionDeadlineMs, confirmationDeadlineMs });
+      receipt("controller_started", {
+        targetCount: targets.length,
+        pollMs,
+        selectionDeadlineMs,
+        confirmationDeadlineMs,
+        expectedRoomId,
+        expectedSeat,
+        expectedRosterTotal,
+        failureAction,
+        minimumAvailableTargets,
+        maxConfirmedPicks,
+      });
       intervalId = environment.setInterval(tick, pollMs);
       tick();
       return api;
@@ -363,6 +425,12 @@
     version: VERSION,
     create,
     receiptKey: RECEIPT_KEY,
+    runtime: {
+      parseRoom,
+      parseRosterCount,
+      isAutodraftActive,
+      readPlayerRow,
+    },
     _test: {
       normalize,
       parseRoom,

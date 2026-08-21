@@ -171,6 +171,28 @@ test("reads identity from the observed Yahoo player-row contract", () => {
   );
 });
 
+test("reads a team defense row whose observed Yahoo contract has no team line", () => {
+  const playerNode = {
+    innerText: "Chargers\nDEF\nBye 12",
+    getAttribute(name) {
+      return name === "data-id" ? "100024" : null;
+    },
+    querySelector() {
+      return null;
+    },
+  };
+  const row = {
+    querySelector(selector) {
+      return selector === ".ys-player[data-id]" ? playerNode : null;
+    },
+  };
+  const player = helpers.readPlayerRow(row);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify({ ...player, player: undefined, row: undefined })),
+    { yahooId: "100024", name: "Chargers", position: "DEF", team: "" },
+  );
+});
+
 test("accepts only the exact player row's enabled Draft action", () => {
   const targetRow = documentFixture({
     buttons: [button("Draft"), button("Draft", null, true)],
@@ -207,6 +229,22 @@ test("allows only one page-resident controller", () => {
   );
   first.start();
   first.stop();
+});
+
+test("refuses a room, seat, or roster total that differs from preflight", () => {
+  const environment = liveEnvironment();
+  assert.throws(
+    () => controllerApi.create({ targets: [{ yahooId: "31838" }], expectedRoomId: "9999999" }, environment),
+    /does not match/,
+  );
+  assert.throws(
+    () => controllerApi.create({ targets: [{ yahooId: "31838" }], expectedSeat: 7 }, environment),
+    /does not match/,
+  );
+  assert.throws(
+    () => controllerApi.create({ targets: [{ yahooId: "31838" }], expectedRosterTotal: 19 }, environment).start(),
+    /roster total does not match/,
+  );
 });
 
 test("clicks the exact row and confirms the roster transition", async (t) => {
@@ -254,24 +292,51 @@ test("waits for the turn banner after a non-atomic roster repaint", async (t) =>
 });
 
 test("confirms a pick when the snake wrap immediately opens a new owned turn", async (t) => {
+  let clickCount = 0;
   const environment = liveEnvironment({
     click: ({ document }) => {
+      clickCount += 1;
       document.title = "YOUR TURN, DRAFT NOW | Live NFL Draft";
       document.body.innerText = "YOUR TURN • ROUND 2, PICK 1\nYOUR TEAM (1/15)";
     },
   });
-  environment.clearInterval = () => {};
-  environment.setInterval = () => 1;
   const controller = controllerApi
     .create(
-      { targets: [{ yahooId: "31838" }], pollMs: 25, confirmationDeadlineMs: 200 },
+      {
+        targets: [{ yahooId: "31838" }],
+        pollMs: 25,
+        confirmationDeadlineMs: 200,
+        maxConfirmedPicks: 1,
+      },
       environment,
     )
     .start();
   t.after(() => controller.stop());
   await waitFor(() => controller.getStatus().confirmedPicks === 1);
+  await new Promise((resolve) => setTimeout(resolve, 80));
   assert.equal(controller.getStatus().failure, null);
+  assert.equal(controller.getStatus().state, "completed");
+  assert.equal(clickCount, 1);
   assert.equal(controller.exportReceipts().at(-1).kind, "pick_confirmed");
+});
+
+test("enforces the minimum available target count on the owned turn", async (t) => {
+  const environment = liveEnvironment();
+  const controller = controllerApi
+    .create(
+      {
+        targets: [{ yahooId: "31838" }],
+        pollMs: 25,
+        minimumAvailableTargets: 5,
+        failureAction: "stay",
+      },
+      environment,
+    )
+    .start();
+  t.after(() => controller.stop());
+  await waitFor(() => controller.getStatus().state === "failed");
+  assert.equal(controller.getStatus().failure.code, "fewer_than_5_approved_targets_available");
+  assert.equal(environment.location.assigned, null);
 });
 
 test("records failure and leaves the room when confirmation times out", async (t) => {
@@ -309,4 +374,26 @@ test("leaves the room even when the failure receipt cannot be written", async (t
   await waitFor(() => controller.getStatus().state === "failed");
   assert.equal(environment.location.assigned, "/f1/mock_lobby");
   assert.match(controller.getStatus().failure.receiptError, /Unexpected token|JSON/);
+});
+
+test("can fail closed without navigating away from a real draft surface", async (t) => {
+  const environment = liveEnvironment({ click() {} });
+  const controller = controllerApi
+    .create(
+      {
+        targets: [{ yahooId: "31838" }],
+        pollMs: 25,
+        confirmationDeadlineMs: 50,
+        expectedRoomId: "9369352",
+        expectedSeat: 8,
+        expectedRosterTotal: 15,
+        failureAction: "stay",
+      },
+      environment,
+    )
+    .start();
+  t.after(() => controller.stop());
+  await waitFor(() => controller.getStatus().state === "failed");
+  assert.equal(controller.getStatus().failure.code, "pick_confirmation_timeout");
+  assert.equal(environment.location.assigned, null);
 });
