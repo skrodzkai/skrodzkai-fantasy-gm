@@ -57,9 +57,25 @@ The separate `real_league_19_idp` configuration is deliberately marked unverifie
 
 The runner exposes a one-way `halt()` kill switch. A halted runner cannot resume; a new, explicitly armed runner is required.
 
+## Local Chrome extension
+
+The repository root is also a dependency-free Manifest V3 extension. Load the repository directory as an unpacked extension in Chrome. It requests no general extension permissions and runs only on Yahoo's public mock waiting room and NFL draftclient paths.
+
+The compact `SKRODZKai` control rail must be armed from `/f1/mock_waiting`. Arming records a 30-minute, tab-scoped token containing the programmatically observed mock room, seat, 12-team count, and exact public 15-round roster shape. The draftclient refuses to start without that matching token, so opening the real league draft directly cannot arm or execute this public-mock runner.
+
+On the matching draftclient page the extension:
+
+1. Rechecks the exact room, seat, empty `0/15` roster, Autodraft-off state, and position filters.
+2. Binds current Yahoo defense IDs to the local specialist rankings and restores `All Positions` before the draft begins.
+3. Starts the existing deterministic runner inside the page, removing model and browser-control latency from the pick clock.
+4. Exposes a one-way `HALT` control and a JSON `EXPORT` containing room-scoped extension, runner, and controller receipts.
+
+The extension remains mock-only. The unverified 19-round IDP configuration is still non-executable, and this package grants no real-league authority.
+
 ## Verification
 
 ```bash
 node --test controller/yahoo-draft-controller.test.mjs
 node --test controller/yahoo-mock-runner.test.mjs
+node --test extension/yahoo-mock-extension.test.mjs
 ```
