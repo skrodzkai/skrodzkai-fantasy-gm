@@ -72,10 +72,30 @@ On the matching draftclient page the extension:
 
 The extension remains mock-only. The unverified 19-round IDP configuration is still non-executable, and this package grants no real-league authority.
 
+## Draft-night analysis
+
+The dependency-free scripts under `analysis/` keep model work outside the live
+click path:
+
+- `opponent-calibration.mjs` trains a recency-weighted, owner-to-room-shrunk
+  position-demand model and enables it only when an untouched season plus a
+  manager-clustered interval beat the room baseline. Its CLI requires Joe's
+  owner ID to be excluded from every stage.
+- `opponent-window.mjs` converts an observed owner-to-seat order into exact
+  snake-window position pressure without exposing raw owner identities in its
+  output.
+- `draft-committee.mjs` creates compact, packet-hashed candidate ballots and
+  accepts consensus only when both responses are valid, available, and inside
+  the deadline. Otherwise the deterministic baseline order is unchanged.
+
+None of these scripts click Yahoo or create real-draft authority. A late model
+response is advisory evidence only and never delays the extension.
+
 ## Verification
 
 ```bash
 node --test controller/yahoo-draft-controller.test.mjs
 node --test controller/yahoo-mock-runner.test.mjs
 node --test extension/yahoo-mock-extension.test.mjs
+node --test analysis/*.test.mjs
 ```

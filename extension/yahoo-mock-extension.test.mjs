@@ -71,12 +71,12 @@ test("rejects the wrong team count, roster shape, path, or missing seat", () => 
 test("binds an arm token to one room and seat with a fixed expiration", () => {
   const fixture = waitingFixture();
   const snapshot = helpers.parseWaitingRoom(fixture.document, fixture.location);
-  const token = helpers.makePreflight(snapshot, 1_000);
-  assert.equal(token.expiresAt, 1_801_000);
-  assert.equal(helpers.validateDraftPreflight(token, { roomId: "9391926", seat: 7 }, 1_001), null);
-  assert.equal(helpers.validateDraftPreflight(token, { roomId: "9391926", seat: 6 }, 1_001), "mock_room_or_seat_changed");
-  assert.equal(helpers.validateDraftPreflight(token, { roomId: "9391927", seat: 7 }, 1_001), "mock_room_or_seat_changed");
-  assert.equal(helpers.validateDraftPreflight(token, { roomId: "9391926", seat: 7 }, token.expiresAt), "mock_arm_expired");
+  const armRecord = helpers.makePreflight(snapshot, 1_000);
+  assert.equal(armRecord.expiresAt, 1_801_000);
+  assert.equal(helpers.validateDraftPreflight(armRecord, { roomId: "9391926", seat: 7 }, 1_001), null);
+  assert.equal(helpers.validateDraftPreflight(armRecord, { roomId: "9391926", seat: 6 }, 1_001), "mock_room_or_seat_changed");
+  assert.equal(helpers.validateDraftPreflight(armRecord, { roomId: "9391927", seat: 7 }, 1_001), "mock_room_or_seat_changed");
+  assert.equal(helpers.validateDraftPreflight(armRecord, { roomId: "9391926", seat: 7 }, armRecord.expiresAt), "mock_arm_expired");
   assert.equal(helpers.validateDraftPreflight(null, { roomId: "9391926", seat: 7 }, 1_001), "mock_waiting_room_arm_required");
 });
 

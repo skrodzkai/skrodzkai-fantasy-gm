@@ -321,9 +321,9 @@
         environment.sessionStorage.removeItem(PREFLIGHT_KEY);
         writeReceipt(environment.localStorage, { kind: "mock_disarmed", roomId: snapshot.roomId, seat: snapshot.seat });
       } else {
-        const token = makePreflight(snapshot);
-        environment.sessionStorage.setItem(PREFLIGHT_KEY, JSON.stringify(token));
-        writeReceipt(environment.localStorage, { kind: "mock_armed", roomId: snapshot.roomId, seat: snapshot.seat, expiresAt: token.expiresAt });
+        const armRecord = makePreflight(snapshot);
+        environment.sessionStorage.setItem(PREFLIGHT_KEY, JSON.stringify(armRecord));
+        writeReceipt(environment.localStorage, { kind: "mock_armed", roomId: snapshot.roomId, seat: snapshot.seat, expiresAt: armRecord.expiresAt });
       }
       update();
     });
@@ -343,8 +343,8 @@
     const room = controllerApi.runtime.parseRoom(environment.location.pathname);
     if (!room) throw new Error("public_mock_draft_room_missing");
     enableExport(environment, rail, room);
-    const token = readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
-    const preflightError = validateDraftPreflight(token, room);
+    const armRecord = readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
+    const preflightError = validateDraftPreflight(armRecord, room);
     if (preflightError) {
       writeReceipt(environment.localStorage, { kind: "extension_locked", roomId: room.roomId, seat: room.seat, failure: preflightError });
       rail.render("bad", "LOCKED", `${preflightError} · arm from Yahoo's public mock waiting room`);
@@ -357,15 +357,15 @@
       configName: "public_mock_15",
       expectedRoomId: room.roomId,
       expectedSeat: room.seat,
-      observedTeamCount: token.observedTeamCount,
-      observedRosterSlots: token.observedRosterSlots,
+      observedTeamCount: armRecord.observedTeamCount,
+      observedRosterSlots: armRecord.observedRosterSlots,
       minimumFallbacks: 5,
       pollMs: 25,
       filterDeadlineMs: 5000,
       board,
       onAlert: ({ state, failure, reason }) => rail.render("bad", state, failure?.code ?? reason ?? "runner stopped"),
     }, environment);
-    environment[GLOBAL_KEY] = { runner, room, token };
+    environment[GLOBAL_KEY] = { runner, room, token: armRecord };
     rail.controls.halt.disabled = false;
     enableExport(environment, rail, room, runner);
     rail.controls.halt.addEventListener("click", () => {
