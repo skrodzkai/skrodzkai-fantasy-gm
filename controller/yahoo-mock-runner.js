@@ -1,10 +1,11 @@
 (function installYahooMockRunner(root) {
   "use strict";
 
-  const VERSION = "1.0.1";
+  const VERSION = "1.1.0";
   const GLOBAL_KEY = "__skrodzkaiYahooMockRunnerV1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-runner-receipts-v1";
   const OFFENSE = ["QB", "RB", "WR", "TE"];
+  const MATERIAL_EDGE_POINTS = 15;
 
   const CONFIGS = Object.freeze({
     public_mock_15: Object.freeze({
@@ -105,18 +106,31 @@
     if (!Array.isArray(board) || board.length === 0) throw new Error("board must be a nonempty ranked array");
     const seen = new Set();
     return board.map((player, index) => {
+      const position = normalize(player.position);
       const copy = {
         yahooId: player.yahooId == null ? "" : String(player.yahooId),
         name: String(player.name ?? ""),
-        position: normalize(player.position),
+        position,
         team: normalize(player.team),
         rank: Number(player.rank ?? index + 1),
       };
       if (!copy.yahooId) throw new Error(`board player ${index} requires a verified Yahoo ID`);
-      if (!OFFENSE.includes(copy.position) && !["K", "DEF"].includes(copy.position)) {
+      if (!OFFENSE.includes(position) && !["K", "DEF"].includes(position)) {
         throw new Error(`board player ${index} has unsupported public-mock position`);
       }
       if (!Number.isFinite(copy.rank)) throw new Error(`board player ${index} has invalid rank`);
+      if (OFFENSE.includes(position)) {
+        const vor = Number(player.vor);
+        const firstEndpoint = Number(player.adpLow ?? player.adp_low);
+        const secondEndpoint = Number(player.adpHigh ?? player.adp_high);
+        if (!Number.isFinite(vor)) throw new Error(`board player ${index} has invalid VORP`);
+        if (!Number.isFinite(firstEndpoint) || !Number.isFinite(secondEndpoint)) {
+          throw new Error(`board player ${index} requires a finite observed ADP range`);
+        }
+        copy.vor = vor;
+        copy.adpEarliest = Math.min(firstEndpoint, secondEndpoint);
+        copy.adpLatest = Math.max(firstEndpoint, secondEndpoint);
+      }
       const key = boardKey(copy);
       if (seen.has(key)) throw new Error(`duplicate board player ${key}`);
       seen.add(key);
@@ -132,27 +146,197 @@
       .filter(Boolean);
   }
 
-  function buildTargets({ round, picks, board, availablePlayers, minimum = 5, config = CONFIGS.public_mock_15 }) {
+  function overallPick(round, seat, teams = 12) {
+    if (!Number.isInteger(round) || round < 1) throw new Error("round must be a positive integer");
+    if (!Number.isInteger(seat) || seat < 1 || seat > teams) throw new Error("seat is outside the draft");
+    return round % 2 === 1 ? (round - 1) * teams + seat : round * teams - seat + 1;
+  }
+
+  function turnWindow(round, seat, teams = 12) {
+    const currentPick = overallPick(round, seat, teams);
+    if (round >= CONFIGS.public_mock_15.rounds) {
+      return { currentPick, nextPick: null, interveningOpponentPicks: null };
+    }
+    const nextPick = overallPick(round + 1, seat, teams);
+    return { currentPick, nextPick, interveningOpponentPicks: nextPick - currentPick - 1 };
+  }
+
+  function survivalBucket(player, nextPick, interveningOpponentPicks) {
+    if (interveningOpponentPicks === 0) return "certain_through_wrap";
+    if (!Number.isFinite(nextPick)) return "terminal";
+    if (player.adpLatest < nextPick) return "likely_gone";
+    if (player.adpEarliest > nextPick) return "likely_there";
+    return "ambiguous";
+  }
+
+  function byVorThenRank(left, right) {
+    return right.vor - left.vor || left.rank - right.rank;
+  }
+
+  function compactPlayer(player) {
+    if (!player) return null;
+    return {
+      yahooId: player.yahooId,
+      position: player.position,
+      rank: player.rank,
+      vor: player.vor,
+      adpEarliest: player.adpEarliest,
+      adpLatest: player.adpLatest,
+    };
+  }
+
+  function scorePositionLeaders({ round, seat, picks, pool, materialEdgePoints, config }) {
+    const allowed = allowedPositions(round, picks, config);
+    const window = turnWindow(round, seat, config.teams);
+    const counts = positionCounts(picks);
+    const rbwrBefore = (counts.RB ?? 0) + (counts.WR ?? 0);
+    const floorRequired = round <= 4 ? round - 1 : 0;
+    const leaders = [];
+
+    for (const position of allowed) {
+      const candidates = pool.filter((player) => player.position === position);
+      if (!candidates.length) continue;
+      if (["DEF", "K"].includes(position)) {
+        leaders.push({
+          player: candidates.sort((left, right) => left.rank - right.rank)[0],
+          comparator: null,
+          bucket: "specialist",
+          rawScore: 0,
+          adjustedScore: 0,
+        });
+        continue;
+      }
+
+      candidates.sort(byVorThenRank);
+      const player = candidates[0];
+      if (round === 13) {
+        leaders.push({
+          player,
+          comparator: null,
+          bucket: "terminal_offense",
+          rawScore: player.vor,
+          adjustedScore: player.vor,
+        });
+        continue;
+      }
+
+      const bucket = survivalBucket(player, window.nextPick, window.interveningOpponentPicks);
+      let comparator = player;
+      if (!["certain_through_wrap", "likely_there"].includes(bucket)) {
+        comparator = candidates.slice(1).find((candidate) =>
+          survivalBucket(candidate, window.nextPick, window.interveningOpponentPicks) !== "likely_gone"
+        );
+        if (!comparator) throw new Error(`next_turn_comparator_missing:${position}`);
+      }
+      const rawScore = Math.max(0, player.vor - comparator.vor);
+      const adjustedScore = bucket === "likely_gone"
+        ? rawScore
+        : bucket === "ambiguous"
+          ? Math.max(0, rawScore - materialEdgePoints)
+          : 0;
+      leaders.push({ player, comparator, bucket, rawScore, adjustedScore });
+    }
+
+    if (!leaders.length) throw new Error("no_position_leaders_available");
+    const rbwrScores = leaders
+      .filter((leader) => ["RB", "WR"].includes(leader.player.position))
+      .map((leader) => leader.adjustedScore);
+    const bestRbwrScore = rbwrScores.length ? Math.max(...rbwrScores) : null;
+
+    for (const leader of leaders) {
+      const isRbwr = ["RB", "WR"].includes(leader.player.position);
+      const postPickRbwr = rbwrBefore + (isRbwr ? 1 : 0);
+      const floorPass = postPickRbwr >= floorRequired;
+      const floorException = round === 4 && !floorPass && !isRbwr && bestRbwrScore != null &&
+        leader.adjustedScore >= bestRbwrScore + materialEdgePoints;
+      leader.postPickRbwr = postPickRbwr;
+      leader.floorRequired = floorRequired;
+      leader.floorPass = floorPass;
+      leader.floorException = floorException;
+      leader.eligible = floorPass || floorException;
+    }
+
+    const ranked = leaders
+      .filter((leader) => leader.eligible)
+      .sort((left, right) =>
+        right.adjustedScore - left.adjustedScore || left.player.rank - right.player.rank
+      );
+    if (!ranked.length) throw new Error("roster_floor_blocked_all_positions");
+    return { window, leaders, ranked, bestRbwrScore, floorRequired, rbwrBefore };
+  }
+
+  function summarizeDecision(scored, chosen, materialEdgePoints) {
+    return {
+      currentPick: scored.window.currentPick,
+      nextPick: scored.window.nextPick,
+      interveningOpponentPicks: scored.window.interveningOpponentPicks,
+      materialEdgePoints,
+      rbwrBefore: scored.rbwrBefore,
+      floorRequired: scored.floorRequired,
+      bestRbwrScore: scored.bestRbwrScore,
+      positionLeaders: scored.leaders.map((leader) => ({
+        player: compactPlayer(leader.player),
+        comparator: compactPlayer(leader.comparator),
+        bucket: leader.bucket,
+        rawScore: leader.rawScore,
+        adjustedScore: leader.adjustedScore,
+        postPickRbwr: leader.postPickRbwr,
+        floorPass: leader.floorPass,
+        floorException: leader.floorException,
+        eligible: leader.eligible,
+      })),
+      chosenYahooId: chosen.player.yahooId,
+    };
+  }
+
+  function buildDecisionLadder({
+    round,
+    seat,
+    picks,
+    board,
+    availablePlayers,
+    minimum = 5,
+    materialEdgePoints = MATERIAL_EDGE_POINTS,
+    config = CONFIGS.public_mock_15,
+  }) {
     const allowed = new Set(allowedPositions(round, picks, config));
     const used = new Set(Array.from(picks ?? [], boardKey));
     const availableById = new Map(
       Array.from(availablePlayers ?? [], (player) => [String(player.yahooId), player]),
     );
-    const targets = board
+    let pool = board
       .filter((player) => allowed.has(player.position))
       .filter((player) => !used.has(boardKey(player)))
-      .filter((player) => availableById.has(player.yahooId))
-      .sort((left, right) => left.rank - right.rank)
-      .map((player) => ({
-        yahooId: player.yahooId,
-        name: availableById.get(player.yahooId).name,
-        position: player.position,
-        team: availableById.get(player.yahooId).team,
-      }));
-    if (targets.length < minimum) {
+      .filter((player) => availableById.has(player.yahooId));
+    if (pool.length < minimum) {
       throw new Error(`fewer_than_${minimum}_eligible_targets`);
     }
-    return targets;
+
+    const selected = [];
+    let firstDecision = null;
+    while (selected.length < minimum) {
+      const scored = scorePositionLeaders({
+        round,
+        seat,
+        picks,
+        pool,
+        materialEdgePoints,
+        config,
+      });
+      const chosen = scored.ranked[0];
+      if (!firstDecision) firstDecision = summarizeDecision(scored, chosen, materialEdgePoints);
+      selected.push(chosen.player);
+      pool = pool.filter((player) => player.yahooId !== chosen.player.yahooId);
+    }
+
+    const targets = selected.map((player) => ({
+      yahooId: player.yahooId,
+      name: availableById.get(player.yahooId).name,
+      position: player.position,
+      team: availableById.get(player.yahooId).team,
+    }));
+    firstDecision.targetYahooIds = targets.map((target) => target.yahooId);
+    return { targets, decision: firstDecision };
   }
 
   function findFilter(documentRef, label) {
@@ -214,6 +398,7 @@
     const minimumFallbacks = Number(options.minimumFallbacks ?? 5);
     const pollMs = Number(options.pollMs ?? 25);
     const filterDeadlineMs = Number(options.filterDeadlineMs ?? 5000);
+    const materialEdgePoints = MATERIAL_EDGE_POINTS;
     const board = validateBoard(options.board);
     if (!expectedRoomId || !Number.isInteger(expectedSeat) || expectedSeat < 1 || expectedSeat > config.teams) {
       throw new Error("expected room and seat are required");
@@ -221,7 +406,12 @@
     if (observedTeamCount !== config.teams) throw new Error("mock room must contain exactly 12 teams");
     if (!sameSlots(observedRosterSlots, config.rosterSlots)) throw new Error("mock roster shape does not match public_mock_15");
     if (!Number.isInteger(minimumFallbacks) || minimumFallbacks < 5) throw new Error("minimumFallbacks must be at least 5");
-    if (pollMs < 25 || filterDeadlineMs <= 0) throw new Error("invalid runner timing configuration");
+    if (pollMs < 25 || filterDeadlineMs <= 0) {
+      throw new Error("invalid runner timing configuration");
+    }
+    if (typeof controllerApi.runtime?.readOwnedTurn !== "function") {
+      throw new Error("controller owned-turn runtime hook is required");
+    }
 
     const room = controllerApi.runtime.parseRoom(locationRef.pathname);
     if (!room || room.roomId !== expectedRoomId || room.seat !== expectedSeat) {
@@ -290,7 +480,7 @@
       return new Promise((resolve) => environment.setTimeout(resolve, milliseconds));
     }
 
-    async function targetsAfterFilter(round, label) {
+    async function targetsAfterFilter(turn, label) {
       const startedAt = Date.now();
       let lastEligibilityError = null;
       setFilter(documentRef, environment, label);
@@ -298,15 +488,17 @@
         if (state !== "running") throw new Error("runner_not_running");
         try {
           const availablePlayers = readAvailablePlayers(documentRef, controllerApi);
-          const targets = buildTargets({
-            round,
+          const resolved = buildDecisionLadder({
+            round: turn.round,
+            seat: expectedSeat,
             picks,
             board,
             availablePlayers,
             minimum: minimumFallbacks,
+            materialEdgePoints,
             config,
           });
-          return { targets, filterReadyMs: Date.now() - startedAt };
+          return { ...resolved, filterReadyMs: Date.now() - startedAt };
         } catch (error) {
           if (!String(error?.message ?? error).startsWith("fewer_than_")) throw error;
           lastEligibilityError = String(error.message);
@@ -316,18 +508,23 @@
       throw new Error(lastEligibilityError ?? `position_filter_timeout:${label}`);
     }
 
-    async function armRound() {
+    async function resolveOwnedTurn(turn) {
       if (state !== "running") return;
-      const round = picks.length + 1;
-      const filterLabel = filterLabelForRound(round);
-      const { targets, filterReadyMs } = await targetsAfterFilter(round, filterLabel);
+      const expectedRound = picks.length + 1;
+      const expectedPick = overallPick(expectedRound, expectedSeat, config.teams);
+      if (turn.round !== expectedRound || turn.pick !== expectedPick) {
+        throw new Error(`owned_turn_mismatch:expected_R${expectedRound}P${expectedPick}:observed_${turn.label}`);
+      }
+      const filterLabel = filterLabelForRound(turn.round);
+      const { targets, decision, filterReadyMs } = await targetsAfterFilter(turn, filterLabel);
       if (state !== "running") return;
-      receipt("runner_round_armed", {
-        round,
+      receipt("runner_turn_resolved", {
+        turn: turn.label,
         filterLabel,
         filterReadyMs,
         targetCount: targets.length,
-        allowedPositions: allowedPositions(round, picks, config),
+        allowedPositions: allowedPositions(turn.round, picks, config),
+        decision,
       });
       const nextController = controllerApi.create(
         {
@@ -353,7 +550,21 @@
     }
 
     async function advance() {
-      if (busy || state !== "running" || !currentController) return;
+      if (busy || state !== "running") return;
+      if (!currentController) {
+        const turn = controllerApi.runtime.readOwnedTurn(documentRef);
+        if (!turn) return;
+        busy = true;
+        try {
+          await resolveOwnedTurn(turn);
+        } catch (error) {
+          fail(String(error?.message ?? error));
+        } finally {
+          busy = false;
+        }
+        return;
+      }
+
       const status = currentController.getStatus();
       if (status.state === "failed") return fail("pick_controller_failed", { controllerFailure: status.failure });
       if (status.confirmedPicks > 1) return fail("pick_count_contract_failed", { confirmedPicks: status.confirmedPicks });
@@ -396,7 +607,6 @@
           receipt("runner_completed", { picks: picks.length, counts: positionCounts(picks) });
           return;
         }
-        await armRound();
       } catch (error) {
         fail(String(error?.message ?? error));
       } finally {
@@ -426,9 +636,11 @@
         observedTeamCount,
         observedRosterSlots,
         minimumFallbacks,
+        materialEdgePoints,
+        strategy: "position_leader_dropoff_to_next_turn",
       });
       monitorId = environment.setInterval(advance, pollMs);
-      armRound().catch((error) => fail(String(error?.message ?? error)));
+      advance();
       return api;
     }
 
@@ -509,7 +721,11 @@
       allowedPositions,
       filterLabelForRound,
       validateBoard,
-      buildTargets,
+      overallPick,
+      turnWindow,
+      survivalBucket,
+      scorePositionLeaders,
+      buildDecisionLadder,
       validateCompletedRoster,
     },
   };

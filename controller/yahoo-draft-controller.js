@@ -1,7 +1,7 @@
 (function installYahooDraftController(root) {
   "use strict";
 
-  const VERSION = "1.1.1";
+  const VERSION = "1.1.2";
   const GLOBAL_KEY = "__skrodzkaiYahooDraftControllerV1";
   const RECEIPT_KEY = "skrodzkai-yahoo-draft-controller-receipts-v1";
   const POSITIONS = new Set(["QB", "RB", "WR", "TE", "K", "DEF", "LB", "DB", "DE"]);
@@ -428,6 +428,7 @@
     runtime: {
       parseRoom,
       parseRosterCount,
+      readOwnedTurn,
       isAutodraftActive,
       readPlayerRow,
     },

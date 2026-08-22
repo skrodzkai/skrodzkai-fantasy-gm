@@ -45,7 +45,13 @@ The controller persists receipts in Yahoo-origin local storage under `skrodzkai-
 
 ## Public-mock qualification runner
 
-`yahoo-mock-runner.js` layers a roster-aware 15-round public-mock policy over the exact-row controller. It requires a programmatically observed 12-team room, expected seat, empty 15-player roster, exact public-mock roster shape, and five visible Yahoo-ID fallbacks before each turn. It switches Yahoo to Team Defenses for Round 14 and Kickers for Round 15, disallows QB2/TE2, prevents the prior seven-WR roster, stores a durable receipt before arming the next round, and never navigates away on failure.
+`yahoo-mock-runner.js` layers a roster-aware 15-round public-mock policy over the exact-row controller. It requires a programmatically observed 12-team room, expected seat, empty 15-player roster, exact public-mock roster shape, and five visible Yahoo-ID fallbacks. Offensive board entries must include finite VORP and both endpoints of an observed market-ADP range; DEF and K retain static rank ordering.
+
+The runner waits for the controller's exact owned-turn signal before reading the live rows and resolving the strategy. For Rounds 1–12 it compares the highest-VORP available player at each eligible position with the best same-position player expected to remain at the next snake turn. Zero-opponent wraps are treated as certain availability. Otherwise the observed ADP range classifies the leader as likely gone, likely available, or ambiguous. An ambiguous gap must clear the 15-point material-edge allowance, representing one point per week across the 15-week fantasy season.
+
+Through Round 4, the hypothetical post-pick roster must contain at least `round - 1` RB/WR players. The exception is evaluated only in Round 4, when a second QB/TE may break that final floor if its adjusted drop-off beats the best RB/WR by the same 15-point material edge; allowing the exception earlier can create an unrecoverable Round 4 deficit. This preserves an early elite-TE selection when the actual scarcity gap supports it without hardcoding an elite headcount. Round 13 uses terminal offensive VORP because the remaining turns are specialist-only. Rounds 14 and 15 switch Yahoo to Team Defenses and Kickers.
+
+Fallbacks are built iteratively: after choosing a position leader, the runner removes it hypothetically and recomputes the position leaders. The compact per-turn receipt records the snake window, one leader and comparator per position, survival bucket, drop-off scores, roster-floor result, chosen Yahoo ID, and final target IDs. It does not persist the full live board. The QB1/TE1 limits, balanced offense requirement, exact-row click contract, and non-navigating failure behavior remain unchanged.
 
 The separate `real_league_19_idp` configuration is deliberately marked unverified and cannot be executed by the runner. Public mocks do not qualify the real room's 19-round or IDP behavior.
 

@@ -7,6 +7,9 @@ const source = await readFile(new URL("./yahoo-mock-runner.js", import.meta.url)
 const controllerSource = await readFile(new URL("./yahoo-draft-controller.js", import.meta.url), "utf8");
 
 function loadRunner(controllerApi = {}) {
+  if (controllerApi.runtime && typeof controllerApi.runtime.readOwnedTurn !== "function") {
+    controllerApi.runtime.readOwnedTurn = () => ({ label: "R1P6", round: 1, pick: 6 });
+  }
   const context = {
     clearInterval,
     console,
@@ -32,14 +35,21 @@ const runnerApi = loadRunner();
 const helpers = runnerApi._test;
 const mockConfig = runnerApi.configs.public_mock_15;
 
-function player(position, number, rank) {
-  return {
+function player(position, number, rank, overrides = {}) {
+  const candidate = {
     yahooId: `${position}-${number}`,
     name: `${position} Player ${number}`,
     position,
     team: position === "DEF" ? "" : "TST",
     rank,
+    ...overrides,
   };
+  if (["QB", "RB", "WR", "TE"].includes(position)) {
+    candidate.vor ??= 300 - rank;
+    candidate.adpLow ??= rank + 150;
+    candidate.adpHigh ??= rank + 170;
+  }
+  return candidate;
 }
 
 function genericBoard() {
@@ -99,15 +109,16 @@ test("prevents the early wide-receiver pileup until offensive starters and FLEX 
   assert.deepEqual(Array.from(helpers.allowedPositions(9, picks, mockConfig)), ["RB", "WR"]);
 });
 
-test("the public policy always exposes at least five candidates through round 13", () => {
+test("the public policy always exposes at least five strategic fallbacks through round 13", () => {
   const board = helpers.validateBoard(genericBoard());
   const picks = [];
   for (let round = 1; round <= 13; round += 1) {
     const availablePlayers = board.filter(
       (candidate) => !picks.some((pick) => pick.yahooId === candidate.yahooId),
     );
-    const targets = helpers.buildTargets({
+    const { targets } = helpers.buildDecisionLadder({
       round,
+      seat: 6,
       picks,
       board,
       availablePlayers,
@@ -129,6 +140,154 @@ test("reserves the public mock specialist filters for rounds 14 and 15", () => {
   assert.equal(helpers.filterLabelForRound(15), "Kickers");
   assert.deepEqual(Array.from(helpers.allowedPositions(14, [], mockConfig)), ["DEF"]);
   assert.deepEqual(Array.from(helpers.allowedPositions(15, [], mockConfig)), ["K"]);
+});
+
+test("computes exact snake windows, including both zero-opponent wraps", () => {
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(helpers.turnWindow(2, 1, 12))),
+    { currentPick: 24, nextPick: 25, interveningOpponentPicks: 0 },
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(helpers.turnWindow(1, 12, 12))),
+    { currentPick: 12, nextPick: 13, interveningOpponentPicks: 0 },
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(helpers.turnWindow(2, 3, 12))),
+    { currentPick: 22, nextPick: 27, interveningOpponentPicks: 4 },
+  );
+  assert.equal(helpers.overallPick(3, 7, 12), 31);
+  assert.equal(helpers.overallPick(4, 10, 12), 39);
+});
+
+test("uses observed ADP boundaries without pretending equality is certainty", () => {
+  const candidate = { adpEarliest: 20, adpLatest: 30 };
+  assert.equal(helpers.survivalBucket(candidate, 19, 10), "likely_there");
+  assert.equal(helpers.survivalBucket(candidate, 20, 10), "ambiguous");
+  assert.equal(helpers.survivalBucket(candidate, 30, 10), "ambiguous");
+  assert.equal(helpers.survivalBucket(candidate, 31, 10), "likely_gone");
+  assert.equal(helpers.survivalBucket(candidate, 31, 0), "certain_through_wrap");
+});
+
+test("scores only the highest-VORP player at a position even when a lower player looks urgent", () => {
+  const board = helpers.validateBoard([
+    player("TE", 1, 1, { vor: 100, adpLow: 50, adpHigh: 60 }),
+    player("TE", 2, 2, { vor: 80, adpLow: 10, adpHigh: 15 }),
+    player("TE", 3, 3, { vor: 60, adpLow: 55, adpHigh: 70 }),
+    player("RB", 1, 4, { vor: 90, adpLow: 10, adpHigh: 15 }),
+    player("RB", 2, 5, { vor: 70, adpLow: 55, adpHigh: 70 }),
+    player("WR", 1, 6, { vor: 85, adpLow: 10, adpHigh: 15 }),
+    player("WR", 2, 7, { vor: 75, adpLow: 55, adpHigh: 70 }),
+    player("QB", 1, 8, { vor: 70, adpLow: 10, adpHigh: 15 }),
+    player("QB", 2, 9, { vor: 65, adpLow: 55, adpHigh: 70 }),
+  ]);
+  const scored = helpers.scorePositionLeaders({
+    round: 3,
+    seat: 3,
+    picks: [player("RB", 90, 90), player("WR", 90, 91)],
+    pool: board,
+    materialEdgePoints: 15,
+    config: mockConfig,
+  });
+  const tightEnd = scored.leaders.find((leader) => leader.player.position === "TE");
+  assert.equal(tightEnd.player.yahooId, "TE-1");
+  assert.equal(tightEnd.bucket, "likely_there");
+  assert.equal(tightEnd.adjustedScore, 0);
+});
+
+test("selects, defers, and rejects elite TE from the actual gap and survival context", () => {
+  function boardFor(teRange, teVor = 110) {
+    return helpers.validateBoard([
+      player("TE", 1, 1, { vor: teVor, adpLow: teRange[0], adpHigh: teRange[1] }),
+      player("TE", 2, 20, { vor: 70, adpLow: 55, adpHigh: 70 }),
+      player("RB", 1, 2, { vor: 100, adpLow: 10, adpHigh: 20 }),
+      player("RB", 2, 21, { vor: 80, adpLow: 55, adpHigh: 70 }),
+      player("WR", 1, 3, { vor: 95, adpLow: 10, adpHigh: 20 }),
+      player("WR", 2, 22, { vor: 80, adpLow: 55, adpHigh: 70 }),
+      player("QB", 1, 4, { vor: 80, adpLow: 10, adpHigh: 20 }),
+      player("QB", 2, 23, { vor: 75, adpLow: 55, adpHigh: 70 }),
+    ]);
+  }
+  const base = {
+    round: 3,
+    seat: 3,
+    picks: [player("RB", 90, 90), player("WR", 90, 91)],
+    availablePlayers: null,
+    minimum: 1,
+    materialEdgePoints: 15,
+    config: mockConfig,
+  };
+  const decide = (board) => helpers.buildDecisionLadder({
+    ...base,
+    board,
+    availablePlayers: board,
+  }).targets[0].position;
+  assert.equal(decide(boardFor([10, 20])), "TE", "large TE gap should win when the player is likely gone");
+  assert.equal(decide(boardFor([55, 70])), "RB", "elite TE should defer when the same player is likely available");
+  assert.equal(decide(boardFor([30, 55], 82)), "RB", "an ambiguous sub-material TE gap should not win");
+});
+
+test("enforces every early RB/WR floor boundary and only permits a material exception", () => {
+  const makeBoard = (teVor) => helpers.validateBoard([
+    player("TE", 1, 1, { vor: teVor, adpLow: 10, adpHigh: 20 }),
+    player("TE", 2, 30, { vor: 70, adpLow: 55, adpHigh: 70 }),
+    player("RB", 1, 2, { vor: 100, adpLow: 10, adpHigh: 20 }),
+    player("RB", 2, 31, { vor: 70, adpLow: 55, adpHigh: 70 }),
+    player("WR", 1, 3, { vor: 95, adpLow: 10, adpHigh: 20 }),
+    player("WR", 2, 32, { vor: 75, adpLow: 55, adpHigh: 70 }),
+    player("QB", 1, 4, { vor: 80, adpLow: 10, adpHigh: 20 }),
+    player("QB", 2, 33, { vor: 75, adpLow: 55, adpHigh: 70 }),
+  ]);
+  const weakException = helpers.scorePositionLeaders({
+    round: 3,
+    seat: 3,
+    picks: [player("RB", 90, 90)],
+    pool: makeBoard(110),
+    materialEdgePoints: 15,
+    config: mockConfig,
+  });
+  const blockedTe = weakException.leaders.find((leader) => leader.player.position === "TE");
+  assert.equal(blockedTe.floorRequired, 2);
+  assert.equal(blockedTe.postPickRbwr, 1);
+  assert.equal(blockedTe.floorException, false);
+  assert.equal(weakException.ranked[0].player.position, "RB");
+
+  const materialException = helpers.scorePositionLeaders({
+    round: 4,
+    seat: 3,
+    picks: [player("RB", 90, 90), player("WR", 90, 91), player("QB", 90, 92)],
+    pool: makeBoard(120),
+    materialEdgePoints: 15,
+    config: mockConfig,
+  });
+  const allowedTe = materialException.leaders.find((leader) => leader.player.position === "TE");
+  assert.equal(allowedTe.floorException, true);
+  assert.equal(materialException.ranked[0].player.position, "TE");
+
+  const impossibleEarlyException = helpers.scorePositionLeaders({
+    round: 3,
+    seat: 3,
+    picks: [player("RB", 90, 90)],
+    pool: makeBoard(140),
+    materialEdgePoints: 15,
+    config: mockConfig,
+  });
+  assert.equal(
+    impossibleEarlyException.leaders.find((leader) => leader.player.position === "TE").floorException,
+    false,
+  );
+
+  for (let round = 1; round <= 4; round += 1) {
+    const picks = Array.from({ length: Math.max(0, round - 2) }, (_, index) => player("RB", 80 + index, 80 + index));
+    const scored = helpers.scorePositionLeaders({
+      round,
+      seat: 3,
+      picks,
+      pool: makeBoard(80),
+      materialEdgePoints: 15,
+      config: mockConfig,
+    });
+    assert.equal(scored.floorRequired, round - 1);
+  }
 });
 
 test("accepts a complete balanced public-mock roster and rejects the prior seven-WR shape", () => {
@@ -251,6 +410,7 @@ test("kill switch leaves Autodraft off and cannot resume without creating a new 
       expectedSeat: 6,
       observedTeamCount: 12,
       observedRosterSlots: mockConfig.rosterSlots,
+      materialEdgePoints: 18,
     },
     environment,
   ).start();
@@ -261,6 +421,8 @@ test("kill switch leaves Autodraft off and cannot resume without creating a new 
   assert.equal(runner.halt(), runner);
   assert.throws(() => runner.start(), /cannot start/);
   const halted = runner.exportReceipts().at(-1);
+  const started = runner.exportReceipts().find((entry) => entry.kind === "runner_started");
+  assert.equal(started.materialEdgePoints, 15, "production edge must stay locked at 15");
   assert.equal(halted.kind, "runner_halted");
   assert.equal(halted.autodraftActive, false);
   assert.equal(halted.draftClicks, 1);
@@ -379,6 +541,102 @@ test("fails when the confirmed Yahoo roster count drifts from the runner pick co
   await waitFor(() => runner.getStatus().state === "failed");
   assert.equal(runner.getStatus().failure.code, "roster_drift");
   assert.equal(stopped, true);
+});
+
+test("resolves the strategy at the owned turn after opponents change a comparator", async () => {
+  const board = [];
+  let rank = 1;
+  const addPosition = (position, topVor, secondVor, thirdVor) => {
+    for (let index = 1; index <= 10; index += 1) {
+      const vor = index === 1 ? topVor : index === 2 ? secondVor : index === 3 ? thirdVor : thirdVor - index;
+      const range = index === 1 ? [1, 5] : [30 + index, 45 + index];
+      board.push(player(position, index, rank++, { vor, adpLow: range[0], adpHigh: range[1] }));
+    }
+  };
+  addPosition("RB", 100, 90, 60);
+  addPosition("TE", 100, 70, 55);
+  addPosition("WR", 90, 80, 60);
+  addPosition("QB", 90, 80, 60);
+  for (let index = 1; index <= 10; index += 1) board.push(player("DEF", index, rank++));
+  for (let index = 1; index <= 10; index += 1) board.push(player("K", index, rank++));
+
+  let ownedTurn = null;
+  let controllerCreates = 0;
+  let capturedTargets = null;
+  const available = new Set(board.map((candidate) => candidate.yahooId));
+  const select = {
+    value: "all",
+    options: [
+      { textContent: "All Positions", value: "all" },
+      { textContent: "Team Defenses", value: "def" },
+      { textContent: "Kickers", value: "k" },
+    ],
+    dispatchEvent() {},
+  };
+  const controllerApi = {
+    runtime: {
+      isAutodraftActive: () => false,
+      parseRoom: () => ({ roomId: "9378515", seat: 6 }),
+      parseRosterCount: () => ({ filled: 0, total: 15 }),
+      readOwnedTurn: () => ownedTurn,
+      readPlayerRow: (row) => row.player,
+    },
+    create(options) {
+      controllerCreates += 1;
+      capturedTargets = options.targets;
+      return {
+        exportReceipts: () => [],
+        getStatus: () => ({ state: "running", confirmedPicks: 0 }),
+        start() { return this; },
+        stop() {},
+      };
+    },
+  };
+  const api = loadRunner(controllerApi);
+  const environment = {
+    Event: class Event { constructor(type) { this.type = type; } },
+    SKRODZKaiYahooDraftController: controllerApi,
+    clearInterval,
+    crypto,
+    document: {
+      body: { innerText: "YOUR TEAM (0/15)" },
+      querySelectorAll(selector) {
+        if (selector === "select") return [select];
+        if (selector === "tr") {
+          return board.filter((candidate) => available.has(candidate.yahooId)).map((candidate) => ({
+            player: { ...candidate, row: {} },
+          }));
+        }
+        return [];
+      },
+    },
+    localStorage: storageFixture(),
+    location: { pathname: "/draftclient/f1/9378515/6" },
+    setInterval,
+    setTimeout,
+  };
+  const runner = api.create({
+    board,
+    expectedRoomId: "9378515",
+    expectedSeat: 6,
+    observedTeamCount: 12,
+    observedRosterSlots: mockConfig.rosterSlots,
+  }, environment).start();
+
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(controllerCreates, 0, "off-turn runner must not pre-arm a stale ladder");
+  available.delete("RB-2");
+  ownedTurn = { label: "R1P6", round: 1, pick: 6 };
+  await waitFor(() => controllerCreates === 1);
+  runner.halt("test_complete");
+
+  assert.equal(capturedTargets[0].yahooId, "RB-1");
+  const resolved = runner.exportReceipts().find((entry) => entry.kind === "runner_turn_resolved");
+  const rbDecision = resolved.decision.positionLeaders.find((leader) => leader.player.position === "RB");
+  assert.equal(rbDecision.comparator.yahooId, "RB-3");
+  assert.deepEqual(Array.from(resolved.decision.targetYahooIds).slice(0, 2), ["RB-1", "TE-1"]);
+  assert.equal("availablePlayers" in resolved.decision, false);
+  assert.ok(JSON.stringify(resolved).length < 8000, "strategy receipt should stay compact");
 });
 
 test("runner advances across an immediate slot-12 wrap without reusing the stale ladder", async (t) => {
@@ -545,8 +803,10 @@ test("runner completes all 15 rounds and switches to the DEF and K filters", asy
               drafted.add(candidate.yahooId);
               filled += 1;
               if (filled < mockConfig.rounds) {
+                const nextRound = filled + 1;
+                const nextPick = helpers.overallPick(nextRound, 6, 12);
                 document.title = "YOUR TURN, DRAFT NOW | Live NFL Draft";
-                document.body.innerText = `YOUR TURN • ROUND ${filled + 1}, PICK 6\nYOUR TEAM (${filled}/15)`;
+                document.body.innerText = `YOUR TURN • ROUND ${nextRound}, PICK ${nextPick}\nYOUR TEAM (${filled}/15)`;
               } else {
                 document.title = "Draft complete | Live NFL Draft";
                 document.body.innerText = "YOUR TEAM (15/15)";
@@ -623,7 +883,7 @@ test("runner completes all 15 rounds and switches to the DEF and K filters", asy
   );
   assert.deepEqual(clicked.slice(-2).map((candidate) => candidate.position), ["DEF", "K"]);
   assert.deepEqual(filterEvents.slice(-2), ["def", "k"]);
-  const armed = Array.from(runner.exportReceipts()).filter((entry) => entry.kind === "runner_round_armed");
+  const armed = Array.from(runner.exportReceipts()).filter((entry) => entry.kind === "runner_turn_resolved");
   assert.equal(armed.at(-2).filterLabel, "Team Defenses");
   assert.equal(armed.at(-1).filterLabel, "Kickers");
 });

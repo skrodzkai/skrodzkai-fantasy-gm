@@ -116,6 +116,10 @@ test("requires both the live title and exact owned-turn banner", () => {
     JSON.parse(JSON.stringify(helpers.readOwnedTurn(live))),
     { label: "R1P8", round: 1, pick: 8 },
   );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(controllerApi.runtime.readOwnedTurn(live))),
+    { label: "R1P8", round: 1, pick: 8 },
+  );
 });
 
 test("detects checked Autodraft rather than the unrelated refresh icon", () => {
