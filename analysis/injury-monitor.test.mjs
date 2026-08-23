@@ -1,7 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { compileInjuryBoard } from "./injury-monitor.mjs";
+import { buildDraftWatchlist, compileInjuryBoard } from "./injury-monitor.mjs";
+
+function report(overrides = {}) {
+  return {
+    playerId: "p1",
+    sourceId: "source",
+    sourceKind: "yahoo",
+    observedAt: "2026-08-23T10:00:00Z",
+    status: "UNKNOWN",
+    ...overrides,
+  };
+}
 
 test("official fresh OUT status excludes a player", () => {
   const result = compileInjuryBoard({
@@ -102,4 +113,32 @@ test("fresh but unknown evidence carries an explicit manual-review reason", () =
   });
   assert.equal(result.players[0].draftAction, "REVIEW");
   assert.match(result.players[0].blockReason, /UNKNOWN/);
+});
+
+test("holdout and role uncertainty stay on the compact manual watchlist", () => {
+  const board = compileInjuryBoard({
+    asOf: "2026-08-23T12:00:00Z",
+    reports: [
+      report({ playerId: "h", sourceId: "holdout", status: "CONTRACT_HOLDOUT" }),
+      report({ playerId: "r", sourceId: "role", status: "ROLE_RISK" }),
+      report({ playerId: "c", sourceId: "clear", status: "CLEAR" }),
+    ],
+  });
+  assert.equal(board.players.find((player) => player.playerId === "h").draftAction, "REVIEW");
+  assert.equal(board.players.find((player) => player.playerId === "r").draftAction, "REVIEW");
+  assert.deepEqual(buildDraftWatchlist(board).map((player) => player.yahooId).sort(), ["h", "r"]);
+});
+
+test("a suspension needs a reported return to avoid automatic exclusion", () => {
+  const missingReturn = compileInjuryBoard({
+    asOf: "2026-08-23T12:00:00Z",
+    reports: [report({ playerId: "s", sourceId: "suspension", status: "SUSPENSION" })],
+  });
+  assert.equal(missingReturn.players[0].draftAction, "EXCLUDE");
+  const datedReturn = compileInjuryBoard({
+    asOf: "2026-08-23T12:00:00Z",
+    reports: [report({ playerId: "s", sourceId: "suspension", status: "SUSPENDED", reportedReturn: "Week 3" })],
+  });
+  assert.equal(datedReturn.players[0].draftAction, "REVIEW");
+  assert.deepEqual(datedReturn.players[0].reportedReturns, ["Week 3"]);
 });

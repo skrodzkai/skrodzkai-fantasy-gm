@@ -89,7 +89,15 @@ click path:
   the deadline. Otherwise the deterministic baseline order is unchanged.
 - `build-v5-board.mjs` and `export-extension-board.mjs` reconcile free Yahoo,
   league-scored history/market, injury, and eligibility evidence into the
-  static executable board without a live network/model dependency.
+  static executable board without a live network/model dependency. The board
+  receipts offense, specialist, and eligibility observation times separately.
+- `injury-monitor.mjs` keeps injuries, suspensions, holdouts, and role
+  uncertainty on a compact manual-review watchlist; a suspension without a
+  reported return is excluded.
+- `test-draft-acceptance.mjs` grades one exported TEST-league draft against the
+  existing runner and roster contracts. It replays recorded choices and marks
+  counterfactual scoring unavailable when the compact receipt did not preserve
+  unchosen outcomes.
 - `build-v5-readiness-report.mjs` and `run-v5-rehearsals.mjs` produce the
   sanitized history, specialist-survival, 12-seat roster, concentration, and
   chaos receipts stored outside the repository.
