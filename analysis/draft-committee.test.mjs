@@ -32,6 +32,16 @@ test("creates a compact packet with only pre-turn roster state", () => {
   assert.match(packet.packetId, /^[a-f0-9]{64}$/);
 });
 
+test("preserves low-to-high ADP endpoints from the exported extension board", () => {
+  const [packet] = packetsFromReceipt(receipt, [2], [
+    { yahooId: "a", name: "A", position: "QB", adpLow: 4, adpHigh: 1 },
+    { yahooId: "b", name: "B", position: "RB", adpLow: 8, adpHigh: 3 },
+    { yahooId: "c", name: "C", position: "WR", adpLow: 9, adpHigh: 4 },
+  ]);
+  assert.equal(packet.candidates[0].adpEarliest, 1);
+  assert.equal(packet.candidates[0].adpLatest, 4);
+});
+
 test("rejects stale, duplicate, unavailable, and undersized ballots", () => {
   const [packet] = packetsFromReceipt(receipt);
   assert.equal(validateBallot(packet, { packetId: "old", rankedYahooIds: ["a", "b", "c"] }).reason, "packet_mismatch");

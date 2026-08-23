@@ -45,7 +45,7 @@ The controller persists receipts in Yahoo-origin local storage under `skrodzkai-
 
 ## Public-mock qualification runner
 
-`yahoo-mock-runner.js` layers a roster-aware 15-round public-mock policy over the exact-row controller. It requires a programmatically observed 12-team room, expected seat, empty 15-player roster, exact public-mock roster shape, and five visible Yahoo-ID fallbacks. Offensive board entries must include finite VORP and both endpoints of an observed market-ADP range; DEF and K retain static rank ordering.
+`yahoo-mock-runner.js` layers a roster-aware 15-round public-mock policy over the exact-row controller. It requires a programmatically observed 12-team room, expected seat, empty 15-player roster, exact public-mock roster shape, and five visible Yahoo-ID fallbacks. Offensive board entries must include finite VORP and both endpoints of an observed market-ADP range; DEF and K retain current Yahoo preseason-rank ordering.
 
 The runner waits for the controller's exact owned-turn signal before reading the live rows and resolving the strategy. For Rounds 1–12 it compares the highest-VORP available player at each eligible position with the best same-position player expected to remain at the next snake turn. Zero-opponent wraps are treated as certain availability. Otherwise the observed ADP range classifies the leader as likely gone, likely available, or ambiguous. An ambiguous gap must clear the 15-point material-edge allowance, representing one point per week across the 15-week fantasy season.
 
@@ -53,24 +53,24 @@ Through Round 4, the hypothetical post-pick roster must contain at least `round 
 
 Fallbacks are built iteratively: after choosing a position leader, the runner removes it hypothetically and recomputes the position leaders. The compact per-turn receipt records the snake window, one leader and comparator per position, survival bucket, drop-off scores, roster-floor result, chosen Yahoo ID, and final target IDs. It does not persist the full live board. The QB1/TE1 limits, balanced offense requirement, exact-row click contract, and non-navigating failure behavior remain unchanged.
 
-The separate `real_league_19_idp` configuration is deliberately marked unverified and cannot be executed by the runner. Public mocks do not qualify the real room's 19-round or IDP behavior.
+The exact `test_league_19_idp` lane is bound to retained team 12 in Yahoo league 18599. It separates the URL team ID from the snake draft slot, requires the observed 12-team 19-slot roster, holds at least 4 RB and 4 WR plus QB1/TE1, blocks QB2 before Round 12 and TE2 before Round 13, and fills K/DEF/D/LB/CB/S in a seat-rotated Round 14–19 sequence. League-specific Yahoo eligibility supplies at least five exact CB targets. The separate `real_league_19_idp` configuration remains unverified and non-executable; the real league ID 420010 is hard-disabled.
 
 The runner exposes a one-way `halt()` kill switch. A halted runner cannot resume; a new, explicitly armed runner is required.
 
 ## Local Chrome extension
 
-The repository root is also a dependency-free Manifest V3 extension. Load the repository directory as an unpacked extension in Chrome. It requests no general extension permissions and runs only on Yahoo's public mock waiting room and NFL draftclient paths.
+The repository root is also a dependency-free Manifest V3 extension. Load the repository directory as an unpacked extension in Chrome. It requests no general extension permissions and runs only on Yahoo's public mock waiting room, the exact league-18599 settings and test-draft pages, and NFL draftclient paths except real league 420010.
 
-The compact `SKRODZKai` control rail must be armed from `/f1/mock_waiting`. Arming records a 30-minute, tab-scoped token containing the programmatically observed mock room, seat, 12-team count, and exact public 15-round roster shape. The draftclient refuses to start without that matching token, so opening the real league draft directly cannot arm or execute this public-mock runner.
+The compact `SKRODZKai` control rail arms public mocks from `/f1/mock_waiting`. The test lane first parses `/f1/18599/settings` for the exact 12-team, 19-active-slot plus three-IR roster and 75-second clock. It can then arm from `/f1/18599/draft` only after Yahoo publishes the snake slot and the page still exposes Chef Joe plus the exact league summary. Each tab-scoped token binds the observed room, URL team, snake slot, team count, and roster shape. The draftclient refuses to start without the matching token, and league 420010 is excluded at the manifest and runtime layers.
 
 On the matching draftclient page the extension:
 
-1. Rechecks the exact room, seat, empty `0/15` roster, Autodraft-off state, and position filters.
-2. Binds current Yahoo defense IDs to the local specialist rankings and restores `All Positions` before the draft begins.
+1. Rechecks the exact room, URL team, snake slot, empty `0/15` or `0/19` roster, Autodraft-off state, and roster shape.
+2. Uses current exact Yahoo IDs from the static free-source board and restores `All Positions` before the draft begins.
 3. Starts the existing deterministic runner inside the page, removing model and browser-control latency from the pick clock.
 4. Exposes a one-way `HALT` control and a JSON `EXPORT` containing room-scoped extension, runner, and controller receipts.
 
-The extension remains mock-only. The unverified 19-round IDP configuration is still non-executable, and this package grants no real-league authority.
+The extension permits public mocks and the exact retained test league only. The real 19-round IDP configuration remains non-executable, and this package grants no real-league authority.
 
 ## Draft-night analysis
 
@@ -87,6 +87,12 @@ click path:
 - `draft-committee.mjs` creates compact, packet-hashed candidate ballots and
   accepts consensus only when both responses are valid, available, and inside
   the deadline. Otherwise the deterministic baseline order is unchanged.
+- `build-v5-board.mjs` and `export-extension-board.mjs` reconcile free Yahoo,
+  league-scored history/market, injury, and eligibility evidence into the
+  static executable board without a live network/model dependency.
+- `build-v5-readiness-report.mjs` and `run-v5-rehearsals.mjs` produce the
+  sanitized history, specialist-survival, 12-seat roster, concentration, and
+  chaos receipts stored outside the repository.
 
 None of these scripts click Yahoo or create real-draft authority. A late model
 response is advisory evidence only and never delays the extension.

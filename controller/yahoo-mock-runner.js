@@ -5,6 +5,7 @@
   const GLOBAL_KEY = "__skrodzkaiYahooMockRunnerV1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-runner-receipts-v1";
   const OFFENSE = ["QB", "RB", "WR", "TE"];
+  const TEST_SPECIALISTS = ["K", "DEF", "D", "LB", "CB", "S"];
   const MATERIAL_EDGE_POINTS = 15;
 
   const CONFIGS = Object.freeze({
@@ -20,6 +21,24 @@
       offenseStarters: Object.freeze({ QB: 1, RB: 2, WR: 2, TE: 1, FLEX: 1 }),
       positionLimits: Object.freeze({ QB: 1, RB: 5, WR: 6, TE: 1, K: 1, DEF: 1 }),
       qualification: "public-mock-only",
+    }),
+    test_league_19_idp: Object.freeze({
+      name: "test_league_19_idp",
+      leagueId: "18599",
+      urlTeamId: 12,
+      teams: 12,
+      rounds: 19,
+      rosterTotal: 19,
+      rosterSlots: Object.freeze([
+        "QB", "WR", "WR", "RB", "RB", "W/R", "W/R/T", "K", "DEF",
+        "D", "LB", "CB", "S", "BN", "BN", "BN", "BN", "BN", "BN",
+      ]),
+      offenseStarters: Object.freeze({ QB: 1, RB: 2, WR: 2, TE: 0, FLEX: 2 }),
+      offenseMinimums: Object.freeze({ QB: 1, RB: 4, WR: 4, TE: 1 }),
+      positionLimits: Object.freeze({ QB: 2, RB: 6, WR: 6, TE: 2, K: 1, DEF: 1, D: 1, LB: 1, CB: 1, S: 1 }),
+      specialistPositions: Object.freeze(TEST_SPECIALISTS),
+      specialistStartRound: 14,
+      qualification: "verified-test-room",
     }),
     real_league_19_idp: Object.freeze({
       name: "real_league_19_idp",
@@ -72,7 +91,37 @@
     );
   }
 
-  function allowedPositions(round, picks, config = CONFIGS.public_mock_15) {
+  function specialistOrderForSeat(seat) {
+    const opening = seat >= 5 && seat <= 8 ? ["DEF", "K"] : ["K", "DEF"];
+    const idp = seat % 3 === 1 ? ["LB", "D", "S", "CB"] : seat % 3 === 2 ? ["D", "S", "LB", "CB"] : ["S", "CB", "D", "LB"];
+    return [...opening, ...idp];
+  }
+
+  function allowedPositions(round, picks, config = CONFIGS.public_mock_15, seat = 1) {
+    if (config.name === "test_league_19_idp") {
+      if (round < 1 || round > config.rounds) return [];
+      if (round >= config.specialistStartRound) {
+        const counts = positionCounts(picks);
+        const next = specialistOrderForSeat(seat).find((position) => (counts[position] ?? 0) < config.positionLimits[position]);
+        return next ? [next] : [];
+      }
+      const counts = positionCounts(picks);
+      const allowed = new Set(OFFENSE);
+      for (const position of OFFENSE) if ((counts[position] ?? 0) >= config.positionLimits[position]) allowed.delete(position);
+      if ((counts.QB ?? 0) >= 1 && round < 12) allowed.delete("QB");
+      if ((counts.TE ?? 0) >= 1 && round < 13) allowed.delete("TE");
+      const offensePicksRemaining = config.specialistStartRound - round;
+      const shortages = OFFENSE.filter((position) => (counts[position] ?? 0) < config.offenseMinimums[position]);
+      const shortagePicks = shortages.reduce((sum, position) => sum + config.offenseMinimums[position] - (counts[position] ?? 0), 0);
+      if (shortagePicks >= offensePicksRemaining) {
+        for (const position of OFFENSE) if (!shortages.includes(position)) allowed.delete(position);
+      }
+      if (!offenseComplete(counts, config)) {
+        if ((counts.RB ?? 0) >= config.offenseStarters.RB + 2) allowed.delete("RB");
+        if ((counts.WR ?? 0) >= config.offenseStarters.WR + 2) allowed.delete("WR");
+      }
+      return [...allowed];
+    }
     if (config.name !== "public_mock_15") return [];
     if (round === 14) return ["DEF"];
     if (round === 15) return ["K"];
@@ -92,7 +141,11 @@
     return [...allowed];
   }
 
-  function filterLabelForRound(round) {
+  function filterLabelForRound(round, picks = [], config = CONFIGS.public_mock_15, seat = 1) {
+    if (config.name === "test_league_19_idp") {
+      const position = allowedPositions(round, picks, config, seat)[0];
+      return { K: "Kickers", DEF: "Team Defenses", D: "Defensive Players", LB: "Linebackers", CB: "Defensive Backs", S: "Defensive Backs" }[position] ?? "All Positions";
+    }
     if (round === 14) return "Team Defenses";
     if (round === 15) return "Kickers";
     return "All Positions";
@@ -115,8 +168,8 @@
         rank: Number(player.rank ?? index + 1),
       };
       if (!copy.yahooId) throw new Error(`board player ${index} requires a verified Yahoo ID`);
-      if (!OFFENSE.includes(position) && !["K", "DEF"].includes(position)) {
-        throw new Error(`board player ${index} has unsupported public-mock position`);
+      if (!OFFENSE.includes(position) && !["K", "DEF", "D", "LB", "CB", "S"].includes(position)) {
+        throw new Error(`board player ${index} has unsupported draft position`);
       }
       if (!Number.isFinite(copy.rank)) throw new Error(`board player ${index} has invalid rank`);
       if (OFFENSE.includes(position)) {
@@ -130,12 +183,20 @@
         copy.vor = vor;
         copy.adpEarliest = Math.min(firstEndpoint, secondEndpoint);
         copy.adpLatest = Math.max(firstEndpoint, secondEndpoint);
+      } else if (Number.isFinite(Number(player.projection))) {
+        copy.projection = Number(player.projection);
       }
       const key = boardKey(copy);
       if (seen.has(key)) throw new Error(`duplicate board player ${key}`);
       seen.add(key);
       return copy;
     });
+  }
+
+  function positionForConfirmedPick(board, confirmation) {
+    const confirmed = board.find((player) => player.yahooId === String(confirmation?.yahooId ?? ""));
+    if (!confirmed) throw new Error("confirmed pick is absent from the verified board");
+    return confirmed.position;
   }
 
   function readAvailablePlayers(documentRef, controllerApi) {
@@ -152,9 +213,9 @@
     return round % 2 === 1 ? (round - 1) * teams + seat : round * teams - seat + 1;
   }
 
-  function turnWindow(round, seat, teams = 12) {
+  function turnWindow(round, seat, teams = 12, rounds = CONFIGS.public_mock_15.rounds) {
     const currentPick = overallPick(round, seat, teams);
-    if (round >= CONFIGS.public_mock_15.rounds) {
+    if (round >= rounds) {
       return { currentPick, nextPick: null, interveningOpponentPicks: null };
     }
     const nextPick = overallPick(round + 1, seat, teams);
@@ -186,8 +247,8 @@
   }
 
   function scorePositionLeaders({ round, seat, picks, pool, materialEdgePoints, config }) {
-    const allowed = allowedPositions(round, picks, config);
-    const window = turnWindow(round, seat, config.teams);
+    const allowed = allowedPositions(round, picks, config, seat);
+    const window = turnWindow(round, seat, config.teams, config.rounds);
     const counts = positionCounts(picks);
     const rbwrBefore = (counts.RB ?? 0) + (counts.WR ?? 0);
     const floorRequired = round <= 4 ? round - 1 : 0;
@@ -196,7 +257,7 @@
     for (const position of allowed) {
       const candidates = pool.filter((player) => player.position === position);
       if (!candidates.length) continue;
-      if (["DEF", "K"].includes(position)) {
+      if (["DEF", "K", "D", "LB", "CB", "S"].includes(position)) {
         leaders.push({
           player: candidates.sort((left, right) => left.rank - right.rank)[0],
           comparator: null,
@@ -226,7 +287,16 @@
         comparator = candidates.slice(1).find((candidate) =>
           survivalBucket(candidate, window.nextPick, window.interveningOpponentPicks) !== "likely_gone"
         );
-        if (!comparator) throw new Error(`next_turn_comparator_missing:${position}`);
+        if (!comparator) {
+          leaders.push({
+            player,
+            comparator: null,
+            bucket: "position_unavailable_next_turn",
+            rawScore: Math.max(0, player.vor),
+            adjustedScore: Math.max(0, player.vor),
+          });
+          continue;
+        }
       }
       const rawScore = Math.max(0, player.vor - comparator.vor);
       const adjustedScore = bucket === "likely_gone"
@@ -299,7 +369,7 @@
     materialEdgePoints = MATERIAL_EDGE_POINTS,
     config = CONFIGS.public_mock_15,
   }) {
-    const allowed = new Set(allowedPositions(round, picks, config));
+    const allowed = new Set(allowedPositions(round, picks, config, seat));
     const used = new Set(Array.from(picks ?? [], boardKey));
     const availableById = new Map(
       Array.from(availablePlayers ?? [], (player) => [String(player.yahooId), player]),
@@ -362,6 +432,15 @@
 
   function validateCompletedRoster(picks, config = CONFIGS.public_mock_15) {
     const counts = positionCounts(picks);
+    if (config.name === "test_league_19_idp") {
+      return (
+        picks.length === config.rounds &&
+        offenseComplete(counts, config) &&
+        OFFENSE.every((position) => (counts[position] ?? 0) >= config.offenseMinimums[position]) &&
+        config.specialistPositions.every((position) => (counts[position] ?? 0) === 1) &&
+        OFFENSE.every((position) => (counts[position] ?? 0) <= config.positionLimits[position])
+      );
+    }
     return (
       picks.length === config.rounds &&
       offenseComplete(counts, config) &&
@@ -388,11 +467,15 @@
 
     const config = CONFIGS[options.configName ?? "public_mock_15"];
     if (!config) throw new Error("unknown roster configuration");
-    if (config.qualification !== "public-mock-only") {
-      throw new Error("real league configuration is not qualified for execution");
+    const executionMode = String(options.executionMode ?? "MOCK").toUpperCase();
+    const qualified = config.qualification === "public-mock-only" && executionMode === "MOCK" ||
+      config.qualification === "verified-test-room" && executionMode === "TEST";
+    if (!qualified) {
+      throw new Error("draft configuration is not qualified for this execution mode");
     }
     const expectedRoomId = String(options.expectedRoomId ?? "");
     const expectedSeat = Number(options.expectedSeat);
+    const expectedUrlSeat = Number(options.expectedUrlSeat ?? expectedSeat);
     const observedTeamCount = Number(options.observedTeamCount);
     const observedRosterSlots = normalizeSlots(options.observedRosterSlots);
     const minimumFallbacks = Number(options.minimumFallbacks ?? 5);
@@ -403,8 +486,11 @@
     if (!expectedRoomId || !Number.isInteger(expectedSeat) || expectedSeat < 1 || expectedSeat > config.teams) {
       throw new Error("expected room and seat are required");
     }
-    if (observedTeamCount !== config.teams) throw new Error("mock room must contain exactly 12 teams");
-    if (!sameSlots(observedRosterSlots, config.rosterSlots)) throw new Error("mock roster shape does not match public_mock_15");
+    if (!Number.isInteger(expectedUrlSeat) || expectedUrlSeat < 1) throw new Error("expected URL seat is required");
+    if (config.leagueId && expectedRoomId !== config.leagueId) throw new Error("test league ID does not match verified configuration");
+    if (config.urlTeamId && expectedUrlSeat !== config.urlTeamId) throw new Error("test team ID does not match verified configuration");
+    if (observedTeamCount !== config.teams) throw new Error("draft room must contain exactly 12 teams");
+    if (!sameSlots(observedRosterSlots, config.rosterSlots)) throw new Error(`draft roster shape does not match ${config.name}`);
     if (!Number.isInteger(minimumFallbacks) || minimumFallbacks < 5) throw new Error("minimumFallbacks must be at least 5");
     if (pollMs < 25 || filterDeadlineMs <= 0) {
       throw new Error("invalid runner timing configuration");
@@ -414,8 +500,8 @@
     }
 
     const room = controllerApi.runtime.parseRoom(locationRef.pathname);
-    if (!room || room.roomId !== expectedRoomId || room.seat !== expectedSeat) {
-      throw new Error("draft room or seat does not match the mock preflight");
+    if (!room || room.roomId !== expectedRoomId || room.seat !== expectedUrlSeat) {
+      throw new Error("draft room or URL team does not match the approved preflight");
     }
     const rosterAtCreate = controllerApi.runtime.parseRosterCount(documentRef.body?.innerText);
     if (!rosterAtCreate || rosterAtCreate.total !== config.rosterTotal || rosterAtCreate.filled !== 0) {
@@ -443,7 +529,8 @@
         version: VERSION,
         runId,
         roomId: room.roomId,
-        seat: room.seat,
+        seat: expectedSeat,
+        urlSeat: room.seat,
         kind,
         ...details,
       };
@@ -472,7 +559,7 @@
       } catch (error) {
         failure.receiptError = String(error?.message ?? error);
       } finally {
-        options.onAlert?.({ state, failure, roomId: room.roomId, seat: room.seat });
+      options.onAlert?.({ state, failure, roomId: room.roomId, seat: expectedSeat });
       }
     }
 
@@ -515,7 +602,7 @@
       if (turn.round !== expectedRound || turn.pick !== expectedPick) {
         throw new Error(`owned_turn_mismatch:expected_R${expectedRound}P${expectedPick}:observed_${turn.label}`);
       }
-      const filterLabel = filterLabelForRound(turn.round);
+      const filterLabel = filterLabelForRound(turn.round, picks, config, expectedSeat);
       const { targets, decision, filterReadyMs } = await targetsAfterFilter(turn, filterLabel);
       if (state !== "running") return;
       receipt("runner_turn_resolved", {
@@ -523,7 +610,7 @@
         filterLabel,
         filterReadyMs,
         targetCount: targets.length,
-        allowedPositions: allowedPositions(turn.round, picks, config),
+        allowedPositions: allowedPositions(turn.round, picks, config, expectedSeat),
         decision,
       });
       const nextController = controllerApi.create(
@@ -535,7 +622,7 @@
           minimumAvailableTargets: minimumFallbacks,
           maxConfirmedPicks: 1,
           expectedRoomId,
-          expectedSeat,
+          expectedSeat: expectedUrlSeat,
           expectedRosterTotal: config.rosterTotal,
           failureAction: "stay",
         },
@@ -579,7 +666,7 @@
         const pick = {
           yahooId: confirmation.yahooId,
           name: confirmation.name,
-          position: confirmation.position,
+          position: positionForConfirmedPick(board, confirmation),
           team: confirmation.team,
           turn: confirmation.turn,
           detectionToClickMs: clicks[0].detectionToClickMs,
@@ -633,11 +720,12 @@
         configName: config.name,
         expectedRoomId,
         expectedSeat,
+        expectedUrlSeat,
         observedTeamCount,
         observedRosterSlots,
         minimumFallbacks,
         materialEdgePoints,
-        strategy: "position_leader_dropoff_to_next_turn",
+        strategy: config.name === "test_league_19_idp" ? "13_offense_then_seat_rotated_verified_specialists" : "position_leader_dropoff_to_next_turn",
       });
       monitorId = environment.setInterval(advance, pollMs);
       advance();
@@ -673,7 +761,7 @@
         draftClicks: controllerReceipts.filter((entry) => entry.kind === "draft_click").length,
         pickConfirmations: controllerReceipts.filter((entry) => entry.kind === "pick_confirmed").length,
       });
-      options.onAlert?.({ state, reason, roomId: room.roomId, seat: room.seat });
+      options.onAlert?.({ state, reason, roomId: room.roomId, seat: expectedSeat });
       return api;
     }
 
@@ -691,7 +779,8 @@
         version: VERSION,
         runId,
         roomId: room.roomId,
-        seat: room.seat,
+        seat: expectedSeat,
+        urlSeat: room.seat,
         state,
         failure,
         picks: picks.slice(),
@@ -721,6 +810,7 @@
       allowedPositions,
       filterLabelForRound,
       validateBoard,
+      positionForConfirmedPick,
       overallPick,
       turnWindow,
       survivalBucket,
