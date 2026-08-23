@@ -34,6 +34,7 @@ function loadRunner(controllerApi = {}) {
 const runnerApi = loadRunner();
 const helpers = runnerApi._test;
 const mockConfig = runnerApi.configs.public_mock_15;
+const testConfig = runnerApi.configs.test_league_19_idp;
 
 function player(position, number, rank, overrides = {}) {
   const candidate = {
@@ -56,6 +57,15 @@ function genericBoard() {
   const board = [];
   let rank = 1;
   for (const position of ["RB", "WR", "QB", "TE", "DEF", "K"]) {
+    for (let index = 1; index <= 20; index += 1) board.push(player(position, index, rank++));
+  }
+  return board;
+}
+
+function testLeagueBoard() {
+  const board = [];
+  let rank = 1;
+  for (const position of ["RB", "WR", "QB", "TE", "DEF", "K", "D", "LB", "CB", "S"]) {
     for (let index = 1; index <= 20; index += 1) board.push(player(position, index, rank++));
   }
   return board;
@@ -86,6 +96,48 @@ test("keeps the real 19-round IDP configuration unqualified for execution", () =
     Array.from(runnerApi.configs.real_league_19_idp.rosterSlots),
     ["QB", "WR", "WR", "WR", "RB", "RB", "TE", "W/R/T", "K", "DEF", "D", "DB", "LB", "BN", "BN", "BN", "BN", "BN", "BN"],
   );
+});
+
+test("records the verified board position when Yahoo displays a narrower specialist label", () => {
+  const board = helpers.validateBoard([player("D", 1, 1)]);
+  assert.equal(helpers.positionForConfirmedPick(board, { yahooId: "D-1", position: "DE" }), "D");
+  assert.throws(
+    () => helpers.positionForConfirmedPick(board, { yahooId: "missing", position: "DE" }),
+    /absent from the verified board/,
+  );
+});
+
+test("qualifies only the exact retained test-league identity and rotates all six specialist picks by snake seat", () => {
+  assert.equal(testConfig.leagueId, "18599");
+  assert.equal(testConfig.urlTeamId, 12);
+  assert.equal(testConfig.rounds, 19);
+  assert.deepEqual(
+    Array.from(testConfig.rosterSlots),
+    ["QB", "WR", "WR", "RB", "RB", "W/R", "W/R/T", "K", "DEF", "D", "LB", "CB", "S", "BN", "BN", "BN", "BN", "BN", "BN"],
+  );
+  assert.deepEqual(Array.from(helpers.allowedPositions(14, [], testConfig, 1)), ["K"]);
+  assert.deepEqual(Array.from(helpers.allowedPositions(14, [], testConfig, 6)), ["DEF"]);
+  const picks = [
+    player("K", 1, 1), player("DEF", 1, 2), player("LB", 1, 3),
+    player("D", 1, 4), player("S", 1, 5), player("CB", 1, 6),
+  ];
+  assert.deepEqual(Array.from(helpers.allowedPositions(19, picks, testConfig, 1)), []);
+  const offense = [
+    player("QB", 1, 1),
+    ...Array.from({ length: 2 }, (_, index) => player("RB", index + 1, index + 2)),
+    ...Array.from({ length: 6 }, (_, index) => player("WR", index + 1, index + 4)),
+    ...Array.from({ length: 2 }, (_, index) => player("TE", index + 1, index + 10)),
+  ];
+  assert.deepEqual(Array.from(helpers.allowedPositions(12, offense, testConfig, 1)), ["RB"]);
+  assert.equal(helpers.allowedPositions(8, [player("QB", 1, 1), player("TE", 1, 2)], testConfig, 1).includes("QB"), false);
+  assert.equal(helpers.allowedPositions(8, [player("QB", 1, 1), player("TE", 1, 2)], testConfig, 1).includes("TE"), false);
+  const minimumsMet = [
+    player("QB", 1, 1), player("TE", 1, 2),
+    ...Array.from({ length: 4 }, (_, index) => player("RB", index + 1, index + 3)),
+    ...Array.from({ length: 4 }, (_, index) => player("WR", index + 1, index + 7)),
+  ];
+  assert.equal(helpers.allowedPositions(12, minimumsMet, testConfig, 1).includes("QB"), true);
+  assert.equal(helpers.allowedPositions(13, minimumsMet, testConfig, 1).includes("TE"), true);
 });
 
 test("recognizes only the exact public mock roster shape", () => {
@@ -166,6 +218,24 @@ test("uses observed ADP boundaries without pretending equality is certainty", ()
   assert.equal(helpers.survivalBucket(candidate, 30, 10), "ambiguous");
   assert.equal(helpers.survivalBucket(candidate, 31, 10), "likely_gone");
   assert.equal(helpers.survivalBucket(candidate, 31, 0), "certain_through_wrap");
+});
+
+test("treats a position with no projected next-turn survivor as replacement-level urgency", () => {
+  const board = helpers.validateBoard([
+    player("RB", 1, 1, { vor: 40, adpLow: 1, adpHigh: 2 }),
+    player("RB", 2, 2, { vor: 20, adpLow: 2, adpHigh: 3 }),
+    player("WR", 1, 3, { vor: 35, adpLow: 50, adpHigh: 60 }),
+    player("WR", 2, 4, { vor: 30, adpLow: 61, adpHigh: 70 }),
+    player("QB", 1, 5, { vor: 25, adpLow: 50, adpHigh: 60 }),
+    player("QB", 2, 6, { vor: 20, adpLow: 61, adpHigh: 70 }),
+    player("TE", 1, 7, { vor: 22, adpLow: 50, adpHigh: 60 }),
+    player("TE", 2, 8, { vor: 18, adpLow: 61, adpHigh: 70 }),
+  ]);
+  const scored = helpers.scorePositionLeaders({ round: 2, seat: 3, picks: [player("WR", 90, 90)], pool: board, materialEdgePoints: 15, config: mockConfig });
+  const runningBack = scored.leaders.find((leader) => leader.player.position === "RB");
+  assert.equal(runningBack.bucket, "position_unavailable_next_turn");
+  assert.equal(runningBack.comparator, null);
+  assert.equal(runningBack.adjustedScore, 40);
 });
 
 test("scores only the highest-VORP player at a position even when a lower player looks urgent", () => {
@@ -336,7 +406,7 @@ test("refuses non-12-team rooms, wrong seats, and mismatched roster shapes befor
   for (const observedTeamCount of [8, 10, 14]) {
     assert.throws(() => api.create({ ...base, observedTeamCount }, environment), /exactly 12 teams/);
   }
-  assert.throws(() => api.create({ ...base, expectedSeat: 5 }, environment), /room or seat/);
+  assert.throws(() => api.create({ ...base, expectedSeat: 5 }, environment), /draft room or URL team/);
   assert.throws(
     () => api.create({ ...base, observedRosterSlots: mockConfig.rosterSlots.slice(0, -1) }, environment),
     /roster shape/,
@@ -886,6 +956,103 @@ test("runner completes all 15 rounds and switches to the DEF and K filters", asy
   const armed = Array.from(runner.exportReceipts()).filter((entry) => entry.kind === "runner_turn_resolved");
   assert.equal(armed.at(-2).filterLabel, "Team Defenses");
   assert.equal(armed.at(-1).filterLabel, "Kickers");
+});
+
+test("verified TEST runner completes 19 rounds through the real CB, S, and DT row parser", async (t) => {
+  const board = testLeagueBoard();
+  const drafted = new Set();
+  const clicked = [];
+  let filled = 0;
+  const options = [
+    ["All Positions", "all"], ["Team Defenses", "def"], ["Kickers", "k"],
+    ["Defensive Players", "d"], ["Linebackers", "lb"], ["Defensive Backs", "db"],
+  ].map(([textContent, value]) => ({ textContent, value }));
+  const select = { value: "all", options, dispatchEvent() {} };
+  const visibleForFilter = (candidate) => {
+    if (select.value === "def") return candidate.position === "DEF";
+    if (select.value === "k") return candidate.position === "K";
+    if (select.value === "d") return candidate.position === "D";
+    if (select.value === "lb") return candidate.position === "LB";
+    if (select.value === "db") return ["CB", "S"].includes(candidate.position);
+    return ["QB", "RB", "WR", "TE"].includes(candidate.position);
+  };
+  const document = {
+    title: "YOUR TURN, DRAFT NOW | Live NFL Draft",
+    body: { innerText: "YOUR TURN • ROUND 1, PICK 6\nYOUR TEAM (0/19)" },
+    querySelectorAll(selector) {
+      if (selector === "select") return [select];
+      if (selector === '[role="dialog"]') return [];
+      const rows = board.filter((candidate) => !drafted.has(candidate.yahooId) && visibleForFilter(candidate)).map((candidate) => {
+        const displayedPosition = candidate.position === "D" ? "DT" : candidate.position;
+        const draftButton = {
+          disabled: false,
+          innerText: "Draft",
+          querySelector: () => null,
+          click() {
+            clicked.push({ ...candidate, displayedPosition });
+            drafted.add(candidate.yahooId);
+            filled += 1;
+            if (filled < testConfig.rounds) {
+              const round = filled + 1;
+              document.title = "YOUR TURN, DRAFT NOW | Live NFL Draft";
+              document.body.innerText = `YOUR TURN • ROUND ${round}, PICK ${helpers.overallPick(round, 6, 12)}\nYOUR TEAM (${filled}/19)`;
+            } else {
+              document.title = "Draft complete | Live NFL Draft";
+              document.body.innerText = "YOUR TEAM (19/19)";
+            }
+          },
+        };
+        const playerNode = {
+          innerText: `${candidate.name}\n${displayedPosition}\n${candidate.team || "Bye 12"}`,
+          getAttribute: (name) => name === "data-id" ? candidate.yahooId : null,
+          querySelector: (selector) => selector === "img[title]" ? { getAttribute: () => candidate.name } : null,
+        };
+        return {
+          querySelector: (selector) => selector === ".ys-player[data-id]" ? playerNode : null,
+          querySelectorAll: (selector) => selector === "button" ? [draftButton] : [],
+        };
+      });
+      if (selector === "tr") return rows;
+      if (selector === "button") return [...rows.flatMap((row) => row.querySelectorAll("button")), { innerText: "Autodraft", querySelector: () => null }];
+      return [];
+    },
+  };
+  const context = {
+    clearInterval,
+    console,
+    crypto,
+    Date,
+    Event: class Event { constructor(type) { this.type = type; } },
+    getComputedStyle: () => ({ display: "block", visibility: "visible" }),
+    localStorage: storageFixture(),
+    location: { pathname: "/draftclient/f1/18599/12", assign() {} },
+    Math,
+    setInterval,
+    setTimeout,
+  };
+  context.document = document;
+  context.globalThis = context;
+  vm.createContext(context);
+  vm.runInContext(controllerSource, context);
+  vm.runInContext(source, context);
+  const runner = context.SKRODZKaiYahooMockRunner.create({
+    board,
+    configName: "test_league_19_idp",
+    executionMode: "TEST",
+    expectedRoomId: "18599",
+    expectedSeat: 6,
+    expectedUrlSeat: 12,
+    observedTeamCount: 12,
+    observedRosterSlots: testConfig.rosterSlots,
+  }, context).start();
+  t.after(() => runner.stop());
+  await waitFor(() => runner.getStatus().state === "completed", 5000);
+  assert.equal(runner.getStatus().failure, null);
+  assert.equal(clicked.length, 19);
+  const counts = helpers.positionCounts(runner.getStatus().picks);
+  assert.equal(["QB", "RB", "WR", "TE"].reduce((sum, position) => sum + (counts[position] ?? 0), 0), 13);
+  for (const position of ["K", "DEF", "D", "LB", "CB", "S"]) assert.equal(counts[position], 1);
+  assert.equal(clicked.find((pick) => pick.position === "D")?.displayedPosition, "DT");
 });
 
 test("halt during filter arming prevents a controller from being created", async () => {

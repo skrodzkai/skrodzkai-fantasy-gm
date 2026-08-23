@@ -6,6 +6,13 @@ function stableHash(value) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
+function normalizedAdpRange(player) {
+  const first = Number(player.adpEarliest ?? player.adpLow);
+  const second = Number(player.adpLatest ?? player.adpHigh);
+  if (!Number.isFinite(first) || !Number.isFinite(second)) return { earliest: null, latest: null };
+  return { earliest: Math.min(first, second), latest: Math.max(first, second) };
+}
+
 export function packetsFromReceipt(receipt, selectedRounds = [], board = []) {
   const allowedRounds = new Set(selectedRounds);
   const picks = receipt.status?.picks ?? [];
@@ -27,6 +34,7 @@ export function packetsFromReceipt(receipt, selectedRounds = [], board = []) {
         candidates: decision.targetYahooIds.map((yahooId) => {
           const leader = decision.positionLeaders.find((entry) => entry.player.yahooId === yahooId);
           const player = boardById.get(yahooId) ?? leader?.player ?? {};
+          const adp = normalizedAdpRange(player);
           return {
             yahooId,
             name: player.name ?? null,
@@ -34,8 +42,8 @@ export function packetsFromReceipt(receipt, selectedRounds = [], board = []) {
             position: player.position ?? null,
             rank: player.rank ?? null,
             vor: player.vor ?? null,
-            adpEarliest: player.adpEarliest ?? player.adpHigh ?? null,
-            adpLatest: player.adpLatest ?? player.adpLow ?? null,
+            adpEarliest: adp.earliest,
+            adpLatest: adp.latest,
             comparatorYahooId: leader?.comparator?.yahooId ?? null,
             comparatorVor: leader?.comparator?.vor ?? null,
             availability: leader?.bucket ?? null,

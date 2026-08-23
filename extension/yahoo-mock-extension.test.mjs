@@ -74,10 +74,48 @@ test("binds an arm token to one room and seat with a fixed expiration", () => {
   const armRecord = helpers.makePreflight(snapshot, 1_000);
   assert.equal(armRecord.expiresAt, 1_801_000);
   assert.equal(helpers.validateDraftPreflight(armRecord, { roomId: "9391926", seat: 7 }, 1_001), null);
-  assert.equal(helpers.validateDraftPreflight(armRecord, { roomId: "9391926", seat: 6 }, 1_001), "mock_room_or_seat_changed");
-  assert.equal(helpers.validateDraftPreflight(armRecord, { roomId: "9391927", seat: 7 }, 1_001), "mock_room_or_seat_changed");
-  assert.equal(helpers.validateDraftPreflight(armRecord, { roomId: "9391926", seat: 7 }, armRecord.expiresAt), "mock_arm_expired");
-  assert.equal(helpers.validateDraftPreflight(null, { roomId: "9391926", seat: 7 }, 1_001), "mock_waiting_room_arm_required");
+  assert.equal(helpers.validateDraftPreflight(armRecord, { roomId: "9391926", seat: 6 }, 1_001), "draft_room_or_url_team_changed");
+  assert.equal(helpers.validateDraftPreflight(armRecord, { roomId: "9391927", seat: 7 }, 1_001), "draft_room_or_url_team_changed");
+  assert.equal(helpers.validateDraftPreflight(armRecord, { roomId: "9391926", seat: 7 }, armRecord.expiresAt), "draft_arm_expired");
+  assert.equal(helpers.validateDraftPreflight(null, { roomId: "9391926", seat: 7 }, 1_001), "approved_draft_arm_required");
+});
+
+test("binds the verified test league to team 12 while keeping the snake draft slot separate", () => {
+  const settingsDocument = {
+    body: {
+      innerText: "League Name:\tHORSE COLLAR #2\nDraft Type:\tLive Standard Draft\nMax Teams:\t12\nLive Draft Pick Time:\t1 Minute, 15 Seconds\nRoster\u00a0Positions:\tQB, WR, WR, RB, RB, W/R, W/R/T, K, DEF, D, LB, CB, S, BN, BN, BN, BN, BN, BN, IR, IR, IR",
+    },
+  };
+  const settingsSnapshot = helpers.parseTestSettings(settingsDocument, { pathname: "/f1/18599/settings" });
+  assert.equal(settingsSnapshot.ready, true);
+  const settingsReceipt = helpers.makeTestSettingsReceipt(settingsSnapshot, 1_000);
+  assert.equal(helpers.validTestSettingsReceipt(settingsReceipt, 1_001), true);
+  const document = {
+    body: {
+      innerText: "Chef Joe\nHORSE COLLAR #2 · 12 Teams · 19 Rounds · 1 minute 15 seconds\nYour Draft Position: 4th",
+    },
+  };
+  const location = { pathname: "/f1/18599/draft" };
+  const snapshot = helpers.parseTestDraftHome(document, location, settingsReceipt, 1_001);
+  assert.equal(snapshot.ready, true);
+  assert.equal(snapshot.urlSeat, 12);
+  assert.equal(snapshot.seat, 4);
+  assert.deepEqual([...snapshot.rosterSlots], [...helpers.testRosterSlots]);
+  const preflight = helpers.makeTestPreflight(snapshot, 1_000);
+  assert.equal(preflight.seat, 4);
+  assert.equal(preflight.urlSeat, 12);
+  assert.equal(preflight.expiresAt, 14_401_000);
+  assert.equal(helpers.validateDraftPreflight(preflight, { roomId: "18599", seat: 12 }, 1_001), null);
+  assert.equal(helpers.validateDraftPreflight(preflight, { roomId: "18599", seat: 4 }, 1_001), "draft_room_or_url_team_changed");
+  assert.equal(
+    helpers.parseTestDraftHome({ body: { innerText: document.body.innerText.replace("Your Draft Position: 4th", "Draft position pending") } }, location, settingsReceipt, 1_001).ready,
+    false,
+  );
+  assert.equal(helpers.parseTestDraftHome(document, location, null, 1_001).errors.includes("verified_test_settings_preflight_required"), true);
+  assert.equal(
+    helpers.parseTestDraftHome({ body: { innerText: document.body.innerText.replace("Your Draft Position: 4th", "Projected Draft Position: 4th") } }, location, settingsReceipt, 1_001).errors.includes("test_draft_slot_pending"),
+    true,
+  );
 });
 
 test("attaches current Yahoo defense IDs only to exact ranked teams", () => {
@@ -100,7 +138,7 @@ test("attaches current Yahoo defense IDs only to exact ranked teams", () => {
   assert.throws(() => helpers.mergeDefenseBoard(available.slice(0, 4), ranks), /fewer_than_5_verified_defenses/);
 });
 
-test("exports only receipts from the exact room and seat", () => {
+test("exports runner and controller receipts using distinct draft-slot and Yahoo-team identities", () => {
   const values = new Map([
     ["skrodzkai-yahoo-mock-extension-receipts-v1", JSON.stringify([
       { roomId: "99", seat: 3, kind: "keep" },
@@ -111,29 +149,36 @@ test("exports only receipts from the exact room and seat", () => {
     ])],
     ["skrodzkai-yahoo-draft-controller-receipts-v1", JSON.stringify([
       { roomId: "98", seat: 3, kind: "drop" },
-      { roomId: "99", seat: 3, kind: "controller" },
+      { roomId: "99", seat: 12, kind: "controller" },
     ])],
   ]);
   const payload = helpers.buildExportPayload({
     roomId: "99",
     seat: 3,
+    urlSeat: 12,
     storage: { getItem: (key) => values.get(key) ?? null },
     runner: { getStatus: () => ({ state: "completed", picks: Array(15).fill({}) }) },
   });
   assert.deepEqual([...payload.extensionReceipts.map((entry) => entry.kind)], ["keep"]);
   assert.deepEqual([...payload.runnerReceipts.map((entry) => entry.kind)], ["runner"]);
   assert.deepEqual([...payload.controllerReceipts.map((entry) => entry.kind)], ["controller"]);
+  assert.equal(payload.urlSeat, 12);
   assert.equal(payload.status.state, "completed");
 });
 
-test("manifest has only the two Yahoo mock surfaces and no broad permissions", async () => {
+test("manifest has only the two public-mock surfaces plus the exact verified test league and no broad permissions", async () => {
   const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
   assert.equal(manifest.manifest_version, 3);
   assert.equal(manifest.permissions, undefined);
   assert.equal(manifest.host_permissions, undefined);
   assert.deepEqual(manifest.content_scripts[0].matches, [
     "https://football.fantasysports.yahoo.com/f1/mock_waiting*",
+    "https://football.fantasysports.yahoo.com/f1/18599/settings*",
+    "https://football.fantasysports.yahoo.com/f1/18599/draft*",
     "https://football.fantasysports.yahoo.com/draftclient/f1/*",
+  ]);
+  assert.deepEqual(manifest.content_scripts[0].exclude_matches, [
+    "https://football.fantasysports.yahoo.com/draftclient/f1/420010/*",
   ]);
   assert.equal(manifest.content_scripts[0].world, undefined);
   assert.deepEqual(manifest.content_scripts[0].js, [
@@ -144,17 +189,43 @@ test("manifest has only the two Yahoo mock surfaces and no broad permissions", a
   ]);
 });
 
+test("war-room roster placement respects exact and flex slots rather than pick order", () => {
+  const roster = helpers.buildUiRoster([
+    { yahooId: "r", name: "Runner", position: "RB" },
+    { yahooId: "q", name: "Quarterback", position: "QB" },
+    { yahooId: "t", name: "Tight End", position: "TE" },
+  ], helpers.testRosterSlots);
+  assert.equal(roster.find((entry) => entry.slot === "QB")?.player?.yahooId, "q");
+  assert.equal(roster.find((entry) => entry.slot === "RB")?.player?.yahooId, "r");
+  assert.equal(roster.find((entry) => entry.slot === "W/R/T")?.player?.yahooId, "t");
+});
+
+test("war-room recommendations show only the resolved live ladder with real metrics", () => {
+  const board = [{ yahooId: "1", name: "One", position: "RB", team: "BUF", confidence: "MULTI_SOURCE" }];
+  assert.deepEqual([...helpers.buildUiRecommendations(board, null)], []);
+  const [recommendation] = helpers.buildUiRecommendations(board, {
+    targetYahooIds: ["1"],
+    positionLeaders: [{ player: { yahooId: "1" }, bucket: "likely_gone", adjustedScore: 8.25 }],
+  });
+  assert.equal(recommendation.edge, "+8.3");
+  assert.equal(recommendation.confidence, "MULTI_SOURCE");
+  assert.match(recommendation.reason, /likely_gone/);
+});
+
 test("bundled board contains unique current IDs and complete observed offense ranges", () => {
   const board = context.SKRODZKaiYahooMockBoard;
-  assert.equal(board.offense.length, 138);
-  assert.equal(board.kickers.length, 28);
+  assert.ok(board.offense.length >= 100);
+  assert.ok(board.kickers.length >= 12);
   assert.equal(board.defenses.length, 32);
+  assert.ok(board.idp.length >= 36);
   const ids = [...board.offense, ...board.kickers].map((player) => String(player.yahooId));
   assert.equal(new Set(ids).size, ids.length);
+  assert.match(board.source, /v5 free-source board/);
   for (const player of board.offense) {
     assert.equal(Number.isFinite(player.vor), true);
     assert.equal(Number.isFinite(player.adpLow), true);
     assert.equal(Number.isFinite(player.adpHigh), true);
+    assert.equal(player.confidence, "MULTI_SOURCE");
   }
 });
 
@@ -165,4 +236,42 @@ test("extension contains no network or remote-model execution path", () => {
     assert.doesNotMatch(bundledSource, /openrouter|anthropic|openai/i);
   }
   assert.doesNotMatch(source, />HIDE</);
+});
+
+test("war-room mode allowlist fails closed for REAL and league 420010", () => {
+  const allowed = helpers.modeAllowlist({ mode: "MOCK", leagueId: "9391926" });
+  assert.equal(allowed.allowed, true);
+  assert.equal(allowed.mode, "MOCK");
+  assert.equal(allowed.leagueId, "9391926");
+  assert.equal(helpers.modeAllowlist({ mode: "REAL", leagueId: "9391926" }).allowed, false);
+  assert.equal(helpers.modeAllowlist({ mode: "TEST", leagueId: "420010" }).allowed, false);
+  assert.equal(helpers.parseWaitingRoom(waitingFixture().document, {
+    pathname: "/f1/mock_waiting",
+    search: "?mlid=420010",
+  }).ready, false);
+});
+
+test("manual override stages exact Yahoo IDs and preserves order without clicking", () => {
+  const values = new Map();
+  const storage = { setItem: (key, value) => values.set(key, value) };
+  const stage = helpers.stageManualTargets(storage, [
+    { yahooId: "40168", name: "Puka Nacua", position: "WR", team: "LAR" },
+    { yahooId: "40059", name: "Jahmyr Gibbs", position: "RB", team: "DET" },
+  ], { roomId: "9391926", seat: 7 }, "2026-08-22T00:00:00.000Z");
+  assert.deepEqual(stage.targets.map((target) => target.yahooId), ["40168", "40059"]);
+  assert.equal(JSON.parse(values.get("skrodzkai-yahoo-mock-manual-stage-v1")).roomId, "9391926");
+  assert.throws(() => helpers.validateExactYahooTargets([{ yahooId: "Puka" }]), /exact Yahoo ID/);
+  assert.throws(() => helpers.validateExactYahooTargets([{ yahooId: "40168" }, { yahooId: "40168" }]), /duplicated/);
+});
+
+test("war-room rendering exposes dense status, roster, board, warnings, log, and kill switch surfaces", () => {
+  for (const label of [
+    "MOCK / LOCAL", "TEST", "REAL", "League", "Room", "Seat", "Round / Pick", "Clock",
+    "Armed", "Autodraft", "Kill switch", "Roster / latest pick", "Recommendation board",
+    "Between turns", "Manual override / stage only", "Warnings", "Event log", "STAGE PICK", "KILL SWITCH",
+  ]) assert.match(source, new RegExp(label.replace(/[.*+?^${}()|[\\]\\]/g, "\\\\$&")));
+  assert.match(source, /min-width: 360px/);
+  assert.match(source, /max-width: 460px/);
+  assert.match(source, /resize: horizontal/);
+  assert.match(source, /rail\.setRoster\(TEST_ROSTER_SLOTS\.map/);
 });

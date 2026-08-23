@@ -1,13 +1,18 @@
 {
   "manifest_version": 3,
   "name": "SKRODZKai Yahoo Mock Draft Control",
-  "version": "0.1.0",
-  "description": "Local, deterministic public-mock draft execution for SKRODZKai.",
+  "version": "0.5.1",
+  "description": "Local, deterministic public-mock and verified test-league draft execution for SKRODZKai.",
   "content_scripts": [
     {
       "matches": [
         "https://football.fantasysports.yahoo.com/f1/mock_waiting*",
+        "https://football.fantasysports.yahoo.com/f1/18599/settings*",
+        "https://football.fantasysports.yahoo.com/f1/18599/draft*",
         "https://football.fantasysports.yahoo.com/draftclient/f1/*"
+      ],
+      "exclude_matches": [
+        "https://football.fantasysports.yahoo.com/draftclient/f1/420010/*"
       ],
       "js": [
         "controller/yahoo-draft-controller.js",

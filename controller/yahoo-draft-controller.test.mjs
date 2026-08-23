@@ -197,6 +197,26 @@ test("reads a team defense row whose observed Yahoo contract has no team line", 
   );
 });
 
+test("reads Yahoo CB, S, and DT specialist rows used by the test league", () => {
+  for (const [yahooId, name, position, team] of [
+    ["41001", "Corner One", "CB", "BUF"],
+    ["41002", "Safety One", "S", "BAL"],
+    ["41003", "Tackle One", "DT", "TEN"],
+  ]) {
+    const playerNode = {
+      innerText: `${name}\n${position}\n${team}\nBye 9`,
+      getAttribute: (attribute) => attribute === "data-id" ? yahooId : null,
+      querySelector: (selector) => selector === "img[title]" ? { getAttribute: () => name } : null,
+    };
+    const row = { querySelector: (selector) => selector === ".ys-player[data-id]" ? playerNode : null };
+    const observed = helpers.readPlayerRow(row);
+    assert.deepEqual(
+      JSON.parse(JSON.stringify({ ...observed, player: undefined, row: undefined })),
+      { yahooId, name, position, team },
+    );
+  }
+});
+
 test("accepts only the exact player row's enabled Draft action", () => {
   const targetRow = documentFixture({
     buttons: [button("Draft"), button("Draft", null, true)],
