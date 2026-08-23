@@ -1,8 +1,14 @@
 {
   "manifest_version": 3,
   "name": "SKRODZKai Yahoo Mock Draft Control",
-  "version": "0.6.0",
-  "description": "SKRODZKai command center for deterministic public-mock and verified test-league draft execution.",
+  "version": "0.6.1",
+  "description": "SKRODZKai popup command center for deterministic public-mock and verified test-league draft execution.",
+  "background": {
+    "service_worker": "extension/command-center-background.js"
+  },
+  "permissions": [
+    "storage"
+  ],
   "content_scripts": [
     {
       "matches": [
@@ -21,6 +27,17 @@
         "extension/yahoo-mock-extension.js"
       ],
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "extension/assets/skrodzkai-enterprises-blue.png",
+        "extension/assets/skrodzkai-globe-mark.png"
+      ],
+      "matches": [
+        "https://football.fantasysports.yahoo.com/*"
+      ]
     }
   ]
 }

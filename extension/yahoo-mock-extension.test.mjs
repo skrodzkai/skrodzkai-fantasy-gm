@@ -7,6 +7,10 @@ const source = await readFile(new URL("./yahoo-mock-extension.js", import.meta.u
 const boardSource = await readFile(new URL("./yahoo-mock-board.js", import.meta.url), "utf8");
 const controllerSource = await readFile(new URL("../controller/yahoo-draft-controller.js", import.meta.url), "utf8");
 const runnerSource = await readFile(new URL("../controller/yahoo-mock-runner.js", import.meta.url), "utf8");
+const popupSource = await readFile(new URL("./command-center.js", import.meta.url), "utf8");
+const popupCss = await readFile(new URL("./command-center.css", import.meta.url), "utf8");
+const popupHtml = await readFile(new URL("./command-center.html", import.meta.url), "utf8");
+const backgroundSource = await readFile(new URL("./command-center-background.js", import.meta.url), "utf8");
 const context = {
   console,
   Date,
@@ -17,6 +21,24 @@ vm.createContext(context);
 vm.runInContext(source, context);
 vm.runInContext(boardSource, context);
 const helpers = context.SKRODZKaiYahooMockExtension._test;
+const backgroundContext = { Date };
+backgroundContext.globalThis = backgroundContext;
+vm.createContext(backgroundContext);
+vm.runInContext(backgroundSource, backgroundContext);
+const backgroundHelpers = backgroundContext.SKRODZKaiCommandCenterBackground;
+
+function memorySession(initial = {}) {
+  const values = new Map(Object.entries(initial));
+  return {
+    async get(keys) {
+      const requested = Array.isArray(keys) ? keys : [keys];
+      return Object.fromEntries(requested.filter((key) => values.has(key)).map((key) => [key, values.get(key)]));
+    },
+    async set(update) { for (const [key, value] of Object.entries(update)) values.set(key, value); },
+    async remove(keys) { for (const key of Array.isArray(keys) ? keys : [keys]) values.delete(key); },
+    value(key) { return values.get(key); },
+  };
+}
 
 function waitingFixture({ teams = 12, starters = "QB, WR, WR, RB, RB, TE, W/R/T, K, DEF", seat = 7 } = {}) {
   const numbers = Array.from({ length: teams }, (_, index) => index + 1).join("\t");
@@ -170,9 +192,14 @@ test("exports runner and controller receipts using distinct draft-slot and Yahoo
 test("manifest has only the two public-mock surfaces plus the exact verified test league and no broad permissions", async () => {
   const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "0.6.0");
-  assert.equal(manifest.permissions, undefined);
+  assert.equal(manifest.version, "0.6.1");
+  assert.deepEqual(manifest.permissions, ["storage"]);
   assert.equal(manifest.host_permissions, undefined);
+  assert.deepEqual(manifest.background, { service_worker: "extension/command-center-background.js" });
+  assert.deepEqual(manifest.web_accessible_resources, [{
+    resources: ["extension/assets/skrodzkai-enterprises-blue.png", "extension/assets/skrodzkai-globe-mark.png"],
+    matches: ["https://football.fantasysports.yahoo.com/*"],
+  }]);
   assert.deepEqual(manifest.content_scripts[0].matches, [
     "https://football.fantasysports.yahoo.com/f1/mock_waiting*",
     "https://football.fantasysports.yahoo.com/f1/18599/settings*",
@@ -189,6 +216,58 @@ test("manifest has only the two public-mock surfaces plus the exact verified tes
     "extension/yahoo-mock-board.js",
     "extension/yahoo-mock-extension.js",
   ]);
+});
+
+test("popup command center uses the canonical blue SKRODZKai app language and a local relay", () => {
+  assert.match(popupHtml, /skrodzkai-enterprises-blue\.png/);
+  assert.match(popupHtml, /Draft Command Center/);
+  assert.match(popupCss, /--blue:#0a84ff/);
+  assert.match(popupCss, /--cyan:#63d9ff/);
+  assert.match(popupCss, /Avenir Next/);
+  assert.doesNotMatch(`${popupCss}\n${source}`, /#ffd60a|240,186,82|--gold|--yellow/);
+  assert.match(popupSource, /NO YAHOO RUNNER/);
+  assert.match(popupSource, /runnerMissing/);
+  assert.match(backgroundSource, /type:\s*"popup"/);
+  assert.match(backgroundSource, /width:\s*1180/);
+  assert.match(backgroundSource, /skz\.popupWindowId/);
+  assert.match(backgroundSource, /skz\.runnerTabId/);
+  assert.match(backgroundSource, /tabs\.sendMessage/);
+  assert.match(source, /open_command_center/);
+  assert.match(source, /skrodzkai-globe-mark\.png/);
+});
+
+test("command-center relay binds kill and pin to the runner tab even when an arm page keeps publishing", async () => {
+  const session = memorySession();
+  let now = 100;
+  const router = backgroundHelpers.createStateRouter(session, () => now);
+  await router.handleState({ role:"arm-owner", at:now, snapshot:{ label:"READY TO ARM" } }, { tab:{ id:11 } });
+  now = 101;
+  await router.handleState({ role:"runner", at:now, snapshot:{ label:"RUNNING" }, board:[{ yahooId:"1" }] }, { tab:{ id:22 } });
+  now = 102;
+  await router.handleState({ role:"arm-owner", at:now, snapshot:{ label:"READY TO ARM" } }, { tab:{ id:11 } });
+  assert.equal(session.value("skz.snapshot").label, "RUNNING");
+  assert.equal(await router.targetTab("kill"), 22);
+  assert.equal(await router.targetTab("pin"), 22);
+  assert.equal(await router.targetTab("arm"), 11);
+  await router.removeTab(22);
+  assert.equal(session.value("skz.snapshot").label, "READY TO ARM");
+  assert.equal(await router.targetTab("kill"), null);
+});
+
+test("command-center bridge sends content changes separately from its stable heartbeat", () => {
+  const messages = [];
+  let tick = null;
+  const runtime = { sendMessage(message) { messages.push(message); return Promise.resolve({ ok:true }); }, onMessage:{ addListener() {}, removeListener() {} } };
+  const rail = { getSnapshot:() => ({ label:"RUNNING", board:[{ yahooId:"1" }] }), setOpenHandler() {}, command() { return true; } };
+  helpers.attachCommandCenterBridge({ chrome:{ runtime }, location:{ pathname:"/draftclient/f1/123/4" }, setInterval(callback) { tick = callback; return 1; }, clearInterval() {} }, rail);
+  assert.equal(helpers.commandCenterRole("/draftclient/f1/123/4"), "runner");
+  assert.equal(helpers.commandCenterRole("/f1/mock_waiting"), "arm-owner");
+  assert.equal(messages[0].role, "runner");
+  assert.equal(messages[0].snapshot.label, "RUNNING");
+  tick();
+  assert.equal(messages[1].snapshot, undefined);
+  assert.equal(messages[1].board, undefined);
+  assert.equal(Number.isFinite(messages[1].at), true);
 });
 
 test("war-room roster placement respects exact and flex slots rather than pick order", () => {
@@ -256,11 +335,12 @@ test("bundled board contains unique current IDs and complete observed offense ra
 });
 
 test("extension contains no network or remote-model execution path", () => {
-  for (const bundledSource of [source, boardSource, controllerSource, runnerSource]) {
+  for (const bundledSource of [source, boardSource, controllerSource, runnerSource, popupSource, backgroundSource]) {
     assert.doesNotMatch(bundledSource, /\bfetch\s*\(/);
     assert.doesNotMatch(bundledSource, /XMLHttpRequest|WebSocket|EventSource/);
     assert.doesNotMatch(bundledSource, /openrouter|anthropic|openai/i);
   }
+  assert.doesNotMatch(`${popupSource}\n${backgroundSource}`, /https?:\/\//);
   assert.doesNotMatch(source, />HIDE</);
 });
 
@@ -292,13 +372,14 @@ test("manual override pins exact Yahoo IDs to the next room-bound round without 
   assert.throws(() => helpers.validateExactYahooTargets([{ yahooId: "40168" }, { yahooId: "40168" }]), /duplicated/);
 });
 
-test("command-center rendering exposes the expanded operations, override, intel, and kill surfaces", () => {
+test("popup command-center rendering exposes the operations, override, intel, and kill surfaces", () => {
+  const combinedUi = `${source}\n${popupHtml}`;
   for (const label of [
-    "DRAFT COMMAND CENTER", "MOCK / LOCAL", "TEST", "REAL", "League", "Room", "Seat", "Round / Pick", "Clock",
+    "Draft Command Center", "FANTASY OPERATIONS", "League", "Room", "Seat", "Round / Pick", "Clock",
     "Armed", "Autodraft", "Kill switch", "Our roster", "Decision ladder", "Opponent window",
-    "Next-pick override", "Warnings", "Decision receipts", "Pin Next Pick", "KILL SWITCH",
-  ]) assert.match(source, new RegExp(label.replace(/[.*+?^${}()|[\\]\\]/g, "\\\\$&")));
-  assert.match(source, /width: min\(940px, calc\(100vw - 28px\)\)/);
-  assert.match(source, /grid-template-columns: 235px minmax\(360px, 1fr\) 275px/);
+    "Next-pick override", "Warnings", "Decision receipts", "Pin next pick", "KILL SWITCH",
+  ]) assert.match(combinedUi, new RegExp(label.replace(/[.*+?^${}()|[\\]\\]/g, "\\\\$&")));
+  assert.match(combinedUi, /width: min\(380px, calc\(100vw - 32px\)\)/);
+  assert.match(popupCss, /grid-template-columns:250px minmax\(390px,1fr\) 300px/);
   assert.match(source, /rail\.setRoster\(TEST_ROSTER_SLOTS\.map/);
 });

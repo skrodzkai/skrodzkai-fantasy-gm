@@ -1,7 +1,7 @@
 (function installYahooMockExtension(root) {
   "use strict";
 
-  const VERSION = "0.6.0";
+  const VERSION = "0.6.1";
   const GLOBAL_KEY = "__skrodzkaiYahooMockExtensionV1";
   const PREFLIGHT_KEY = "skrodzkai-yahoo-mock-extension-preflight-v1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-extension-receipts-v1";
@@ -364,39 +364,46 @@
     const host = documentRef.createElement("aside");
     host.id = "skrodzkai-yahoo-mock-control";
     host.setAttribute("aria-label", "SKRODZKai Yahoo draft command center");
+    if (/^\/draftclient\//.test(String(root.location?.pathname ?? ""))) host.setAttribute("data-draftclient", "true");
     const shadow = host.attachShadow({ mode: "open" });
     shadow.innerHTML = `
       <style>
-        :host { all: initial; --ink:#061013; --panel:#0a171a; --panel-2:#0d2023; --line:#1b3d41; --cyan:#45e6df; --gold:#f0ba52; --red:#ff7474; --muted:#739296; --white:#eef8f6; }
+        :host { all: initial; --ink:#05070b; --panel:#0b1016; --panel-2:#111923; --line:rgba(255,255,255,.10); --cyan:#63d9ff; --blue-accent:#0a84ff; --red:#ff453a; --muted:#98989d; --white:#ffffff; }
         * { box-sizing: border-box; }
-        .rail { position: fixed; right: 14px; bottom: 14px; z-index: 2147483647; width: 428px; max-width: calc(100vw - 28px); max-height: calc(100vh - 28px); overflow: hidden; color: #d7eae8; background: radial-gradient(circle at 82% -20%, rgba(69,230,223,.18), transparent 34%), repeating-linear-gradient(135deg, rgba(255,255,255,.018) 0 1px, transparent 1px 9px), var(--ink); border: 1px solid #2aa7a8; box-shadow: 0 22px 70px rgba(0,0,0,.62), inset 0 1px rgba(255,255,255,.04); font: 600 11px/1.35 "Avenir Next Condensed", "DIN Condensed", "Futura", sans-serif; letter-spacing: .025em; transition: width .22s ease, transform .22s ease; }
-        .rail.expanded { width: min(940px, calc(100vw - 28px)); }
-        .rail.collapsed { width: 58px; }
+        .rail { position: fixed; right: 16px; bottom: 16px; z-index: 2147483647; width: min(380px, calc(100vw - 32px)); overflow: hidden; color: #fff; background: radial-gradient(circle at 12% 0, rgba(10,132,255,.18), transparent 34%), linear-gradient(180deg,#070b11,#05070b); border: 1px solid rgba(10,132,255,.62); border-radius: 10px; box-shadow: 0 18px 54px rgba(0,0,0,.58), inset 0 1px rgba(255,255,255,.05); font: 600 12px/1.35 "Avenir Next", "SF Pro Text", "Helvetica Neue", sans-serif; letter-spacing: .01em; }
+        :host([data-draftclient]) .rail { top:72px; bottom:auto; }
+        .rail.expanded,.rail.collapsed { width:min(380px,calc(100vw - 32px)); }
         .rail.collapsed .body, .rail.collapsed .mode-strip, .rail.collapsed .cap-meta, .rail.collapsed .brand-lockup { display: none; }
-        .compact-status { display: none; color: var(--gold); font: 900 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace; writing-mode: vertical-rl; letter-spacing: .08em; }
+        .compact-status { display: none; color: var(--blue-accent); font: 900 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace; writing-mode: vertical-rl; letter-spacing: .08em; }
         .rail.collapsed .compact-status { display: block; }
-        .cap { min-height: 54px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; border-bottom: 1px solid var(--line); background: linear-gradient(100deg, #103438, rgba(8,20,23,.96) 66%); }
-        .brand-lockup { display: flex; align-items: center; min-width: 0; gap: 9px; }
+        .cap { min-height: 68px; display: grid; grid-template-columns: 48px minmax(0,1fr) auto; align-items: center; gap: 10px; padding: 9px; border-bottom: 1px solid var(--line); background: rgba(5,8,13,.94); }
+        .brand-lockup { display: flex; align-items: center; min-width: 0; }
+        .brand-image { width:46px; height:46px; object-fit:cover; object-position:center; border-radius:8px; }
+        .dock-readout { min-width:0; }
+        .dock-readout strong { display:block; overflow:hidden; color:var(--cyan); font:700 14px/1.15 "SF Mono",ui-monospace,monospace; text-overflow:ellipsis; white-space:nowrap; }
+        .dock-readout span { display:block; margin-top:4px; overflow:hidden; color:var(--muted); font:700 11px/1.2 "SF Mono",ui-monospace,monospace; text-overflow:ellipsis; white-space:nowrap; }
+        .dock-actions { display:grid; gap:6px; }
+        .dock-actions button { min-width:70px; padding:7px 6px; font-size:10px; }
         .globe { position: relative; width: 34px; height: 34px; flex: 0 0 34px; border: 2px solid var(--cyan); border-radius: 50%; box-shadow: 0 0 18px rgba(69,230,223,.24); overflow: hidden; }
         .globe::before { content:""; position:absolute; inset:5px 9px; border-left:1px solid var(--cyan); border-right:1px solid var(--cyan); border-radius:50%; }
         .globe::after { content:""; position:absolute; left:2px; right:2px; top:15px; border-top:1px solid var(--cyan); box-shadow:0 -7px rgba(69,230,223,.45), 0 7px rgba(69,230,223,.45); }
         .brand { color: var(--white); font-size: 16px; font-weight: 900; letter-spacing: .13em; white-space: nowrap; }
         .brand i { color: var(--cyan); font-style: normal; }
-        .subbrand { margin-top: 1px; color: var(--gold); font: 900 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .18em; }
+        .subbrand { margin-top: 1px; color: var(--blue-accent); font: 900 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .18em; }
         .cap-meta { display: flex; align-items: center; gap: 6px; }
-        .mode { color: var(--gold); font: 900 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .1em; }
+        .mode { color: var(--blue-accent); font: 900 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .1em; }
         .mode-strip { display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid var(--line); background: rgba(3,10,12,.75); }
         .mode-chip { padding: 6px 4px; color: #5f7d81; text-align: center; font: 900 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .14em; }
-        .mode-chip.active { color: var(--ink); background: var(--gold); }
+        .mode-chip.active { color: var(--ink); background: var(--blue-accent); }
         .mode-chip.blocked { color: #bd6262; text-decoration: line-through; }
-        .body { max-height: calc(100vh - 97px); overflow: auto; scrollbar-color: #2b5d61 var(--ink); }
+        .body,.mode-strip { display:none !important; }
         .status { display: grid; grid-template-columns: repeat(4, 1fr); border-bottom: 1px solid var(--line); }
         .expanded .status { grid-template-columns: repeat(8, 1fr); }
         .stat { min-width: 0; padding: 8px 9px 7px; border-right: 1px solid var(--line); }
         .stat:last-child { border-right: 0; }
         .label { display: block; color: var(--muted); font: 900 7px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; text-transform: uppercase; }
         .value { display: block; margin-top: 5px; overflow: hidden; color: var(--white); font: 900 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
-        .value.accent { color: var(--cyan); } .value.warn { color: var(--gold); } .value.danger { color: var(--red); }
+        .value.accent { color: var(--cyan); } .value.warn { color: var(--blue-accent); } .value.danger { color: var(--red); }
         .overview { position: relative; padding: 9px 11px 10px; border-bottom: 1px solid var(--line); background: linear-gradient(90deg, rgba(69,230,223,.07), transparent 55%); }
         .state { color: var(--white); font: 900 18px/.95 "Avenir Next Condensed", "DIN Condensed", sans-serif; letter-spacing: .08em; text-transform: uppercase; }
         .detail { min-height: 15px; margin-top: 4px; color: #8da9ad; font: 700 9px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
@@ -420,10 +427,10 @@
         .pill { padding:3px 5px; border:1px solid #24484c; color:#8ca8ab; font:900 7px/1 ui-monospace,SFMono-Regular,Menlo,monospace; }
         .pill b { color:var(--cyan); }
         .board-row { display:grid; grid-template-columns:28px minmax(0,1fr) 68px; gap:7px; padding:7px 4px; border-bottom:1px solid #17363a; }
-        .board-row.primary { padding-left:7px; border-left:3px solid var(--gold); background:linear-gradient(90deg,rgba(240,186,82,.12),transparent 74%); }
+        .board-row.primary { padding-left:7px; border-left:3px solid var(--blue-accent); background:linear-gradient(90deg,rgba(10,132,255,.12),transparent 74%); }
         .board-row.pinned { border-left-color:var(--cyan); background:linear-gradient(90deg,rgba(69,230,223,.14),transparent 74%); }
         .rank { color:#678c90; font:900 9px/1 ui-monospace,SFMono-Regular,Menlo,monospace; }
-        .primary .rank { color:var(--gold); } .pinned .rank { color:var(--cyan); }
+        .primary .rank { color:var(--blue-accent); } .pinned .rank { color:var(--cyan); }
         .player { overflow:hidden; color:var(--white); font-size:12px; font-weight:900; letter-spacing:.02em; text-overflow:ellipsis; white-space:nowrap; }
         .player em { color:#759397; font-style:normal; font:800 8px/1 ui-monospace,SFMono-Regular,Menlo,monospace; }
         .reason { margin-top:3px; overflow:hidden; color:#759397; font:700 8px/1.25 ui-monospace,SFMono-Regular,Menlo,monospace; text-overflow:ellipsis; white-space:nowrap; }
@@ -432,7 +439,7 @@
         .search { display:flex; gap:5px; padding:0 9px 7px; }
         input { min-width:0; flex:1; padding:7px 8px; border:1px solid #28565a; border-radius:0; outline:none; color:var(--white); background:#071416; font:800 9px ui-monospace,SFMono-Regular,Menlo,monospace; }
         input:focus { border-color:var(--cyan); box-shadow:0 0 0 1px rgba(69,230,223,.16); }
-        .pin-state { margin:0 9px 7px; padding:7px 8px; border-left:2px solid var(--gold); color:#a9c0c2; background:rgba(240,186,82,.06); font:800 8px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace; }
+        .pin-state { margin:0 9px 7px; padding:7px 8px; border-left:2px solid var(--blue-accent); color:#a9c0c2; background:rgba(10,132,255,.06); font:800 8px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace; }
         .pin-state.live { border-left-color:var(--cyan); color:var(--white); background:rgba(69,230,223,.08); }
         .manual-list { max-height:108px; overflow:auto; padding:0 9px 6px; }
         .manual-row { display:flex; align-items:center; gap:5px; padding:3px 0; border-bottom:1px dotted #1b3e41; }
@@ -443,20 +450,20 @@
         button { appearance:none; border:1px solid #315b5e; border-radius:0; padding:6px 8px; color:#c7e4e5; background:transparent; cursor:pointer; font:900 8px/1 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.08em; text-transform:uppercase; }
         button:hover:not(:disabled) { border-color:var(--cyan); color:var(--cyan); }
         button.primary { border-color:var(--cyan); color:var(--ink); background:var(--cyan); }
-        button.danger { border-color:#b94f54; color:#ff9292; } button.warn { border-color:var(--gold); color:var(--gold); }
+        button.danger { border-color:#b94f54; color:#ff9292; } button.warn { border-color:var(--blue-accent); color:var(--blue-accent); }
         button:disabled { cursor:not-allowed; opacity:.32; }
         .manual-actions button,.actions button { flex:1; }
         .window-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:4px; margin-bottom:7px; }
         .window-cell { padding:6px 5px; border:1px solid #244348; text-align:center; }
         .window-cell span { display:block; color:#658589; font:800 7px/1 ui-monospace,SFMono-Regular,Menlo,monospace; text-transform:uppercase; }
-        .window-cell b { display:block; margin-top:4px; color:var(--gold); font:900 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace; }
+        .window-cell b { display:block; margin-top:4px; color:var(--blue-accent); font:900 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace; }
         .pressure { padding:3px 0; color:#a7bec0; font:700 8px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace; }
-        .pressure b { color:var(--gold); }
+        .pressure b { color:var(--blue-accent); }
         .manager-note { margin-top:5px; padding:6px 7px; border:1px dashed #2c5559; color:#66878a; font:800 7px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace; }
         .event-log { max-height:106px; overflow:auto; padding:0 9px 9px; }
         .event { padding:3px 0; color:#6f8c90; font:700 7px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace; }
         .event b { color:#b7d2d3; }
-        .warning { padding:3px 0; color:var(--gold); font:800 7px/1.25 ui-monospace,SFMono-Regular,Menlo,monospace; }
+        .warning { padding:3px 0; color:var(--blue-accent); font:800 7px/1.25 ui-monospace,SFMono-Regular,Menlo,monospace; }
         .warning.danger { color:var(--red); }
         .actions { position:sticky; bottom:0; padding:9px; border-top:1px solid var(--line); background:rgba(4,13,15,.97); }
         .ok .state { color:var(--cyan); } .bad .state { color:var(--red); } .complete .state { color:#d9ff78; }
@@ -465,9 +472,9 @@
       </style>
       <section class="rail">
         <header class="cap">
-          <div class="brand-lockup"><span class="globe" aria-hidden="true"></span><div><div class="brand">SKRODZK<i>ai</i></div><div class="subbrand">DRAFT COMMAND CENTER</div></div></div>
-          <span class="compact-status" data-compact-status>TEST · SAFE</span>
-          <div class="cap-meta"><span class="mode">MOCK / LOCAL</span><button class="expand" type="button">Command Center</button><button class="collapse" type="button" aria-label="Collapse command center">−</button></div>
+          <div class="brand-lockup"><img class="brand-image" src="${root.chrome?.runtime?.getURL?.("extension/assets/skrodzkai-globe-mark.png") ?? ""}" alt="SKRODZKai" /></div>
+          <div class="dock-readout"><strong data-dock-primary>SAFE · --:--</strong><span data-compact-status>MOCK · ROOM — · SEAT —</span><span data-dock-target>Waiting for Yahoo availability</span></div>
+          <div class="dock-actions"><button class="expand" type="button">Open Center</button><button class="dock-kill danger" type="button">Kill</button></div>
         </header>
         <div class="mode-strip"><span class="mode-chip active">MOCK</span><span class="mode-chip">TEST</span><span class="mode-chip blocked">REAL ⛔</span></div>
         <div class="body">
@@ -502,10 +509,10 @@
       status: Object.fromEntries([...shadow.querySelectorAll("[data-status]")].map((node) => [node.dataset.status, node])),
       roster: shadow.querySelector("[data-roster]"), rosterCount: shadow.querySelector("[data-roster-count]"), composition: shadow.querySelector("[data-composition]"), latestPick: shadow.querySelector("[data-latest-pick]"),
       board: shadow.querySelector("[data-board]"), between: shadow.querySelector("[data-between]"), warnings: shadow.querySelector("[data-warnings]"), warningCount: shadow.querySelector("[data-warning-count]"), events: shadow.querySelector("[data-events]"), disagreement: shadow.querySelector("[data-disagreement]"),
-      stageCount: shadow.querySelector("[data-stage-count]"), pinState: shadow.querySelector("[data-pin-state]"), search: shadow.querySelector("[data-search]"), manualList: shadow.querySelector("[data-manual-list]"), clearPin: shadow.querySelector("[data-clear-pin]"), confirm: shadow.querySelector("[data-confirm]"), compact: shadow.querySelector("[data-compact-status]"), modeLabel: shadow.querySelector(".mode"), modeChips: [...shadow.querySelectorAll(".mode-chip")],
+      stageCount: shadow.querySelector("[data-stage-count]"), pinState: shadow.querySelector("[data-pin-state]"), search: shadow.querySelector("[data-search]"), manualList: shadow.querySelector("[data-manual-list]"), clearPin: shadow.querySelector("[data-clear-pin]"), confirm: shadow.querySelector("[data-confirm]"), compact: shadow.querySelector("[data-compact-status]"), dockPrimary: shadow.querySelector("[data-dock-primary]"), dockTarget: shadow.querySelector("[data-dock-target]"), modeLabel: shadow.querySelector(".mode"), modeChips: [...shadow.querySelectorAll(".mode-chip")],
     };
     const controls = { arm: shadow.querySelector(".arm"), halt: shadow.querySelector(".halt"), export: shadow.querySelector(".export") };
-    const ui = { mode:"MOCK", roster:[], board:[], staged:[], pinned:null, pinOutcome:null, events:[], latestPickId:"", onManualConfirm:null, onManualClear:null };
+    const ui = { mode:"MOCK", kind:"", label:"LOCKED", detail:"Waiting for a verified draft room.", context:{}, roster:[], recommendations:[], board:[], between:{}, warnings:[], staged:[], pinned:null, pinOutcome:null, pinText:"No pin staged. Five verified fallbacks remain active.", pinLabel:"BASELINE", ladderState:"BASELINE READY", latestText:"No confirmed selection yet.", events:[], latestPickId:"", onManualConfirm:null, onManualClear:null, onOpen:null };
     const redrawManual = () => {
       const query = String(data.search.value ?? "").trim().toUpperCase();
       const matches = ui.board.filter((player) => `${player.name} ${player.position} ${player.team} ${player.yahooId}`.toUpperCase().includes(query)).slice(0, 10);
@@ -527,6 +534,8 @@
         : ui.pinOutcome
           ? `${ui.pinOutcome.status.toUpperCase()} R${ui.pinOutcome.expectedRound ?? "—"}: ${ui.pinOutcome.chosenYahooId ? `Y!${ui.pinOutcome.chosenYahooId}` : ui.pinOutcome.reason ?? "baseline retained"}`
           : "No pin staged. The verified baseline will execute.";
+      ui.pinLabel = data.stageCount.textContent;
+      ui.pinText = data.pinState.textContent;
     };
     data.search.addEventListener("input", redrawManual);
     data.confirm.addEventListener("click", () => {
@@ -535,42 +544,99 @@
       if (result !== false) { ui.staged = []; redrawManual(); }
     });
     data.clearPin.addEventListener("click", () => { if (typeof ui.onManualClear === "function" && ui.onManualClear() !== false) { ui.pinned = null; ui.pinOutcome = { status:"cleared", expectedRound:null, reason:"deterministic baseline active" }; redrawManual(); } });
-    shadow.querySelector(".expand").addEventListener("click", () => { rail.classList.toggle("expanded"); rail.classList.remove("collapsed"); });
-    shadow.querySelector(".collapse").addEventListener("click", () => { rail.classList.toggle("collapsed"); rail.classList.remove("expanded"); });
+    shadow.querySelector(".expand").addEventListener("click", () => ui.onOpen?.());
+    shadow.querySelector(".dock-kill").addEventListener("click", () => controls.halt.click());
     const setStatus = (key, value, kind = "") => { if (!data.status[key]) return; data.status[key].textContent = value; data.status[key].className = `value ${kind}`.trim(); };
     const api = {
       controls,
-      setMode(mode) { ui.mode = String(mode ?? "MOCK").toUpperCase(); data.modeLabel.textContent = `${ui.mode} / LOCAL`; for (const chip of data.modeChips) { const chipMode = String(chip.textContent ?? "").replace("⛔", "").trim(); chip.classList.toggle("active", chipMode === ui.mode); } },
-      render(kind, label, message) { rail.classList.remove("ok", "bad", "complete"); if (kind) rail.classList.add(kind); state.textContent = label; detail.textContent = message; },
-      setExpanded(expanded = true) { rail.classList.toggle("expanded", Boolean(expanded)); if (expanded) rail.classList.remove("collapsed"); },
+      setMode(mode) { ui.mode = String(mode ?? "MOCK").toUpperCase(); if (data.modeLabel) data.modeLabel.textContent = `${ui.mode} / LOCAL`; for (const chip of data.modeChips) { const chipMode = String(chip.textContent ?? "").replace("⛔", "").trim(); chip.classList.toggle("active", chipMode === ui.mode); } },
+      render(kind, label, message) { ui.kind=kind; ui.label=label; ui.detail=message; rail.classList.remove("ok", "bad", "complete"); if (kind) rail.classList.add(kind); state.textContent = label; detail.textContent = message; },
+      setExpanded(expanded = true) { if (expanded) ui.onOpen?.(); },
+      setOpenHandler(handler) { ui.onOpen = typeof handler === "function" ? handler : null; },
       setContext(context = {}) {
         const roomId = String(context.roomId ?? "—");
         setStatus("league", context.league ?? (roomId === DISABLED_LEAGUE_ID ? "420010 BLOCKED" : "PUBLIC"), roomId === DISABLED_LEAGUE_ID ? "danger" : ""); setStatus("room", roomId); setStatus("seat", context.seat == null ? "—" : String(context.seat)); setStatus("turn", context.round == null ? "— / —" : `R${context.round} / P${context.pick ?? "—"}`); setStatus("clock", context.clock ?? "--:--"); setStatus("armed", context.armed ? "YES" : "NO", context.armed ? "accent" : "warn"); setStatus("autodraft", context.autodraft ? "ON / BLOCKED" : "OFF", context.autodraft ? "danger" : ""); setStatus("kill", context.kill ? "ENGAGED" : "READY", context.kill ? "danger" : "");
-        data.compact.textContent = `${ui.mode} · ${roomId} · S${context.seat ?? "—"} · ${context.round == null ? "—" : `R${context.round}P${context.pick ?? "—"}`} · ${context.clock ?? "--:--"} · ${context.kill ? "KILL" : context.armed ? "ARMED" : "SAFE"}`;
+        ui.context = { ...context, roomId };
+        data.dockPrimary.textContent = `${context.kill ? "KILL" : context.armed ? "ARMED" : "SAFE"} · ${context.clock ?? "--:--"}`;
+        data.compact.textContent = `${ui.mode} · ${roomId} · S${context.seat ?? "—"} · ${context.round == null ? "—" : `R${context.round}P${context.pick ?? "—"}`}`;
       },
       setRoster(roster = [], latest = null) {
         ui.roster = Array.isArray(roster) ? roster : []; data.roster.innerHTML = ui.roster.map((slot) => `<div class="slot ${slot.player ? "filled" : "open"}"><span>${slot.slot}</span><b>${slot.player?.name ?? "OPEN"}</b></div>`).join("") || `<div class="event">Roster readback unavailable.</div>`; data.rosterCount.textContent = `${ui.roster.filter((slot) => slot.player).length} / ${ui.roster.length || 15}`;
         const counts = ui.roster.filter((slot) => slot.player).reduce((map, slot) => { const position = normalize(slot.player.position); map[position] = (map[position] ?? 0) + 1; return map; }, {}); data.composition.innerHTML = ["QB","RB","WR","TE","K","DEF","IDP"].map((position) => `<span class="pill">${position} <b>${position === "IDP" ? (counts.D ?? 0) + (counts.LB ?? 0) + (counts.CB ?? 0) + (counts.S ?? 0) : counts[position] ?? 0}</b></span>`).join("");
-        data.latestPick.textContent = latest ? `${latest.name ?? `Y!${latest.yahooId}`} · ${latest.position ?? "—"} · ${latest.detectionToClickMs ?? "—"}ms` : "No confirmed selection yet."; const latestId = String(latest?.yahooId ?? ""); if (latest && latestId !== ui.latestPickId) { ui.latestPickId = latestId; api.addEvent("pick confirmed", `${latest.name ?? "Yahoo ID " + latest.yahooId} · ${latest.position ?? "—"}`); }
+        ui.latestText = latest ? `${latest.name ?? `Y!${latest.yahooId}`} · ${latest.position ?? "—"} · ${latest.detectionToClickMs ?? "—"}ms` : "No confirmed selection yet."; data.latestPick.textContent = ui.latestText; const latestId = String(latest?.yahooId ?? ""); if (latest && latestId !== ui.latestPickId) { ui.latestPickId = latestId; api.addEvent("pick confirmed", `${latest.name ?? "Yahoo ID " + latest.yahooId} · ${latest.position ?? "—"}`); }
       },
       setRecommendations(recommendations = [], meta = {}) {
-        if (Array.isArray(meta.fullBoard)) ui.board = meta.fullBoard; const rows = Array.isArray(recommendations) ? recommendations : [];
+        if (Array.isArray(meta.fullBoard)) ui.board = meta.fullBoard; const rows = Array.isArray(recommendations) ? recommendations : []; ui.recommendations = rows;
         data.board.innerHTML = rows.slice(0, 6).map((player, index) => `<div class="board-row ${index === 0 ? "primary" : ""} ${player.manual ? "pinned" : ""}"><span class="rank">${player.manual ? "PIN" : index === 0 ? "GO" : `F${index}`}</span><div><div class="player">${player.name ?? `Yahoo ${player.yahooId}`} <em>${player.position ?? "—"} · ${player.team ?? "—"}</em></div><div class="reason">${player.reason ?? "verified local ladder"}</div></div><div class="metrics">${player.edge ?? "—"}<br><span class="dim">${player.confidence ?? "—"} · ${player.freshness ?? "—"}</span></div></div>`).join("") || `<div class="event">Ladder resolves on our owned turn after Yahoo availability is validated.</div>`;
-        const manual = rows[0]?.manual; data.disagreement.textContent = meta.disagreement ? "MODEL DISAGREEMENT" : manual ? "MANUAL PIN APPLIED" : "BASELINE READY"; data.disagreement.className = meta.disagreement ? "danger" : ""; redrawManual();
+        const manual = rows[0]?.manual; ui.ladderState = meta.disagreement ? "MODEL DISAGREEMENT" : manual ? "MANUAL PIN APPLIED" : "BASELINE READY"; data.disagreement.textContent = ui.ladderState; data.disagreement.className = meta.disagreement ? "danger" : ""; data.dockTarget.textContent = rows[0] ? `${rows[0].name ?? `Y!${rows[0].yahooId}`} · ${rows[0].position ?? "—"}` : "Waiting for Yahoo availability"; redrawManual();
       },
       setBetweenTurns(info = {}) {
+        ui.between = info;
         const atRisk = Array.isArray(info.atRisk) && info.atRisk.length ? info.atRisk.join(", ") : "Targets withheld until Yahoo availability is read.";
         data.between.innerHTML = `<div class="window-grid"><div class="window-cell"><span>Current</span><b>${info.currentPick ?? "—"}</b></div><div class="window-cell"><span>Next ours</span><b>${info.nextPick ?? "—"}</b></div><div class="window-cell"><span>Between</span><b>${info.intervening ?? "—"}</b></div></div><div class="pressure"><b>At risk:</b> ${atRisk}</div><div class="manager-note">${info.managerNote ?? "PUBLIC MOCK · room behavior only; historical 2 Minute Drillers manager profiles are not applicable."}</div>`;
       },
-      setWarnings(warnings = []) { const list = Array.isArray(warnings) ? warnings.filter(Boolean) : []; data.warningCount.textContent = String(list.length); data.warnings.innerHTML = list.length ? list.map((warning) => `<div class="warning ${warning.severity === "danger" ? "danger" : ""}">⚠ ${warning.text ?? warning}</div>`).join("") : `<div class="warning">No active warnings.</div>`; },
+      setWarnings(warnings = []) { const list = Array.isArray(warnings) ? warnings.filter(Boolean) : []; ui.warnings=list; data.warningCount.textContent = String(list.length); data.warnings.innerHTML = list.length ? list.map((warning) => `<div class="warning ${warning.severity === "danger" ? "danger" : ""}">⚠ ${warning.text ?? warning}</div>`).join("") : `<div class="warning">No active warnings.</div>`; },
       addEvent(kind, detailText = "") { ui.events.unshift({ at:new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" }), kind, detail:detailText }); ui.events = ui.events.slice(0, 18); data.events.innerHTML = ui.events.map((event) => `<div class="event">${event.at} <b>${event.kind}</b>${event.detail ? ` · ${event.detail}` : ""}</div>`).join(""); },
       setBoard(board = []) { ui.board = Array.isArray(board) ? board : []; redrawManual(); },
       setManualHandler(confirmHandler, clearHandler = null) { ui.onManualConfirm = confirmHandler; ui.onManualClear = clearHandler; },
       setPinned(stage = null) { ui.pinned = stage; if (stage) ui.pinOutcome = null; redrawManual(); },
       setPinOutcome(outcome = null) { ui.pinned = null; ui.pinOutcome = outcome; redrawManual(); },
       getManualStage() { return ui.staged.slice(); },
+      command(name, payload = null) {
+        if (name === "arm") { controls.arm.click(); return true; }
+        if (name === "kill") { controls.halt.click(); return true; }
+        if (name === "export") { controls.export.click(); return true; }
+        if (name === "clear_pin" && typeof ui.onManualClear === "function") {
+          const cleared = ui.onManualClear();
+          if (cleared !== false) { ui.pinned = null; ui.pinOutcome = { status:"cleared", expectedRound:null, reason:"deterministic baseline active" }; redrawManual(); }
+          return cleared;
+        }
+        if (name === "pin" && typeof ui.onManualConfirm === "function") return ui.onManualConfirm(Array.isArray(payload?.targets) ? payload.targets : []);
+        return false;
+      },
+      getSnapshot() {
+        return { version:VERSION, mode:ui.mode, kind:ui.kind, label:ui.label, detail:ui.detail, context:ui.context, roster:ui.roster, recommendations:ui.recommendations, board:ui.board, between:ui.between, warnings:ui.warnings, events:ui.events, latestText:ui.latestText, ladderState:ui.ladderState, pinned:ui.pinned, pinOutcome:ui.pinOutcome, pinText:ui.pinText, pinLabel:ui.pinLabel, controls:{ arm:{ disabled:controls.arm.disabled, text:controls.arm.textContent }, halt:{ disabled:controls.halt.disabled, text:controls.halt.textContent }, export:{ disabled:controls.export.disabled, text:controls.export.textContent } } };
+      },
     };
     api.setContext(); api.setRoster(PUBLIC_ROSTER_SLOTS.map((slot) => ({ slot }))); api.setRecommendations([]); api.setBetweenTurns(); api.setWarnings([]); redrawManual(); host._controlApi = api; return api;
+  }
+
+  function commandCenterRole(pathname = "") {
+    if (/^\/draftclient\/f1\/\d+\/\d+\/?$/.test(pathname)) return "runner";
+    if (pathname === "/f1/mock_waiting" || pathname === `/f1/${TEST_LEAGUE_ID}/draft`) return "arm-owner";
+    return "observer";
+  }
+
+  function attachCommandCenterBridge(environment, rail) {
+    const runtime = environment.chrome?.runtime ?? root.chrome?.runtime;
+    if (!runtime?.sendMessage || !runtime?.onMessage || typeof rail?.getSnapshot !== "function") return null;
+    const role = commandCenterRole(environment.location?.pathname);
+    let boardHash = "";
+    let snapshotHash = "";
+    const publish = () => {
+      const full = rail.getSnapshot();
+      const board = Array.isArray(full.board) ? full.board : [];
+      const nextBoardHash = JSON.stringify(board);
+      const { board: omittedBoard, ...snapshot } = full;
+      void omittedBoard;
+      const boardChanged = nextBoardHash !== boardHash;
+      const nextSnapshotHash = JSON.stringify(snapshot);
+      const snapshotChanged = nextSnapshotHash !== snapshotHash;
+      if (boardChanged) boardHash = nextBoardHash;
+      if (snapshotChanged) snapshotHash = nextSnapshotHash;
+      void runtime.sendMessage({ type:"state", role, at:Date.now(), snapshot:snapshotChanged ? snapshot : undefined, board:role === "runner" && boardChanged ? board : undefined });
+    };
+    rail.setOpenHandler(() => void runtime.sendMessage({ type:"open_command_center" }));
+    const onMessage = (message, _sender, sendResponse) => {
+      if (message?.type !== "command") return;
+      const ok = rail.command(message.command, message.payload);
+      publish();
+      sendResponse({ ok:ok !== false });
+    };
+    runtime.onMessage.addListener(onMessage);
+    publish();
+    const timer = environment.setInterval(publish, 250);
+    return { publish, stop() { environment.clearInterval(timer); runtime.onMessage.removeListener(onMessage); } };
   }
 
   async function waitForEmptyDraft(documentRef, controllerApi, environment, expectedRosterTotal = 15, executionMode = "MOCK", deadlineMs = 15000) {
@@ -898,7 +964,8 @@
     const statusTimer = environment.setInterval(() => {
       const status = runner.getStatus();
       const turn = controllerApi.runtime.readOwnedTurn(environment.document);
-      const clock = (String(environment.document.body?.innerText ?? "").match(/\b\d{1,2}:\d{2}\b/) ?? ["--:--"])[0];
+      const clock = "--:--";
+      const clockVerified = false;
       const autodraft = controllerApi.runtime.isAutodraftActive(environment.document);
       const marker = JSON.stringify([status.state, status.picks.length, status.failure, turn?.label ?? null, clock, autodraft]);
       if (marker === last) return;
@@ -906,7 +973,7 @@
       const kind = status.state === "completed" ? "complete" : status.state === "running" ? "ok" : "bad";
       const roster = controllerApi.runtime.parseRosterCount(environment.document.body?.innerText);
       const decision = runner.exportReceipts().filter((entry) => entry.kind === "runner_turn_resolved").at(-1)?.decision ?? null;
-      rail.setContext({ roomId: room.roomId, seat: draftSeat, league: leagueLabel, round: turn?.round, pick: turn?.pick, clock, armed: true, autodraft, kill: ["halted", "failed"].includes(status.state) });
+      rail.setContext({ roomId: room.roomId, seat: draftSeat, league: leagueLabel, round: turn?.round, pick: turn?.pick, clock, clockVerified, armed: true, autodraft, kill: ["halted", "failed"].includes(status.state) });
       rail.setRoster(buildUiRoster(status.picks, rosterSlots), status.picks.at(-1));
       rail.setRecommendations(buildUiRecommendations(board, decision), { fullBoard: board, disagreement: status.failure?.code?.includes("mismatch") });
       rail.setBetweenTurns(buildUiOpponentWindow(decision, executionMode));
@@ -925,6 +992,7 @@
   async function boot(environment = root) {
     if (!environment.document || !environment.location) return null;
     const rail = createRail(environment.document);
+    attachCommandCenterBridge(environment, rail);
     try {
       if (environment.location.pathname === "/f1/mock_waiting") {
         bootWaitingRoom(environment, rail);
@@ -978,6 +1046,8 @@
       buildUiRoster,
       buildUiRecommendations,
       buildUiOpponentWindow,
+      commandCenterRole,
+      attachCommandCenterBridge,
       publicRosterSlots: PUBLIC_ROSTER_SLOTS,
       testRosterSlots: TEST_ROSTER_SLOTS,
     },

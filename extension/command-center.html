@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SKRODZKai Draft Command Center</title>
+    <link rel="stylesheet" href="command-center.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <img class="brand" src="assets/skrodzkai-enterprises-blue.png" alt="SKRODZKai" />
+        <div class="title"><span>FANTASY OPERATIONS</span><h1>Draft Command Center</h1><small>Runner lives in the Yahoo tab — keep that tab open.</small></div>
+        <div class="connection"><i></i><span data-connection>WAITING FOR YAHOO</span></div>
+      </header>
+
+      <section class="status-grid" data-status-grid></section>
+      <section class="banner neutral" data-banner><strong>LOCKED</strong><span>Waiting for a verified draft surface.</span></section>
+
+      <section class="workspace">
+        <div class="column roster-column">
+          <div class="section-heading"><span>Our roster</span><b data-roster-count>0 / 15</b></div>
+          <div class="roster" data-roster></div>
+          <div class="composition" data-composition></div>
+          <div class="card latest"><label>Latest Yahoo confirmation</label><strong data-latest>No confirmed selection yet.</strong></div>
+        </div>
+
+        <div class="column decision-column">
+          <div class="section-heading"><span>Decision ladder</span><b data-ladder-state>BASELINE READY</b></div>
+          <div class="ladder" data-ladder></div>
+          <div class="section-heading override-heading"><span>Next-pick override</span><b data-pin-state-label>BASELINE</b></div>
+          <div class="pin-state" data-pin-state>No pin staged. Five verified fallbacks remain active.</div>
+          <div class="search-row"><input data-search type="search" placeholder="Search player, team, position, or exact Yahoo ID" /><button data-clear-search type="button">Clear</button></div>
+          <div class="player-search" data-player-search></div>
+          <div class="pin-actions"><button data-clear-pin type="button" class="secondary">Clear pin</button><button data-pin type="button" class="primary">Pin next pick</button></div>
+        </div>
+
+        <div class="column intel-column">
+          <div class="section-heading"><span>Opponent window</span><b>SNAKE + SURVIVAL</b></div>
+          <div class="opponent" data-opponent></div>
+          <div class="section-heading"><span>Warnings</span><b data-warning-count>0</b></div>
+          <div class="warnings" data-warnings></div>
+          <div class="section-heading"><span>Decision receipts</span><b>LOCAL ONLY</b></div>
+          <div class="events" data-events></div>
+        </div>
+      </section>
+
+      <footer class="controls">
+        <div class="next-up"><label>Top live target</label><strong data-top-target>Waiting for Yahoo availability</strong></div>
+        <button data-arm type="button" class="primary" disabled>ARM</button>
+        <button data-kill type="button" class="danger" disabled>KILL SWITCH</button>
+        <button data-export type="button" class="secondary" disabled>EXPORT RECEIPTS</button>
+      </footer>
+    </main>
+    <script src="command-center.js"></script>
+  </body>
+</html>
