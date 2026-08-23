@@ -105,7 +105,7 @@ test("binds an arm token to one room and seat with a fixed expiration", () => {
 test("binds the verified test league to team 12 while keeping the snake draft slot separate", () => {
   const settingsDocument = {
     body: {
-      innerText: "League Name:\tHORSE COLLAR #2\nDraft Type:\tLive Standard Draft\nMax Teams:\t12\nLive Draft Pick Time:\t1 Minute, 15 Seconds\nRoster\u00a0Positions:\tQB, WR, WR, RB, RB, W/R, W/R/T, K, DEF, D, LB, CB, S, BN, BN, BN, BN, BN, BN, IR, IR, IR",
+      innerText: "League Name:\tHORSE COLLAR #2\nDraft Type:\tLive Standard Draft\nMax Teams:\t12\nLive Draft Pick Time:\t1 Minute, 15 Seconds\nPassing Touchdowns\t4\nReceptions Yahoo Default\t1\t0.5\nRoster\u00a0Positions:\tQB, WR, WR, RB, RB, W/R, W/R/T, K, DEF, D, LB, CB, S, BN, BN, BN, BN, BN, BN, IR, IR, IR",
     },
   };
   const settingsSnapshot = helpers.parseTestSettings(settingsDocument, { pathname: "/f1/18599/settings" });
@@ -139,6 +139,32 @@ test("binds the verified test league to team 12 while keeping the snake draft sl
     helpers.parseTestDraftHome({ body: { innerText: document.body.innerText.replace("Your Draft Position: 4th", "Projected Draft Position: 4th") } }, location, settingsReceipt, 1_001).errors.includes("test_draft_slot_pending"),
     true,
   );
+});
+
+test("arms the exact TEST draftclient from its live slot while preserving Yahoo team identity", () => {
+  const options = ["All Positions", "Kickers", "Team Defenses", "Defensive Players", "Linebackers", "Cornerbacks", "Safeties"]
+    .map((textContent) => ({ textContent, value: textContent }));
+  const select = { options };
+  const document = {
+    body: { innerText: "YAHOO FANTASY FOOTBALL DRAFT\nHORSE COLLAR #2\nYOUR TURN - 3RD PICK\nYOUR TURN - 22ND PICK\nYOUR TEAM (0/19)" },
+    querySelectorAll(selector) { return selector === "select" ? [select] : []; },
+  };
+  const settingsReceipt = {
+    roomId: "18599",
+    observedTeamCount: 12,
+    observedRosterSlots: [...helpers.testRosterSlots],
+    observedFullRosterSlots: [...helpers.testRosterSlots, "IR", "IR", "IR"],
+    expiresAt: 10_000,
+  };
+  const snapshot = helpers.parseTestDraftClient(document, { pathname: "/draftclient/f1/18599/12" }, settingsReceipt, 1_000);
+  assert.equal(snapshot.ready, true);
+  assert.equal(snapshot.seat, 3);
+  assert.equal(snapshot.urlSeat, 12);
+  assert.equal(snapshot.rosterSlots.length, 19);
+  assert.deepEqual([...snapshot.missingFilters], []);
+  assert.equal(helpers.makeTestPreflight(snapshot, 1_000).seat, 3);
+  assert.equal(helpers.parseTestDraftClient(document, { pathname: "/draftclient/f1/420010/12" }, settingsReceipt, 1_000).ready, false);
+  assert.equal(helpers.parseTestDraftClient({ ...document, body: { innerText: document.body.innerText.replace("0/19", "1/19") } }, { pathname: "/draftclient/f1/18599/12" }, settingsReceipt, 1_000).ready, false);
 });
 
 test("attaches current Yahoo defense IDs only to exact ranked teams", () => {
@@ -192,7 +218,7 @@ test("exports runner and controller receipts using distinct draft-slot and Yahoo
 test("manifest has only the two public-mock surfaces plus the exact verified test league and no broad permissions", async () => {
   const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "0.6.1");
+  assert.equal(manifest.version, "0.6.2");
   assert.deepEqual(manifest.permissions, ["storage"]);
   assert.equal(manifest.host_permissions, undefined);
   assert.deepEqual(manifest.background, { service_worker: "extension/command-center-background.js" });
@@ -252,6 +278,13 @@ test("command-center relay binds kill and pin to the runner tab even when an arm
   await router.removeTab(22);
   assert.equal(session.value("skz.snapshot").label, "READY TO ARM");
   assert.equal(await router.targetTab("kill"), null);
+});
+
+test("command-center relay can arm an exact live TEST runner when no overview arm page remains", async () => {
+  const session = memorySession();
+  const router = backgroundHelpers.createStateRouter(session, () => 100);
+  await router.handleState({ role:"runner", at:100, snapshot:{ label:"READY TO ARM TEST" } }, { tab:{ id:22 } });
+  assert.equal(await router.targetTab("arm"), 22);
 });
 
 test("command-center bridge sends content changes separately from its stable heartbeat", () => {

@@ -48,7 +48,7 @@
       const stored = await session.get(["skz.runnerTabId", "skz.runnerSeenAt", "skz.armTabId", "skz.armSeenAt"]);
       const runner = fresh(stored["skz.runnerSeenAt"]) && Number.isInteger(Number(stored["skz.runnerTabId"])) ? Number(stored["skz.runnerTabId"]) : null;
       const armOwner = fresh(stored["skz.armSeenAt"]) && Number.isInteger(Number(stored["skz.armTabId"])) ? Number(stored["skz.armTabId"]) : null;
-      if (command === "arm") return armOwner;
+      if (command === "arm") return armOwner ?? runner;
       if (command === "export") return runner ?? armOwner;
       return runner;
     }

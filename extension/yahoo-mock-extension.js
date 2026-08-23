@@ -1,7 +1,7 @@
 (function installYahooMockExtension(root) {
   "use strict";
 
-  const VERSION = "0.6.1";
+  const VERSION = "0.6.2";
   const GLOBAL_KEY = "__skrodzkaiYahooMockExtensionV1";
   const PREFLIGHT_KEY = "skrodzkai-yahoo-mock-extension-preflight-v1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-extension-receipts-v1";
@@ -23,6 +23,9 @@
     "D", "LB", "CB", "S", "BN", "BN", "BN", "BN", "BN", "BN",
   ]);
   const TEST_SETTINGS_ROSTER_SLOTS = Object.freeze([...TEST_ROSTER_SLOTS, "IR", "IR", "IR"]);
+  const TEST_FILTER_LABELS = Object.freeze([
+    "Kickers", "Team Defenses", "Defensive Players", "Linebackers", "Cornerbacks", "Safeties",
+  ]);
 
   function modeAllowlist({ mode = "MOCK", leagueId = "" } = {}) {
     const normalizedMode = String(mode ?? "").trim().toUpperCase();
@@ -113,6 +116,8 @@
     if (!body.includes("League Name:\tHORSE COLLAR #2")) errors.push("verified_test_league_missing");
     if (!body.includes("Draft Type:\tLive Standard Draft")) errors.push("verified_test_draft_type_mismatch");
     if (!body.includes("Live Draft Pick Time:\t1 Minute, 15 Seconds")) errors.push("verified_test_clock_mismatch");
+    if (!/Passing Touchdowns\s+4\b/i.test(body)) errors.push("verified_test_passing_td_mismatch");
+    if (!/Receptions(?:\s+Yahoo Default)?\s+1(?:\s|$)/i.test(body)) errors.push("verified_test_ppr_mismatch");
     if (teamCount !== 12) errors.push("test_team_count_not_12");
     if (!sameSlots(rosterSlots, TEST_SETTINGS_ROSTER_SLOTS)) errors.push("test_roster_shape_mismatch");
     return { roomId: TEST_LEAGUE_ID, teamCount, rosterSlots, activeRosterSlots: rosterSlots.slice(0, TEST_ROSTER_SLOTS.length), errors, ready: errors.length === 0 };
@@ -208,6 +213,35 @@
       observedRosterSlots: [...snapshot.rosterSlots],
       armedAt: now,
       expiresAt: now + 4 * 60 * 60 * 1000,
+    };
+  }
+
+  function parseTestDraftClient(documentRef, locationRef, settingsReceipt = null, now = Date.now()) {
+    const body = String(documentRef?.body?.innerText ?? "");
+    const path = String(locationRef?.pathname ?? "");
+    const pathMatch = path.match(/^\/draftclient\/f1\/(\d+)\/(\d+)\/?$/);
+    const seatMatch = body.match(/YOUR TURN\s*-\s*(\d+)(?:ST|ND|RD|TH)\s+PICK/i);
+    const rosterMatch = body.match(/YOUR TEAM\s*\(\s*(\d+)\s*\/\s*(\d+)\s*\)/i);
+    const seat = seatMatch ? Number(seatMatch[1]) : null;
+    const filled = rosterMatch ? Number(rosterMatch[1]) : null;
+    const total = rosterMatch ? Number(rosterMatch[2]) : null;
+    const missingFilters = TEST_FILTER_LABELS.filter((label) => !findFilter(documentRef, label));
+    const errors = [];
+    if (!pathMatch || pathMatch[1] !== TEST_LEAGUE_ID || Number(pathMatch[2]) !== TEST_TEAM_ID) errors.push("test_draftclient_identity_mismatch");
+    if (!/HORSE COLLAR #2/i.test(body)) errors.push("verified_test_league_missing");
+    if (!validTestSettingsReceipt(settingsReceipt, now)) errors.push("verified_test_settings_preflight_required");
+    if (!Number.isInteger(seat) || seat < 1 || seat > 12) errors.push("test_draft_slot_missing");
+    if (filled !== 0 || total !== TEST_ROSTER_SLOTS.length) errors.push("test_draft_roster_not_empty");
+    if (missingFilters.length) errors.push(`test_specialist_filters_missing:${missingFilters.join(",")}`);
+    return {
+      roomId: TEST_LEAGUE_ID,
+      urlSeat: TEST_TEAM_ID,
+      seat,
+      teamCount: validTestSettingsReceipt(settingsReceipt, now) ? Number(settingsReceipt.observedTeamCount) : 0,
+      rosterSlots: validTestSettingsReceipt(settingsReceipt, now) ? [...settingsReceipt.observedRosterSlots] : [],
+      missingFilters,
+      errors,
+      ready: errors.length === 0,
     };
   }
 
@@ -644,14 +678,14 @@
     while (Date.now() - startedAt < deadlineMs) {
       const roster = controllerApi.runtime.parseRosterCount(documentRef.body?.innerText);
       const labels = executionMode === "TEST"
-        ? ["All Positions", "Team Defenses", "Kickers", "Defensive Players", "Linebackers", "Defensive Backs"]
+        ? ["All Positions", ...TEST_FILTER_LABELS]
         : ["All Positions", "Team Defenses", "Kickers"];
       const filtersReady = labels
         .every((label) => findFilter(documentRef, label));
       if (roster?.filled === 0 && roster?.total === expectedRosterTotal && filtersReady) return roster;
       await new Promise((resolve) => environment.setTimeout(resolve, 50));
     }
-    throw new Error("empty_public_mock_draft_not_ready");
+    throw new Error(executionMode === "TEST" ? "empty_test_draft_not_ready" : "empty_public_mock_draft_not_ready");
   }
 
   function fitsRosterSlot(position, slot) {
@@ -779,7 +813,7 @@
     rail.setBetweenTurns(buildUiOpponentWindow(null, "TEST"));
     rail.setRoster(TEST_ROSTER_SLOTS.map((slot) => ({ slot })));
     const update = () => {
-      const settingsReceipt = readJson(environment.sessionStorage, TEST_SETTINGS_KEY, null);
+      const settingsReceipt = readJson(environment.localStorage, TEST_SETTINGS_KEY, null);
       const snapshot = parseTestDraftHome(environment.document, environment.location, settingsReceipt);
       const armed = readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
       const active = armed?.mode === "test_league_19_idp" && !validateDraftPreflight(armed, { roomId: TEST_LEAGUE_ID, seat: TEST_TEAM_ID });
@@ -800,7 +834,7 @@
       return true;
     };
     rail.controls.arm.addEventListener("click", () => {
-      const settingsReceipt = readJson(environment.sessionStorage, TEST_SETTINGS_KEY, null);
+      const settingsReceipt = readJson(environment.localStorage, TEST_SETTINGS_KEY, null);
       const snapshot = parseTestDraftHome(environment.document, environment.location, settingsReceipt);
       if (!snapshot.ready) return update();
       const active = readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
@@ -829,13 +863,13 @@
     const update = () => {
       const snapshot = parseTestSettings(environment.document, environment.location);
       if (!snapshot.ready) {
-        environment.sessionStorage.removeItem(TEST_SETTINGS_KEY);
+        environment.localStorage.removeItem(TEST_SETTINGS_KEY);
         rail.setWarnings(snapshot.errors.map((text) => ({ severity: "danger", text })));
         rail.render("bad", "TEST SETTINGS LOCKED", snapshot.errors.join(" · "));
         return false;
       }
       const receipt = makeTestSettingsReceipt(snapshot);
-      environment.sessionStorage.setItem(TEST_SETTINGS_KEY, JSON.stringify(receipt));
+      environment.localStorage.setItem(TEST_SETTINGS_KEY, JSON.stringify(receipt));
       rail.setContext({ roomId: TEST_LEAGUE_ID, league: "HORSE COLLAR #2", armed: false, autodraft: false, kill: false });
       rail.setWarnings([]);
       rail.render("ok", "TEST SETTINGS VERIFIED", "12 teams · 19 active roster slots · 3 IR · 75-second clock");
@@ -855,7 +889,54 @@
     if (!controllerApi || !runnerApi || !boardData) throw new Error("extension_dependencies_missing");
     const room = controllerApi.runtime.parseRoom(environment.location.pathname);
     if (!room) throw new Error("draft_room_missing");
-    const armRecord = readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
+    let armRecord = readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
+    if (!armRecord && room.roomId === TEST_LEAGUE_ID && Number(room.seat) === TEST_TEAM_ID) {
+      rail.setMode("TEST");
+      rail.setExpanded(true);
+      rail.setRoster(TEST_ROSTER_SLOTS.map((slot) => ({ slot })));
+      rail.setBetweenTurns(buildUiOpponentWindow(null, "TEST"));
+      const update = () => {
+        const settingsReceipt = readJson(environment.localStorage, TEST_SETTINGS_KEY, null);
+        const snapshot = parseTestDraftClient(environment.document, environment.location, settingsReceipt);
+        const autodraft = controllerApi.runtime.isAutodraftActive(environment.document);
+        rail.setContext({ roomId: TEST_LEAGUE_ID, seat: snapshot.seat, league: "HORSE COLLAR #2", armed: false, autodraft, kill: false });
+        rail.setWarnings([
+          ...snapshot.errors.map((text) => ({ severity: "danger", text })),
+          ...(autodraft ? [{ severity: "danger", text: "Autodraft is active: execution is fail-closed." }] : []),
+        ]);
+        rail.controls.arm.textContent = "ARM TEST";
+        if (!snapshot.ready || autodraft) {
+          rail.render("bad", "TEST PREFLIGHT LOCKED", [...snapshot.errors, ...(autodraft ? ["autodraft_active"] : [])].join(" · "));
+          rail.controls.arm.disabled = true;
+          return false;
+        }
+        rail.render("ok", "READY TO ARM TEST", `League ${TEST_LEAGUE_ID} · draft slot ${snapshot.seat} · 12 teams · 19 rounds`);
+        rail.controls.arm.disabled = false;
+        return true;
+      };
+      rail.controls.arm.addEventListener("click", () => {
+        const fresh = parseTestDraftClient(environment.document, environment.location, readJson(environment.localStorage, TEST_SETTINGS_KEY, null));
+        const currentAutodraft = controllerApi.runtime.isAutodraftActive(environment.document);
+        if (!fresh.ready || currentAutodraft) {
+          rail.setWarnings([
+            ...fresh.errors.map((text) => ({ severity: "danger", text })),
+            ...(currentAutodraft ? [{ severity: "danger", text: "Autodraft is active: execution is fail-closed." }] : []),
+          ]);
+          rail.render("bad", "TEST PREFLIGHT LOCKED", [...fresh.errors, ...(currentAutodraft ? ["autodraft_active"] : [])].join(" · "));
+          return;
+        }
+        armRecord = makeTestPreflight(fresh);
+        environment.sessionStorage.setItem(PREFLIGHT_KEY, JSON.stringify(armRecord));
+        writeReceipt(environment.localStorage, { kind: "test_armed_from_draftclient", roomId: TEST_LEAGUE_ID, seat: fresh.seat, urlSeat: TEST_TEAM_ID, expiresAt: armRecord.expiresAt });
+        rail.addEvent("test armed", `league ${TEST_LEAGUE_ID} · draft slot ${fresh.seat}`);
+        environment.location.reload();
+      });
+      if (!update() && environment.MutationObserver) {
+        const observer = new environment.MutationObserver(() => { if (update()) observer.disconnect(); });
+        observer.observe(environment.document.body, { childList: true, subtree: true, characterData: true });
+      }
+      return;
+    }
     const executionMode = armRecord?.mode === "test_league_19_idp" ? "TEST" : "MOCK";
     const mode = modeAllowlist({ mode: executionMode, leagueId: room.roomId });
     const draftSeat = executionMode === "TEST" ? Number(armRecord?.seat) : room.seat;
@@ -1036,6 +1117,7 @@
       makeTestSettingsReceipt,
       validTestSettingsReceipt,
       parseTestDraftHome,
+      parseTestDraftClient,
       makeTestPreflight,
       validateDraftPreflight,
       modeAllowlist,
