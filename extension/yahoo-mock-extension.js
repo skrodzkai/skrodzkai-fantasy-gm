@@ -601,10 +601,18 @@
     api.setContext(); api.setRoster(PUBLIC_ROSTER_SLOTS.map((slot) => ({ slot }))); api.setRecommendations([]); api.setBetweenTurns(); api.setWarnings([]); redrawManual(); host._controlApi = api; return api;
   }
 
+  function commandCenterRole(pathname = "") {
+    if (/^\/draftclient\/f1\/\d+\/\d+\/?$/.test(pathname)) return "runner";
+    if (pathname === "/f1/mock_waiting" || pathname === `/f1/${TEST_LEAGUE_ID}/draft`) return "arm-owner";
+    return "observer";
+  }
+
   function attachCommandCenterBridge(environment, rail) {
     const runtime = environment.chrome?.runtime ?? root.chrome?.runtime;
     if (!runtime?.sendMessage || !runtime?.onMessage || typeof rail?.getSnapshot !== "function") return null;
+    const role = commandCenterRole(environment.location?.pathname);
     let boardHash = "";
+    let snapshotHash = "";
     const publish = () => {
       const full = rail.getSnapshot();
       const board = Array.isArray(full.board) ? full.board : [];
@@ -612,8 +620,11 @@
       const { board: omittedBoard, ...snapshot } = full;
       void omittedBoard;
       const boardChanged = nextBoardHash !== boardHash;
+      const nextSnapshotHash = JSON.stringify(snapshot);
+      const snapshotChanged = nextSnapshotHash !== snapshotHash;
       if (boardChanged) boardHash = nextBoardHash;
-      void runtime.sendMessage({ type:"state", snapshot:{ ...snapshot, at:Date.now() }, board:boardChanged ? board : undefined });
+      if (snapshotChanged) snapshotHash = nextSnapshotHash;
+      void runtime.sendMessage({ type:"state", role, at:Date.now(), snapshot:snapshotChanged ? snapshot : undefined, board:role === "runner" && boardChanged ? board : undefined });
     };
     rail.setOpenHandler(() => void runtime.sendMessage({ type:"open_command_center" }));
     const onMessage = (message, _sender, sendResponse) => {
@@ -624,7 +635,7 @@
     };
     runtime.onMessage.addListener(onMessage);
     publish();
-    const timer = environment.setInterval(publish, 100);
+    const timer = environment.setInterval(publish, 250);
     return { publish, stop() { environment.clearInterval(timer); runtime.onMessage.removeListener(onMessage); } };
   }
 
@@ -1035,6 +1046,8 @@
       buildUiRoster,
       buildUiRecommendations,
       buildUiOpponentWindow,
+      commandCenterRole,
+      attachCommandCenterBridge,
       publicRosterSlots: PUBLIC_ROSTER_SLOTS,
       testRosterSlots: TEST_ROSTER_SLOTS,
     },

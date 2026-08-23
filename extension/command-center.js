@@ -4,6 +4,7 @@
 let state = null;
 let board = [];
 let selectedIds = new Set();
+let heartbeatAt = 0;
 
 const $ = (selector) => document.querySelector(selector);
 const elements = {
@@ -71,31 +72,40 @@ function render() {
   const warnings = Array.isArray(state.warnings) ? state.warnings : []; elements.warningCount.textContent=String(warnings.length); elements.warnings.innerHTML=warnings.length?warnings.map((warning)=>`<div class="warning ${warning.severity==="danger"?"danger":""}">● ${esc(warning.text??warning)}</div>`).join(""):`<div class="empty">No active warnings.</div>`;
   const events = Array.isArray(state.events) ? state.events : []; elements.events.innerHTML=events.length?events.map((event)=>`<div class="event">${esc(event.at)} <b>${esc(event.kind)}</b>${event.detail?` · ${esc(event.detail)}`:""}</div>`).join(""):`<div class="empty">No receipts yet.</div>`;
   buttonState(elements.arm,state.controls?.arm); buttonState(elements.kill,state.controls?.halt); buttonState(elements.export,state.controls?.export);
+  elements.search.disabled = false;
+  elements.clearSearch.disabled = false;
   renderSearch();
 }
 
 function updateConnection() {
   const connection = document.querySelector(".connection");
-  const age = state?.at ? Date.now() - Number(state.at) : Infinity;
+  const age = heartbeatAt ? Date.now() - Number(heartbeatAt) : Infinity;
   const runnerMissing = age > 3000;
+  const wasMissing = document.body.classList.contains("offline");
   connection?.classList.toggle("live", age <= 1500);
   elements.connection.textContent = age <= 1500 ? `LIVE ${(age / 1000).toFixed(1)}s` : age <= 3000 ? `STALE ${(age / 1000).toFixed(1)}s` : "NO YAHOO RUNNER";
   document.body.classList.toggle("offline", runnerMissing);
   if (runnerMissing) {
     [elements.arm, elements.kill, elements.export, elements.clearPin, elements.pin, elements.search, elements.clearSearch].forEach((control) => { control.disabled = true; });
+  } else if (wasMissing) {
+    render();
   }
 }
 
-void chrome.storage.session.get(["skz.snapshot", "skz.board"]).then((stored) => {
+void chrome.storage.session.get(["skz.snapshot", "skz.board", "skz.heartbeatAt"]).then((stored) => {
   state = stored["skz.snapshot"] ?? null;
   board = Array.isArray(stored["skz.board"]) ? stored["skz.board"] : [];
+  heartbeatAt = Number(stored["skz.heartbeatAt"] ?? 0);
   render(); updateConnection();
 });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "session") return;
-  if (changes["skz.snapshot"]) state = changes["skz.snapshot"].newValue ?? null;
-  if (changes["skz.board"]) board = Array.isArray(changes["skz.board"].newValue) ? changes["skz.board"].newValue : [];
-  render(); updateConnection();
+  let contentChanged = false;
+  if (changes["skz.snapshot"]) { state = changes["skz.snapshot"].newValue ?? null; contentChanged = true; }
+  if (changes["skz.board"]) { board = Array.isArray(changes["skz.board"].newValue) ? changes["skz.board"].newValue : []; contentChanged = true; }
+  if (changes["skz.heartbeatAt"]) heartbeatAt = Number(changes["skz.heartbeatAt"].newValue ?? 0);
+  if (contentChanged) render();
+  updateConnection();
 });
 setInterval(updateConnection, 500);
 elements.search.addEventListener("input",renderSearch);

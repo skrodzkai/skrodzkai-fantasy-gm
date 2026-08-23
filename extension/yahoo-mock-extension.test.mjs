@@ -21,6 +21,24 @@ vm.createContext(context);
 vm.runInContext(source, context);
 vm.runInContext(boardSource, context);
 const helpers = context.SKRODZKaiYahooMockExtension._test;
+const backgroundContext = { Date };
+backgroundContext.globalThis = backgroundContext;
+vm.createContext(backgroundContext);
+vm.runInContext(backgroundSource, backgroundContext);
+const backgroundHelpers = backgroundContext.SKRODZKaiCommandCenterBackground;
+
+function memorySession(initial = {}) {
+  const values = new Map(Object.entries(initial));
+  return {
+    async get(keys) {
+      const requested = Array.isArray(keys) ? keys : [keys];
+      return Object.fromEntries(requested.filter((key) => values.has(key)).map((key) => [key, values.get(key)]));
+    },
+    async set(update) { for (const [key, value] of Object.entries(update)) values.set(key, value); },
+    async remove(keys) { for (const key of Array.isArray(keys) ? keys : [keys]) values.delete(key); },
+    value(key) { return values.get(key); },
+  };
+}
 
 function waitingFixture({ teams = 12, starters = "QB, WR, WR, RB, RB, TE, W/R/T, K, DEF", seat = 7 } = {}) {
   const numbers = Array.from({ length: teams }, (_, index) => index + 1).join("\t");
@@ -212,10 +230,44 @@ test("popup command center uses the canonical blue SKRODZKai app language and a 
   assert.match(backgroundSource, /type:\s*"popup"/);
   assert.match(backgroundSource, /width:\s*1180/);
   assert.match(backgroundSource, /skz\.popupWindowId/);
-  assert.match(backgroundSource, /skz\.tabId/);
-  assert.match(backgroundSource, /chrome\.tabs\.sendMessage/);
+  assert.match(backgroundSource, /skz\.runnerTabId/);
+  assert.match(backgroundSource, /tabs\.sendMessage/);
   assert.match(source, /open_command_center/);
   assert.match(source, /skrodzkai-globe-mark\.png/);
+});
+
+test("command-center relay binds kill and pin to the runner tab even when an arm page keeps publishing", async () => {
+  const session = memorySession();
+  let now = 100;
+  const router = backgroundHelpers.createStateRouter(session, () => now);
+  await router.handleState({ role:"arm-owner", at:now, snapshot:{ label:"READY TO ARM" } }, { tab:{ id:11 } });
+  now = 101;
+  await router.handleState({ role:"runner", at:now, snapshot:{ label:"RUNNING" }, board:[{ yahooId:"1" }] }, { tab:{ id:22 } });
+  now = 102;
+  await router.handleState({ role:"arm-owner", at:now, snapshot:{ label:"READY TO ARM" } }, { tab:{ id:11 } });
+  assert.equal(session.value("skz.snapshot").label, "RUNNING");
+  assert.equal(await router.targetTab("kill"), 22);
+  assert.equal(await router.targetTab("pin"), 22);
+  assert.equal(await router.targetTab("arm"), 11);
+  await router.removeTab(22);
+  assert.equal(session.value("skz.snapshot").label, "READY TO ARM");
+  assert.equal(await router.targetTab("kill"), null);
+});
+
+test("command-center bridge sends content changes separately from its stable heartbeat", () => {
+  const messages = [];
+  let tick = null;
+  const runtime = { sendMessage(message) { messages.push(message); return Promise.resolve({ ok:true }); }, onMessage:{ addListener() {}, removeListener() {} } };
+  const rail = { getSnapshot:() => ({ label:"RUNNING", board:[{ yahooId:"1" }] }), setOpenHandler() {}, command() { return true; } };
+  helpers.attachCommandCenterBridge({ chrome:{ runtime }, location:{ pathname:"/draftclient/f1/123/4" }, setInterval(callback) { tick = callback; return 1; }, clearInterval() {} }, rail);
+  assert.equal(helpers.commandCenterRole("/draftclient/f1/123/4"), "runner");
+  assert.equal(helpers.commandCenterRole("/f1/mock_waiting"), "arm-owner");
+  assert.equal(messages[0].role, "runner");
+  assert.equal(messages[0].snapshot.label, "RUNNING");
+  tick();
+  assert.equal(messages[1].snapshot, undefined);
+  assert.equal(messages[1].board, undefined);
+  assert.equal(Number.isFinite(messages[1].at), true);
 });
 
 test("war-room roster placement respects exact and flex slots rather than pick order", () => {
