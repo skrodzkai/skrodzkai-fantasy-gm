@@ -212,8 +212,8 @@ test("a room-bound next-pick pin becomes target one while retaining verified bas
   assert.equal(applied.manualOverride.status, "applied");
   assert.equal(applied.manualOverride.chosenYahooId, "WR-10");
   assert.equal(applied.targets[0].yahooId, "WR-10");
-  assert.equal(applied.targets.length, baseline.length);
-  assert.equal(new Set(applied.targets.map((target) => target.yahooId)).size, baseline.length);
+  assert.equal(applied.targets.length, baseline.length + 1);
+  assert.equal(new Set(applied.targets.map((target) => target.yahooId)).size, baseline.length + 1);
 
   const wrongRound = helpers.applyManualOverride({
     stage: { roomId: "99", seat: 6, expectedRound: 2, targets: [{ yahooId: "WR-10" }] },
@@ -232,6 +232,20 @@ test("a room-bound next-pick pin becomes target one while retaining verified bas
     JSON.parse(JSON.stringify(Array.from(wrongRound.targets, (target) => target.yahooId))),
     JSON.parse(JSON.stringify(Array.from(baseline, (target) => target.yahooId))),
   );
+  const illegalPosition = helpers.applyManualOverride({
+    stage: { roomId: "99", seat: 6, expectedRound: 1, targets: [{ yahooId: "DEF-1" }] },
+    roomId: "99",
+    seat: 6,
+    round: 1,
+    board,
+    availablePlayers,
+    baselineTargets: baseline,
+    allowed: helpers.allowedPositions(1, [], mockConfig, 6),
+    minimum: 5,
+  });
+  assert.equal(illegalPosition.manualOverride.status, "rejected");
+  assert.equal(illegalPosition.manualOverride.reason, "manual_pin_unavailable_or_ineligible");
+  assert.equal(illegalPosition.manualOverride.consume, true);
 });
 
 test("reserves the public mock specialist filters for rounds 14 and 15", () => {
@@ -682,6 +696,7 @@ test("resolves the live ladder then consumes a valid next-pick pin without losin
   let controllerCreates = 0;
   let capturedTargets = null;
   let consumedOverride = null;
+  let stagedOverride = { roomId: "9378515", seat: 6, expectedRound: 1, targets: [{ yahooId: "WR-10" }] };
   const available = new Set(board.map((candidate) => candidate.yahooId));
   const select = {
     value: "all",
@@ -740,7 +755,7 @@ test("resolves the live ladder then consumes a valid next-pick pin without losin
     expectedSeat: 6,
     observedTeamCount: 12,
     observedRosterSlots: mockConfig.rosterSlots,
-    readManualOverride: () => ({ roomId: "9378515", seat: 6, expectedRound: 1, targets: [{ yahooId: "WR-10" }] }),
+    readManualOverride: () => stagedOverride,
     consumeManualOverride: (outcome) => { consumedOverride = outcome; },
   }, environment).start();
 
@@ -763,6 +778,28 @@ test("resolves the live ladder then consumes a valid next-pick pin without losin
   assert.equal(resolved.decision.manualOverride.status, "applied");
   assert.equal("availablePlayers" in resolved.decision, false);
   assert.ok(JSON.stringify(resolved).length < 8000, "strategy receipt should stay compact");
+
+  stagedOverride = { roomId: "9378515", seat: 6, expectedRound: 1, targets: [{ yahooId: "MISSING" }] };
+  ownedTurn = { label: "R1P6", round: 1, pick: 6 };
+  controllerCreates = 0;
+  capturedTargets = null;
+  consumedOverride = null;
+  const rejectedRunner = api.create({
+    board,
+    expectedRoomId: "9378515",
+    expectedSeat: 6,
+    observedTeamCount: 12,
+    observedRosterSlots: mockConfig.rosterSlots,
+    readManualOverride: () => stagedOverride,
+    consumeManualOverride: (outcome) => { consumedOverride = outcome; },
+  }, environment).start();
+  await waitFor(() => controllerCreates === 1);
+  rejectedRunner.halt("test_complete");
+  assert.equal(consumedOverride.status, "rejected");
+  assert.equal(consumedOverride.reason, "manual_pin_unavailable_or_ineligible");
+  assert.equal(consumedOverride.consume, true);
+  assert.equal(capturedTargets[0].yahooId, "RB-1");
+  assert.equal(rejectedRunner.exportReceipts().find((entry) => entry.kind === "runner_turn_resolved").decision.manualOverride.status, "rejected");
 });
 
 test("runner advances across an immediate slot-12 wrap without reusing the stale ladder", async (t) => {
@@ -1167,6 +1204,7 @@ test("halt during filter arming prevents a controller from being created", async
   }, environment).start();
 
   await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(runner.getStatus().busy, true);
   runner.halt("handoff_drill");
   await new Promise((resolve) => setTimeout(resolve, 80));
   assert.equal(runner.getStatus().state, "halted");

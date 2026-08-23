@@ -451,7 +451,7 @@
       position: boardPlayer.position,
       team: String(livePlayer.team ?? boardPlayer.team ?? ""),
     };
-    const targets = [pinned, ...baseline.filter((target) => String(target.yahooId) !== chosenId)].slice(0, baseline.length);
+    const targets = [pinned, ...baseline.filter((target) => String(target.yahooId) !== chosenId)];
     if (targets.length < minimum) throw new Error(`fewer_than_${minimum}_targets_after_manual_pin`);
     return {
       targets,
@@ -864,6 +864,7 @@
         seat: expectedSeat,
         urlSeat: room.seat,
         state,
+        busy,
         failure,
         picks: picks.slice(),
         currentController: currentController?.getStatus?.() ?? null,

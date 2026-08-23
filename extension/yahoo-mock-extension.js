@@ -182,7 +182,7 @@
     const errors = [];
     if (String(locationRef?.pathname ?? "") !== `/f1/${TEST_LEAGUE_ID}/draft`) errors.push("not_verified_test_draft_home");
     if (teamCount !== 12) errors.push("verified_test_summary_mismatch");
-    if (!body.includes("SKRODZKai")) errors.push("verified_test_team_missing");
+    if (!/^SKRODZKai$/m.test(body)) errors.push("verified_test_team_missing");
     if (!validTestSettingsReceipt(settingsReceipt, now)) errors.push("verified_test_settings_preflight_required");
     if (!Number.isInteger(seat) || seat < 1 || seat > 12) errors.push("test_draft_slot_pending");
     return {
@@ -483,7 +483,7 @@
             </div>
             <div class="stack">
               <section class="section"><div class="section-head"><span>Decision ladder</span><small data-disagreement>BASELINE READY</small></div><div class="board" data-board></div></section>
-              <section class="section"><div class="section-head"><span>Next-pick override</span><small data-stage-count>BASELINE</small></div><div class="pin-state" data-pin-state>No pin staged. The verified baseline will execute.</div><div class="search"><input data-search type="search" placeholder="Search player, team, position, or exact Yahoo ID" aria-label="Search verified Yahoo board" /></div><div class="manual-list" data-manual-list></div><div class="manual-note">Set before our clock. The runner validates room + seat + round + Yahoo availability; an invalid pin is rejected and baseline executes immediately.</div><div class="manual-actions"><button class="warn" data-clear-pin type="button" disabled>Clear Pin</button><button class="primary" data-confirm type="button" disabled>Pin Next Pick</button></div></section>
+              <section class="section"><div class="section-head"><span>Next-pick override</span><small data-stage-count>BASELINE</small></div><div class="pin-state" data-pin-state>No pin staged. The verified baseline will execute.</div><div class="search"><input data-search type="search" placeholder="Search player, team, position, or exact Yahoo ID" aria-label="Search verified Yahoo board" /></div><div class="manual-list" data-manual-list></div><div class="manual-note">Set before our clock. Yahoo must expose the player row at execution; deep or paginated pins may reject. Any invalid pin is receipted and the five-target baseline executes immediately.</div><div class="manual-actions"><button class="warn" data-clear-pin type="button" disabled>Clear Pin</button><button class="primary" data-confirm type="button" disabled>Pin Next Pick</button></div></section>
             </div>
             <div class="stack">
               <section class="section"><div class="section-head"><span>Opponent window</span><small>Snake + survival</small></div><div class="between" data-between><div class="pressure">No owned turn validated.</div></div></section>
@@ -505,7 +505,7 @@
       stageCount: shadow.querySelector("[data-stage-count]"), pinState: shadow.querySelector("[data-pin-state]"), search: shadow.querySelector("[data-search]"), manualList: shadow.querySelector("[data-manual-list]"), clearPin: shadow.querySelector("[data-clear-pin]"), confirm: shadow.querySelector("[data-confirm]"), compact: shadow.querySelector("[data-compact-status]"), modeLabel: shadow.querySelector(".mode"), modeChips: [...shadow.querySelectorAll(".mode-chip")],
     };
     const controls = { arm: shadow.querySelector(".arm"), halt: shadow.querySelector(".halt"), export: shadow.querySelector(".export") };
-    const ui = { mode:"MOCK", roster:[], board:[], staged:[], pinned:null, events:[], latestPickId:"", onManualConfirm:null, onManualClear:null };
+    const ui = { mode:"MOCK", roster:[], board:[], staged:[], pinned:null, pinOutcome:null, events:[], latestPickId:"", onManualConfirm:null, onManualClear:null };
     const redrawManual = () => {
       const query = String(data.search.value ?? "").trim().toUpperCase();
       const matches = ui.board.filter((player) => `${player.name} ${player.position} ${player.team} ${player.yahooId}`.toUpperCase().includes(query)).slice(0, 10);
@@ -520,9 +520,13 @@
       for (const button of data.manualList.querySelectorAll("[data-remove-stage]")) button.addEventListener("click", () => { ui.staged = ui.staged.filter((player) => String(player.yahooId) !== String(button.dataset.removeStage)); redrawManual(); });
       data.confirm.disabled = ui.staged.length === 0;
       data.clearPin.disabled = !ui.pinned;
-      data.stageCount.textContent = ui.pinned ? `PINNED R${ui.pinned.expectedRound}` : ui.staged.length ? `${ui.staged.length} SELECTED` : "BASELINE";
-      data.pinState.className = `pin-state ${ui.pinned ? "live" : ""}`.trim();
-      data.pinState.textContent = ui.pinned ? `Round ${ui.pinned.expectedRound}: ${ui.pinned.targets.map((player) => player.name || `Y!${player.yahooId}`).join(" → ")}` : "No pin staged. The verified baseline will execute.";
+      data.stageCount.textContent = ui.pinned ? `PINNED R${ui.pinned.expectedRound}` : ui.staged.length ? `${ui.staged.length} SELECTED` : ui.pinOutcome ? ui.pinOutcome.status.toUpperCase() : "BASELINE";
+      data.pinState.className = `pin-state ${ui.pinned || ui.pinOutcome?.status === "applied" ? "live" : ""}`.trim();
+      data.pinState.textContent = ui.pinned
+        ? `Round ${ui.pinned.expectedRound}: ${ui.pinned.targets.map((player) => player.name || `Y!${player.yahooId}`).join(" → ")}`
+        : ui.pinOutcome
+          ? `${ui.pinOutcome.status.toUpperCase()} R${ui.pinOutcome.expectedRound ?? "—"}: ${ui.pinOutcome.chosenYahooId ? `Y!${ui.pinOutcome.chosenYahooId}` : ui.pinOutcome.reason ?? "baseline retained"}`
+          : "No pin staged. The verified baseline will execute.";
     };
     data.search.addEventListener("input", redrawManual);
     data.confirm.addEventListener("click", () => {
@@ -530,7 +534,7 @@
       const result = ui.onManualConfirm(ui.staged.slice());
       if (result !== false) { ui.staged = []; redrawManual(); }
     });
-    data.clearPin.addEventListener("click", () => { if (typeof ui.onManualClear === "function" && ui.onManualClear() !== false) { ui.pinned = null; redrawManual(); } });
+    data.clearPin.addEventListener("click", () => { if (typeof ui.onManualClear === "function" && ui.onManualClear() !== false) { ui.pinned = null; ui.pinOutcome = { status:"cleared", expectedRound:null, reason:"deterministic baseline active" }; redrawManual(); } });
     shadow.querySelector(".expand").addEventListener("click", () => { rail.classList.toggle("expanded"); rail.classList.remove("collapsed"); });
     shadow.querySelector(".collapse").addEventListener("click", () => { rail.classList.toggle("collapsed"); rail.classList.remove("expanded"); });
     const setStatus = (key, value, kind = "") => { if (!data.status[key]) return; data.status[key].textContent = value; data.status[key].className = `value ${kind}`.trim(); };
@@ -562,17 +566,21 @@
       addEvent(kind, detailText = "") { ui.events.unshift({ at:new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" }), kind, detail:detailText }); ui.events = ui.events.slice(0, 18); data.events.innerHTML = ui.events.map((event) => `<div class="event">${event.at} <b>${event.kind}</b>${event.detail ? ` · ${event.detail}` : ""}</div>`).join(""); },
       setBoard(board = []) { ui.board = Array.isArray(board) ? board : []; redrawManual(); },
       setManualHandler(confirmHandler, clearHandler = null) { ui.onManualConfirm = confirmHandler; ui.onManualClear = clearHandler; },
-      setPinned(stage = null) { ui.pinned = stage; redrawManual(); },
+      setPinned(stage = null) { ui.pinned = stage; if (stage) ui.pinOutcome = null; redrawManual(); },
+      setPinOutcome(outcome = null) { ui.pinned = null; ui.pinOutcome = outcome; redrawManual(); },
       getManualStage() { return ui.staged.slice(); },
     };
     api.setContext(); api.setRoster(PUBLIC_ROSTER_SLOTS.map((slot) => ({ slot }))); api.setRecommendations([]); api.setBetweenTurns(); api.setWarnings([]); redrawManual(); host._controlApi = api; return api;
   }
 
-  async function waitForEmptyDraft(documentRef, controllerApi, environment, expectedRosterTotal = 15, deadlineMs = 15000) {
+  async function waitForEmptyDraft(documentRef, controllerApi, environment, expectedRosterTotal = 15, executionMode = "MOCK", deadlineMs = 15000) {
     const startedAt = Date.now();
     while (Date.now() - startedAt < deadlineMs) {
       const roster = controllerApi.runtime.parseRosterCount(documentRef.body?.innerText);
-      const filtersReady = ["All Positions", "Team Defenses", "Kickers"]
+      const labels = executionMode === "TEST"
+        ? ["All Positions", "Team Defenses", "Kickers", "Defensive Players", "Linebackers", "Defensive Backs"]
+        : ["All Positions", "Team Defenses", "Kickers"];
+      const filtersReady = labels
         .every((label) => findFilter(documentRef, label));
       if (roster?.filled === 0 && roster?.total === expectedRosterTotal && filtersReady) return roster;
       await new Promise((resolve) => environment.setTimeout(resolve, 50));
@@ -810,7 +818,7 @@
     }
     rail.setContext({ roomId: room.roomId, seat: draftSeat, league: leagueLabel, armed: true, autodraft: controllerApi.runtime.isAutodraftActive(environment.document), kill: false });
     rail.render("", "VALIDATING", `Room ${room.roomId} · draft slot ${draftSeat}`);
-    await waitForEmptyDraft(environment.document, controllerApi, environment, expectedRosterTotal);
+    await waitForEmptyDraft(environment.document, controllerApi, environment, expectedRosterTotal, executionMode);
     const board = await prepareBoard(environment.document, environment, controllerApi, boardData, executionMode);
     rail.setBoard(board);
     rail.setRecommendations([], { fullBoard: board });
@@ -831,7 +839,7 @@
       consumeManualOverride: (outcome) => {
         const stage = readJson(environment.sessionStorage, MANUAL_STAGE_KEY, null);
         environment.sessionStorage.removeItem(MANUAL_STAGE_KEY);
-        rail.setPinned(null);
+        rail.setPinOutcome(outcome);
         writeReceipt(environment.localStorage, { kind: `manual_pin_${outcome.status}`, roomId: room.roomId, seat: draftSeat, expectedRound: outcome.expectedRound, chosenYahooId: outcome.chosenYahooId ?? null, failure: outcome.reason ?? null });
         rail.addEvent(`manual pin ${outcome.status}`, outcome.chosenYahooId ? `Y!${outcome.chosenYahooId} · R${outcome.expectedRound}` : `${outcome.reason ?? "not applied"} · ${stage?.targets?.length ?? 0} staged`);
       },
@@ -842,7 +850,9 @@
       try {
         const status = runner.getStatus();
         if (status.state !== "created" && status.state !== "running") throw new Error("manual pin requires an active runner");
-        if (status.currentController) throw new Error("manual pin must be set before our clock starts");
+        if (status.busy || status.currentController || controllerApi.runtime.readOwnedTurn(environment.document)) {
+          throw new Error("manual pin must be set before our clock starts");
+        }
         const expectedRound = status.picks.length + 1;
         const stage = stageManualTargets(environment.sessionStorage, targets, { ...receiptRoom, expectedRound });
         writeReceipt(environment.localStorage, { kind: "manual_pin_staged", roomId: room.roomId, seat: draftSeat, expectedRound, targetYahooIds: stage.targets.map((target) => target.yahooId) });
