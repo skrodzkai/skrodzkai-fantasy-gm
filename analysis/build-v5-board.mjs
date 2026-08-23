@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
-import { compileInjuryBoard } from "./injury-monitor.mjs";
+import { buildDraftWatchlist, compileInjuryBoard } from "./injury-monitor.mjs";
 import { buildPlayerBoard } from "./player-intelligence.mjs";
 
 export const LEAGUE_REPLACEMENT_RANKS = Object.freeze({
@@ -51,13 +51,21 @@ function hasFiniteProjection(value) {
   return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
 }
 
+function requireObservedAt(snapshot, label) {
+  const observedAt = snapshot?.observedAt;
+  if (!observedAt || !Number.isFinite(Date.parse(observedAt))) {
+    throw new Error(`${label}.observedAt must be an ISO date`);
+  }
+  return observedAt;
+}
+
 function flattenYahooRows(offenseSnapshot, specialistSnapshot, eligibilitySnapshot = null) {
   const byId = new Map();
   const filterMembership = new Map();
   const add = (row, filter) => {
     if (!row?.yahooId) return;
     const yahooId = String(row.yahooId);
-    if (!byId.has(yahooId) || row.yahooProjectedPoints !== null) {
+    if (!byId.has(yahooId)) {
       byId.set(yahooId, { ...row, yahooId });
     }
     const filters = filterMembership.get(yahooId) ?? new Set();
@@ -97,6 +105,11 @@ export function assembleV5Board({
   baselineObservedAt,
   sleeperObservedAt,
 }) {
+  const offenseObservedAt = requireObservedAt(offenseSnapshot, "offenseSnapshot");
+  const specialistObservedAt = requireObservedAt(specialistSnapshot, "specialistSnapshot");
+  const eligibilityObservedAt = eligibilitySnapshot
+    ? requireObservedAt(eligibilitySnapshot, "eligibilitySnapshot")
+    : null;
   const baselineByYahooId = new Map(
     baselineRows
       .filter((row) => row.yahoo_id)
@@ -116,6 +129,10 @@ export function assembleV5Board({
     (eligibilitySnapshot?.players ?? []).map((player) => [String(player.yahooId), player]),
   );
   const sleeperByYahooId = buildSleeperByYahooId(sleeperPlayers);
+  const offenseIds = new Set((offenseSnapshot.players ?? []).map((player) => String(player.yahooId)));
+  const specialistIds = new Set(
+    Object.values(specialistSnapshot.positions ?? {}).flat().map((player) => String(player.yahooId)),
+  );
 
   const baselineForYahooRow = (row) => baselineByYahooId.get(String(row.yahooId)) ??
     baselineByIdentity.get(identityKey(row.name, row.team));
@@ -152,11 +169,21 @@ export function assembleV5Board({
     };
   });
 
-  const yahooSource = {
+  const yahooOffenseSource = {
     sourceId: "yahoo-season-projection",
-    updatedAt: offenseSnapshot.observedAt,
+    updatedAt: offenseObservedAt,
     weight: 0.65,
     rows: yahooRows
+      .filter((row) => offenseIds.has(String(row.yahooId)))
+      .filter((row) => hasFiniteProjection(row.yahooProjectedPoints))
+      .map((row) => ({ playerId: String(row.yahooId), leaguePoints: row.yahooProjectedPoints })),
+  };
+  const yahooSpecialistSource = {
+    sourceId: "yahoo-specialist-season-projection",
+    updatedAt: specialistObservedAt,
+    weight: 0.65,
+    rows: yahooRows
+      .filter((row) => !offenseIds.has(String(row.yahooId)) && specialistIds.has(String(row.yahooId)))
       .filter((row) => hasFiniteProjection(row.yahooProjectedPoints))
       .map((row) => ({ playerId: String(row.yahooId), leaguePoints: row.yahooProjectedPoints })),
   };
@@ -172,7 +199,7 @@ export function assembleV5Board({
 
   const projectionBoard = buildPlayerBoard({
     players,
-    sources: [yahooSource, baselineSource],
+    sources: [yahooOffenseSource, yahooSpecialistSource, baselineSource],
     replacementRanks: LEAGUE_REPLACEMENT_RANKS,
     asOf,
     maxAgeHours: 96,
@@ -181,11 +208,16 @@ export function assembleV5Board({
 
   const reports = [];
   for (const yahoo of yahooRows) {
+    const yahooObservedAt = offenseIds.has(String(yahoo.yahooId))
+      ? offenseObservedAt
+      : specialistIds.has(String(yahoo.yahooId))
+        ? specialistObservedAt
+        : eligibilityObservedAt;
     reports.push({
       playerId: String(yahoo.yahooId),
       sourceId: "yahoo-player-list",
       sourceKind: "yahoo",
-      observedAt: offenseSnapshot.observedAt,
+      observedAt: yahooObservedAt,
       status: YAHOO_STATUS[yahoo.injuryStatus] ?? (yahoo.injuryStatus ? "UNKNOWN" : "CLEAR"),
       note: yahoo.injuryStatus ? `Yahoo marker ${yahoo.injuryStatus}` : null,
     });
@@ -255,6 +287,12 @@ export function assembleV5Board({
     replacementRankBasis: "2-minute-drillers real-league 2026 roster assumptions",
     specialistRankingBasis: { K: "Yahoo preseason rank", DEF: "Yahoo preseason rank", DL: "league-scored consensus", LB: "league-scored consensus", DB: "league-scored consensus" },
     sources: projectionBoard.sourceReceipts,
+    snapshotReceipts: {
+      yahooOffenseObservedAt: offenseObservedAt,
+      yahooSpecialistObservedAt: specialistObservedAt,
+      yahooEligibilityObservedAt: eligibilityObservedAt,
+    },
+    injuryWatchlist: buildDraftWatchlist(injuryBoard),
     eligibilityEvidence: specialistSnapshot.eligibilityEvidence ?? {},
     players: combined,
     boards: { offense, specialists },

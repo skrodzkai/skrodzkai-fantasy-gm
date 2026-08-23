@@ -2,9 +2,12 @@ const STATUS_PRIORITY = Object.freeze({
   IR: 6,
   PUP: 6,
   NFI: 6,
+  SUSPENDED: 5,
   OUT: 5,
   DOUBTFUL: 4,
+  HOLDOUT: 3,
   QUESTIONABLE: 3,
+  ROLE_UNCERTAIN: 2,
   LIMITED: 2,
   FULL: 1,
   ACTIVE: 1,
@@ -28,6 +31,9 @@ function normalizeStatus(value) {
   if (status === "RESERVE_INJURED") return "IR";
   if (status === "PHYSICALLY_UNABLE_TO_PERFORM") return "PUP";
   if (status === "NON_FOOTBALL_INJURY") return "NFI";
+  if (status === "SUSPENSION") return "SUSPENDED";
+  if (["HOLD_OUT", "CONTRACT_HOLDOUT"].includes(status)) return "HOLDOUT";
+  if (["ROLE_CHANGE", "ROLE_RISK"].includes(status)) return "ROLE_UNCERTAIN";
   if (status === "DNP" || status === "DID_NOT_PRACTICE") return "QUESTIONABLE";
   return Object.hasOwn(STATUS_PRIORITY, status) ? status : "UNKNOWN";
 }
@@ -96,7 +102,14 @@ export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36 }) {
     } else if (["IR", "PUP", "NFI", "OUT"].includes(worstStatus)) {
       draftAction = "EXCLUDE";
       blockReason = `status ${worstStatus}`;
-    } else if (["DOUBTFUL", "QUESTIONABLE", "LIMITED"].includes(worstStatus)) {
+    } else if (worstStatus === "SUSPENDED") {
+      const hasReportedReturn = freshReports.some((report) => report.status === "SUSPENDED" && report.reportedReturn);
+      if (hasReportedReturn) blockReason = "manual availability decision required for SUSPENDED";
+      else {
+        draftAction = "EXCLUDE";
+        blockReason = "status SUSPENDED without a reported return";
+      }
+    } else if (["DOUBTFUL", "HOLDOUT", "QUESTIONABLE", "ROLE_UNCERTAIN", "LIMITED"].includes(worstStatus)) {
       blockReason = `manual health decision required for ${worstStatus}`;
     } else if (["ACTIVE", "FULL", "CLEAR"].includes(worstStatus)) {
       draftAction = "CLEAR";
@@ -114,11 +127,27 @@ export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36 }) {
       primarySourceId: primary?.sourceId ?? null,
       freshestAt: ordered[0]?.observedAt ?? null,
       bodyParts: [...new Set(freshReports.map((report) => report.bodyPart).filter(Boolean))],
+      reportedReturns: [...new Set(freshReports.map((report) => report.reportedReturn).filter(Boolean))],
       evidence: playerReports.sort((left, right) => Date.parse(right.observedAt) - Date.parse(left.observedAt)),
     };
   });
 
   return Object.freeze({ asOf, maxAgeHours, players });
+}
+
+export function buildDraftWatchlist(injuryBoard) {
+  const players = injuryBoard?.players;
+  if (!Array.isArray(players)) throw new Error("injuryBoard.players must be an array");
+  return players
+    .filter((player) => player.draftAction !== "CLEAR")
+    .map((player) => ({
+      yahooId: String(player.playerId),
+      status: player.status,
+      draftAction: player.draftAction,
+      blockReason: player.blockReason,
+      freshestAt: player.freshestAt,
+      primarySourceId: player.primarySourceId,
+    }));
 }
 
 export { SOURCE_PRIORITY, STATUS_PRIORITY };
