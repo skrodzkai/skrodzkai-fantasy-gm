@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "SKRODZKai Yahoo Mock Draft Control",
+  "version": "0.1.0",
+  "description": "Local, deterministic public-mock draft execution for SKRODZKai.",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://football.fantasysports.yahoo.com/f1/mock_waiting*",
+        "https://football.fantasysports.yahoo.com/draftclient/f1/*"
+      ],
+      "js": [
+        "controller/yahoo-draft-controller.js",
+        "controller/yahoo-mock-runner.js",
+        "extension/yahoo-mock-board.js",
+        "extension/yahoo-mock-extension.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
