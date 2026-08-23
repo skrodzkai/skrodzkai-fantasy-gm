@@ -137,6 +137,11 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     maxConcentration: 0.34,
     maxRoundConcentration: 0.67,
     minEntropy: 0.95,
+    exemptions: [{
+      metric: "roundConcentration",
+      reason: "Yahoo generic D must be consumed before specialized IDP slots in every seat",
+      evidence: { source:"yahoo-observed", leagueId:"18599", draftDate:"2026-08-23" },
+    }],
   });
   const reference = simulations[0];
   const shape = rosterShape(reference.picks);

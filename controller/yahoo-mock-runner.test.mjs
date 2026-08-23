@@ -117,6 +117,10 @@ test("qualifies only the exact retained test-league identity and rotates all six
   );
   assert.deepEqual(Array.from(helpers.allowedPositions(14, [], testConfig, 1)), ["K"]);
   assert.deepEqual(Array.from(helpers.allowedPositions(14, [], testConfig, 6)), ["DEF"]);
+  assert.deepEqual(Array.from(helpers.requiredTestFilterLabels()), ["All Positions", "Kickers", "Team Defenses", "Defensive Players", "Linebackers", "Defensive Backs"]);
+  for (let seat = 1; seat <= 12; seat += 1) {
+    assert.equal(helpers.specialistOrderForSeat(seat)[2], "D", `seat ${seat} must consume Yahoo's generic D slot first`);
+  }
   const picks = [
     player("K", 1, 1), player("DEF", 1, 2), player("LB", 1, 3),
     player("D", 1, 4), player("S", 1, 5), player("CB", 1, 6),
@@ -138,6 +142,34 @@ test("qualifies only the exact retained test-league identity and rotates all six
   ];
   assert.equal(helpers.allowedPositions(12, minimumsMet, testConfig, 1).includes("QB"), true);
   assert.equal(helpers.allowedPositions(13, minimumsMet, testConfig, 1).includes("TE"), true);
+});
+
+test("observed TEST roster validation rejects the Watts-in-D and Hutchinson-on-bench shape", () => {
+  const offense = [
+    player("QB", 1, 1),
+    ...Array.from({ length:4 }, (_, index) => player("RB", index + 1, index + 2)),
+    ...Array.from({ length:6 }, (_, index) => player("WR", index + 1, index + 6)),
+    ...Array.from({ length:2 }, (_, index) => player("TE", index + 1, index + 12)),
+  ];
+  const specialists = [player("K", 1, 14), player("DEF", 1, 15), player("D", 1, 16), player("LB", 1, 17), player("CB", 1, 18), player("S", 1, 19)];
+  const picks = [...offense, ...specialists];
+  const clean = helpers.allocateRosterSlots(picks, testConfig.rosterSlots).map((entry) => ({
+    slot:entry.slot,
+    yahooId:entry.player?.yahooId ?? null,
+    empty:!entry.player,
+  }));
+  assert.equal(helpers.validateObservedTestRoster(clean, picks), true);
+
+  const bad = clean.map((entry) => ({ ...entry }));
+  const dSlot = bad.find((entry) => entry.slot === "D");
+  const sSlot = bad.find((entry) => entry.slot === "S");
+  const bench = bad.find((entry) => entry.slot === "BN");
+  dSlot.yahooId = specialists.find((pick) => pick.position === "S").yahooId;
+  sSlot.yahooId = null;
+  sSlot.empty = true;
+  bench.yahooId = specialists.find((pick) => pick.position === "D").yahooId;
+  bench.empty = false;
+  assert.equal(helpers.validateObservedTestRoster(bad, picks), false);
 });
 
 test("recognizes only the exact public mock roster shape", () => {

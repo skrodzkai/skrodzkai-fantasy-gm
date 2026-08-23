@@ -18,6 +18,7 @@ const context = {
 };
 context.globalThis = context;
 vm.createContext(context);
+vm.runInContext(runnerSource, context);
 vm.runInContext(source, context);
 vm.runInContext(boardSource, context);
 const helpers = context.SKRODZKaiYahooMockExtension._test;
@@ -142,7 +143,7 @@ test("binds the verified test league to team 12 while keeping the snake draft sl
 });
 
 test("arms the exact TEST draftclient from its live slot while preserving Yahoo team identity", () => {
-  const options = ["All Positions", "Kickers", "Team Defenses", "Defensive Players", "Linebackers", "Cornerbacks", "Safeties"]
+  const options = ["All Positions", "Kickers", "Team Defenses", "Defensive Players", "Linebackers", "Defensive Backs"]
     .map((textContent) => ({ textContent, value: textContent }));
   const select = { options };
   const document = {
@@ -162,9 +163,14 @@ test("arms the exact TEST draftclient from its live slot while preserving Yahoo 
   assert.equal(snapshot.urlSeat, 12);
   assert.equal(snapshot.rosterSlots.length, 19);
   assert.deepEqual([...snapshot.missingFilters], []);
+  assert.deepEqual([...helpers.requiredTestFilterLabels()], ["All Positions", "Kickers", "Team Defenses", "Defensive Players", "Linebackers", "Defensive Backs"]);
   assert.equal(helpers.makeTestPreflight(snapshot, 1_000).seat, 3);
   assert.equal(helpers.parseTestDraftClient(document, { pathname: "/draftclient/f1/420010/12" }, settingsReceipt, 1_000).ready, false);
   assert.equal(helpers.parseTestDraftClient({ ...document, body: { innerText: document.body.innerText.replace("0/19", "1/19") } }, { pathname: "/draftclient/f1/18599/12" }, settingsReceipt, 1_000).ready, false);
+  const sevenPicked = helpers.parseTestDraftClient({ ...document, body: { innerText: document.body.innerText.replace("0/19", "7/19").replace("YOUR TURN - 3RD PICK", "WAITING FOR PICK") } }, { pathname: "/draftclient/f1/18599/12" }, settingsReceipt, 1_000);
+  assert.equal(sevenPicked.ready, false);
+  assert.equal(sevenPicked.errors.includes("test_draft_slot_missing"), true);
+  assert.equal(sevenPicked.errors.includes("test_draft_roster_not_empty"), true);
 });
 
 test("attaches current Yahoo defense IDs only to exact ranked teams", () => {
@@ -207,18 +213,20 @@ test("exports runner and controller receipts using distinct draft-slot and Yahoo
     urlSeat: 12,
     storage: { getItem: (key) => values.get(key) ?? null },
     runner: { getStatus: () => ({ state: "completed", picks: Array(15).fill({}) }) },
+    operatorAttestation: helpers.makeOperatorAttestation("NONE", "2026-08-23T21:00:00.000Z"),
   });
   assert.deepEqual([...payload.extensionReceipts.map((entry) => entry.kind)], ["keep"]);
   assert.deepEqual([...payload.runnerReceipts.map((entry) => entry.kind)], ["runner"]);
   assert.deepEqual([...payload.controllerReceipts.map((entry) => entry.kind)], ["controller"]);
   assert.equal(payload.urlSeat, 12);
   assert.equal(payload.status.state, "completed");
+  assert.equal(payload.operatorAttestation.status, "none");
 });
 
 test("manifest has only the two public-mock surfaces plus the exact verified test league and no broad permissions", async () => {
   const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "0.6.2");
+  assert.equal(manifest.version, "0.8.0");
   assert.deepEqual(manifest.permissions, ["storage"]);
   assert.equal(manifest.host_permissions, undefined);
   assert.deepEqual(manifest.background, { service_worker: "extension/command-center-background.js" });
@@ -230,6 +238,8 @@ test("manifest has only the two public-mock surfaces plus the exact verified tes
     "https://football.fantasysports.yahoo.com/f1/mock_waiting*",
     "https://football.fantasysports.yahoo.com/f1/18599/settings*",
     "https://football.fantasysports.yahoo.com/f1/18599/draft*",
+    "https://football.fantasysports.yahoo.com/f1/18599/12",
+    "https://football.fantasysports.yahoo.com/f1/18599/12/*",
     "https://football.fantasysports.yahoo.com/draftclient/f1/*",
   ]);
   assert.deepEqual(manifest.content_scripts[0].exclude_matches, [
@@ -295,12 +305,56 @@ test("command-center bridge sends content changes separately from its stable hea
   helpers.attachCommandCenterBridge({ chrome:{ runtime }, location:{ pathname:"/draftclient/f1/123/4" }, setInterval(callback) { tick = callback; return 1; }, clearInterval() {} }, rail);
   assert.equal(helpers.commandCenterRole("/draftclient/f1/123/4"), "runner");
   assert.equal(helpers.commandCenterRole("/f1/mock_waiting"), "arm-owner");
+  assert.equal(helpers.commandCenterRole("/f1/18599/12"), "arm-owner");
   assert.equal(messages[0].role, "runner");
   assert.equal(messages[0].snapshot.label, "RUNNING");
   tick();
   assert.equal(messages[1].snapshot, undefined);
   assert.equal(messages[1].board, undefined);
   assert.equal(Number.isFinite(messages[1].at), true);
+});
+
+test("bridge locks every action when Chrome invalidates the extension context", () => {
+  let locked = "";
+  let halted = "";
+  const runtime = {
+    sendMessage() { throw new Error("Extension context invalidated."); },
+    onMessage:{ addListener() {}, removeListener() {} },
+  };
+  const rail = {
+    getSnapshot:() => ({ label:"READY", board:[] }),
+    setOpenHandler() {},
+    command() { return true; },
+    lock(reason) { locked = reason; },
+  };
+  const environment = {
+    chrome:{ runtime },
+    location:{ pathname:"/draftclient/f1/18599/12" },
+    localStorage:{ getItem:() => null, setItem() {} },
+    setInterval() { throw new Error("invalid bridge must not start a timer"); },
+    clearInterval() {},
+    __skrodzkaiYahooMockExtensionV1:{ runner:{ halt(reason) { halted = reason; } }, statusTimer:7 },
+  };
+  helpers.attachCommandCenterBridge(environment, rail);
+  assert.match(locked, /Hard-refresh/);
+  assert.equal(halted, "extension_context_invalidated");
+  assert.equal((source.match(/if \(rail\.isLocked\(\)\) return false;/g) ?? []).length >= 4, true);
+  assert.match(source, /for \(const observer of ui\.observers\) observer\.disconnect\(\)/);
+  assert.match(source, /WAITING FOR FINAL ROSTER/);
+});
+
+test("version handshake requires the current installed background version", async () => {
+  assert.equal(await helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.8.0" }) } } }), "0.8.0");
+  await assert.rejects(
+    helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.7.5" }) } } }),
+    /extension_version_mismatch/,
+  );
+  await assert.rejects(
+    helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage() { throw new Error("invalidated"); } } } }),
+    /extension_context_invalidated/,
+  );
+  assert.equal(backgroundHelpers.extensionVersion({ runtime:{ getManifest:() => ({ version:"0.8.0" }) } }), "0.8.0");
+  assert.doesNotMatch(backgroundSource, /identify_arm_surface|tabs\.query/);
 });
 
 test("war-room roster placement respects exact and flex slots rather than pick order", () => {
@@ -312,6 +366,49 @@ test("war-room roster placement respects exact and flex slots rather than pick o
   assert.equal(roster.find((entry) => entry.slot === "QB")?.player?.yahooId, "q");
   assert.equal(roster.find((entry) => entry.slot === "RB")?.player?.yahooId, "r");
   assert.equal(roster.find((entry) => entry.slot === "W/R/T")?.player?.yahooId, "t");
+});
+
+test("war-room roster placement reproduces Yahoo generic-D priority", () => {
+  const roster = helpers.buildUiRoster([
+    { yahooId:"s", name:"Safety", position:"S" },
+    { yahooId:"d", name:"Edge", position:"D" },
+    { yahooId:"lb", name:"Linebacker", position:"LB" },
+    { yahooId:"cb", name:"Corner", position:"CB" },
+  ], helpers.testRosterSlots);
+  assert.equal(roster.find((entry) => entry.slot === "D")?.player?.yahooId, "s");
+  assert.equal(roster.find((entry) => entry.slot === "S")?.player, null);
+  assert.equal(roster.find((entry) => entry.slot === "BN")?.player?.yahooId, "d");
+});
+
+test("final Yahoo roster parser records the observed slot and exact drafted player", () => {
+  const picks = [
+    { yahooId:"41883", name:"Xavier Watts", position:"S" },
+    { yahooId:"33957", name:"Aidan Hutchinson", position:"D" },
+  ];
+  const row = (slot, name, yahooId, classNames = []) => ({
+    classList:{ contains:(value) => classNames.includes(value) },
+    querySelectorAll:(selector) => selector === "td" ? [{ innerText:slot }, { innerText:name || "(Empty)" }] : [],
+    querySelector:() => name ? { textContent:name, getAttribute:() => `https://sports.yahoo.com/nfl/players/${yahooId}` } : null,
+  });
+  const observed = helpers.parseFinalRosterDocument({ querySelectorAll:() => [
+    row("D", "Xavier Watts", "41883"),
+    row("S", "", "", ["empty-position"]),
+    row("BN", "Aidan Hutchinson", "33957"),
+  ] }, picks);
+  assert.deepEqual(JSON.parse(JSON.stringify(observed)), [
+    { slot:"D", yahooId:"41883", name:"Xavier Watts", empty:false },
+    { slot:"S", yahooId:null, name:null, empty:true },
+    { slot:"BN", yahooId:"33957", name:"Aidan Hutchinson", empty:false },
+  ]);
+});
+
+test("operator attestation is explicit none, explicit intervention, or missing", () => {
+  assert.equal(helpers.makeOperatorAttestation("NONE").status, "none");
+  assert.equal(helpers.makeOperatorAttestation("none").status, "missing");
+  const intervention = helpers.makeOperatorAttestation("INTERVENTION: prevented Yahoo from taking Chase");
+  assert.equal(intervention.status, "intervention");
+  assert.equal(intervention.interventions[0].kind, "prevented_autodraft");
+  assert.equal(helpers.makeOperatorAttestation(null).status, "missing");
 });
 
 test("war-room recommendations show only the resolved live ladder with real metrics", () => {

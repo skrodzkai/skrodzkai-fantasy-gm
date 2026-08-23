@@ -1,11 +1,19 @@
 (function installYahooMockRunner(root) {
   "use strict";
 
-  const VERSION = "1.2.0";
+  const VERSION = "1.3.0";
   const GLOBAL_KEY = "__skrodzkaiYahooMockRunnerV1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-runner-receipts-v1";
   const OFFENSE = ["QB", "RB", "WR", "TE"];
   const TEST_SPECIALISTS = ["K", "DEF", "D", "LB", "CB", "S"];
+  const FILTER_LABELS = Object.freeze({
+    K: "Kickers",
+    DEF: "Team Defenses",
+    D: "Defensive Players",
+    LB: "Linebackers",
+    CB: "Defensive Backs",
+    S: "Defensive Backs",
+  });
   const MATERIAL_EDGE_POINTS = 15;
 
   const CONFIGS = Object.freeze({
@@ -93,8 +101,54 @@
 
   function specialistOrderForSeat(seat) {
     const opening = seat >= 5 && seat <= 8 ? ["DEF", "K"] : ["K", "DEF"];
-    const idp = seat % 3 === 1 ? ["LB", "D", "S", "CB"] : seat % 3 === 2 ? ["D", "S", "LB", "CB"] : ["S", "CB", "D", "LB"];
+    const idp = seat % 3 === 1 ? ["D", "LB", "S", "CB"] : seat % 3 === 2 ? ["D", "S", "LB", "CB"] : ["D", "CB", "S", "LB"];
     return [...opening, ...idp];
+  }
+
+  function rosterSlotAccepts(position, slot) {
+    const normalizedPosition = normalize(position);
+    const normalizedSlot = normalize(slot);
+    if (normalizedSlot === normalizedPosition) return true;
+    if (normalizedSlot === "W/R") return ["WR", "RB"].includes(normalizedPosition);
+    if (normalizedSlot === "W/R/T") return ["WR", "RB", "TE"].includes(normalizedPosition);
+    if (normalizedSlot === "D") return ["D", "LB", "CB", "S"].includes(normalizedPosition);
+    return normalizedSlot === "BN";
+  }
+
+  function allocateRosterSlots(picks, rosterSlots) {
+    const roster = Array.from(rosterSlots ?? [], (slot) => ({ slot: normalize(slot), player: null }));
+    for (const pick of Array.from(picks ?? [])) {
+      const position = normalize(pick.position);
+      let index = roster.findIndex((entry) => !entry.player && entry.slot !== "BN" && rosterSlotAccepts(position, entry.slot));
+      if (index < 0) index = roster.findIndex((entry) => !entry.player && entry.slot === "BN");
+      if (index >= 0) roster[index].player = pick;
+    }
+    return roster;
+  }
+
+  function validateObservedTestRoster(observedSlots, picks) {
+    const observed = Array.from(observedSlots ?? [], (entry) => ({
+      slot: normalize(entry?.slot),
+      yahooId: String(entry?.yahooId ?? ""),
+      empty: entry?.empty === true,
+    }));
+    const expectedPicks = Array.from(picks ?? []);
+    const pickById = new Map(expectedPicks.map((pick) => [String(pick.yahooId), pick]));
+    const occupied = observed.filter((entry) => !entry.empty && entry.yahooId);
+    if (occupied.length !== CONFIGS.test_league_19_idp.rosterTotal) return false;
+    if (new Set(occupied.map((entry) => entry.yahooId)).size !== occupied.length) return false;
+    if (occupied.some((entry) => !pickById.has(entry.yahooId))) return false;
+    if (expectedPicks.some((pick) => !occupied.some((entry) => entry.yahooId === String(pick.yahooId)))) return false;
+
+    for (const slot of ["D", "LB", "CB", "S"]) {
+      const entry = observed.find((candidate) => candidate.slot === slot);
+      const pick = pickById.get(entry?.yahooId ?? "");
+      if (!entry || entry.empty || normalize(pick?.position) !== slot) return false;
+    }
+    const specialistIds = new Set(expectedPicks
+      .filter((pick) => ["D", "LB", "CB", "S"].includes(normalize(pick.position)))
+      .map((pick) => String(pick.yahooId)));
+    return !observed.some((entry) => entry.slot === "BN" && specialistIds.has(entry.yahooId));
   }
 
   function allowedPositions(round, picks, config = CONFIGS.public_mock_15, seat = 1) {
@@ -144,11 +198,15 @@
   function filterLabelForRound(round, picks = [], config = CONFIGS.public_mock_15, seat = 1) {
     if (config.name === "test_league_19_idp") {
       const position = allowedPositions(round, picks, config, seat)[0];
-      return { K: "Kickers", DEF: "Team Defenses", D: "Defensive Players", LB: "Linebackers", CB: "Defensive Backs", S: "Defensive Backs" }[position] ?? "All Positions";
+      return FILTER_LABELS[position] ?? "All Positions";
     }
     if (round === 14) return "Team Defenses";
     if (round === 15) return "Kickers";
     return "All Positions";
+  }
+
+  function requiredTestFilterLabels() {
+    return ["All Positions", ...new Set(TEST_SPECIALISTS.map((position) => FILTER_LABELS[position]))];
   }
 
   function boardKey(player) {
@@ -791,7 +849,7 @@
       storage.removeItem(probeKey);
       const rosterAtStart = controllerApi.runtime.parseRosterCount(documentRef.body?.innerText);
       if (!rosterAtStart || rosterAtStart.filled !== 0 || rosterAtStart.total !== config.rosterTotal) {
-        throw new Error("mock roster changed after preflight");
+        throw new Error("draft roster changed after preflight");
       }
       if (controllerApi.runtime.isAutodraftActive(documentRef)) {
         fail("autodraft_active_at_start");
@@ -807,7 +865,7 @@
         observedRosterSlots,
         minimumFallbacks,
         materialEdgePoints,
-        strategy: config.name === "test_league_19_idp" ? "13_offense_then_seat_rotated_verified_specialists" : "position_leader_dropoff_to_next_turn",
+        strategy: config.name === "test_league_19_idp" ? "13_offense_then_generic_d_first_verified_specialists" : "position_leader_dropoff_to_next_turn",
       });
       monitorId = environment.setInterval(advance, pollMs);
       advance();
@@ -892,6 +950,7 @@
       offenseComplete,
       allowedPositions,
       filterLabelForRound,
+      requiredTestFilterLabels,
       validateBoard,
       positionForConfirmedPick,
       overallPick,
@@ -901,6 +960,10 @@
       buildDecisionLadder,
       applyManualOverride,
       validateCompletedRoster,
+      specialistOrderForSeat,
+      rosterSlotAccepts,
+      allocateRosterSlots,
+      validateObservedTestRoster,
     },
   };
 })(globalThis);
