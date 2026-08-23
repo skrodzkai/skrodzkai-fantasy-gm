@@ -61,14 +61,18 @@ The runner exposes a one-way `halt()` kill switch. A halted runner cannot resume
 
 The repository root is also a dependency-free Manifest V3 extension. Load the repository directory as an unpacked extension in Chrome. It requests no general extension permissions and runs only on Yahoo's public mock waiting room, the exact league-18599 settings and test-draft pages, and NFL draftclient paths except real league 420010.
 
-The compact `SKRODZKai` control rail arms public mocks from `/f1/mock_waiting`. The test lane first parses `/f1/18599/settings` for the exact 12-team, 19-active-slot plus three-IR roster and 75-second clock. It can then arm from `/f1/18599/draft` only after Yahoo publishes the snake slot and the page still exposes Chef Joe plus the exact league summary. Each tab-scoped token binds the observed room, URL team, snake slot, team count, and roster shape. The draftclient refuses to start without the matching token, and league 420010 is excluded at the manifest and runtime layers.
+The expandable `SKRODZKai` command center arms public mocks from `/f1/mock_waiting`. The test lane first parses `/f1/18599/settings` for the exact 12-team, 19-active-slot plus three-IR roster and 75-second clock. It can then arm from `/f1/18599/draft` only after Yahoo publishes the snake slot and the page still exposes `SKRODZKai` team 12 plus the exact league summary. Each tab-scoped token binds the observed room, URL team, snake slot, team count, and roster shape. The draftclient refuses to start without the matching token, and league 420010 is excluded at the manifest and runtime layers.
 
 On the matching draftclient page the extension:
 
 1. Rechecks the exact room, URL team, snake slot, empty `0/15` or `0/19` roster, Autodraft-off state, and roster shape.
 2. Uses current exact Yahoo IDs from the static free-source board and restores `All Positions` before the draft begins.
 3. Starts the existing deterministic runner inside the page, removing model and browser-control latency from the pick clock.
-4. Exposes a one-way `HALT` control and a JSON `EXPORT` containing room-scoped extension, runner, and controller receipts.
+4. Displays the owned roster, resolved decision ladder, exact snake horizon, live availability pressure, warnings, and room-scoped receipts in one page-attached operations surface.
+5. Accepts a conditional next-pick pin only before the owned turn. The pin binds the exact room, snake slot, and next round; the runner applies it only when the Yahoo ID is still available and position-legal. Otherwise it records the rejection and immediately executes the unchanged five-target baseline ladder.
+6. Exposes a one-way `HALT` control and a JSON `EXPORT` containing room-scoped extension, runner, and controller receipts.
+
+The TEST-room opponent panel uses only the observed snake window and the live decision ladder. It explicitly withholds 2 Minute Drillers manager-history projections because those owner identities do not participate in the retained test league.
 
 The extension permits public mocks and the exact retained test league only. The real 19-round IDP configuration remains non-executable, and this package grants no real-league authority.
 

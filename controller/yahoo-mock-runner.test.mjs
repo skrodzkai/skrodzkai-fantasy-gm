@@ -186,6 +186,68 @@ test("the public policy always exposes at least five strategic fallbacks through
   );
 });
 
+test("a room-bound next-pick pin becomes target one while retaining verified baseline fallbacks", () => {
+  const board = helpers.validateBoard(genericBoard());
+  const availablePlayers = board.map((candidate) => ({ ...candidate }));
+  const baseline = helpers.buildDecisionLadder({
+    round: 1,
+    seat: 6,
+    picks: [],
+    board,
+    availablePlayers,
+    minimum: 5,
+    config: mockConfig,
+  }).targets;
+  const applied = helpers.applyManualOverride({
+    stage: { roomId: "99", seat: 6, expectedRound: 1, targets: [{ yahooId: "WR-10" }] },
+    roomId: "99",
+    seat: 6,
+    round: 1,
+    board,
+    availablePlayers,
+    baselineTargets: baseline,
+    allowed: helpers.allowedPositions(1, [], mockConfig, 6),
+    minimum: 5,
+  });
+  assert.equal(applied.manualOverride.status, "applied");
+  assert.equal(applied.manualOverride.chosenYahooId, "WR-10");
+  assert.equal(applied.targets[0].yahooId, "WR-10");
+  assert.equal(applied.targets.length, baseline.length + 1);
+  assert.equal(new Set(applied.targets.map((target) => target.yahooId)).size, baseline.length + 1);
+
+  const wrongRound = helpers.applyManualOverride({
+    stage: { roomId: "99", seat: 6, expectedRound: 2, targets: [{ yahooId: "WR-10" }] },
+    roomId: "99",
+    seat: 6,
+    round: 1,
+    board,
+    availablePlayers,
+    baselineTargets: baseline,
+    allowed: helpers.allowedPositions(1, [], mockConfig, 6),
+    minimum: 5,
+  });
+  assert.equal(wrongRound.manualOverride.status, "rejected");
+  assert.equal(wrongRound.manualOverride.reason, "manual_pin_round_mismatch");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(Array.from(wrongRound.targets, (target) => target.yahooId))),
+    JSON.parse(JSON.stringify(Array.from(baseline, (target) => target.yahooId))),
+  );
+  const illegalPosition = helpers.applyManualOverride({
+    stage: { roomId: "99", seat: 6, expectedRound: 1, targets: [{ yahooId: "DEF-1" }] },
+    roomId: "99",
+    seat: 6,
+    round: 1,
+    board,
+    availablePlayers,
+    baselineTargets: baseline,
+    allowed: helpers.allowedPositions(1, [], mockConfig, 6),
+    minimum: 5,
+  });
+  assert.equal(illegalPosition.manualOverride.status, "rejected");
+  assert.equal(illegalPosition.manualOverride.reason, "manual_pin_unavailable_or_ineligible");
+  assert.equal(illegalPosition.manualOverride.consume, true);
+});
+
 test("reserves the public mock specialist filters for rounds 14 and 15", () => {
   assert.equal(helpers.filterLabelForRound(13), "All Positions");
   assert.equal(helpers.filterLabelForRound(14), "Team Defenses");
@@ -613,7 +675,7 @@ test("fails when the confirmed Yahoo roster count drifts from the runner pick co
   assert.equal(stopped, true);
 });
 
-test("resolves the strategy at the owned turn after opponents change a comparator", async () => {
+test("resolves the live ladder then consumes a valid next-pick pin without losing baseline fallbacks", async () => {
   const board = [];
   let rank = 1;
   const addPosition = (position, topVor, secondVor, thirdVor) => {
@@ -633,6 +695,8 @@ test("resolves the strategy at the owned turn after opponents change a comparato
   let ownedTurn = null;
   let controllerCreates = 0;
   let capturedTargets = null;
+  let consumedOverride = null;
+  let stagedOverride = { roomId: "9378515", seat: 6, expectedRound: 1, targets: [{ yahooId: "WR-10" }] };
   const available = new Set(board.map((candidate) => candidate.yahooId));
   const select = {
     value: "all",
@@ -691,6 +755,8 @@ test("resolves the strategy at the owned turn after opponents change a comparato
     expectedSeat: 6,
     observedTeamCount: 12,
     observedRosterSlots: mockConfig.rosterSlots,
+    readManualOverride: () => stagedOverride,
+    consumeManualOverride: (outcome) => { consumedOverride = outcome; },
   }, environment).start();
 
   await new Promise((resolve) => setTimeout(resolve, 40));
@@ -700,13 +766,40 @@ test("resolves the strategy at the owned turn after opponents change a comparato
   await waitFor(() => controllerCreates === 1);
   runner.halt("test_complete");
 
-  assert.equal(capturedTargets[0].yahooId, "RB-1");
+  assert.equal(capturedTargets[0].yahooId, "WR-10");
+  assert.equal(capturedTargets[1].yahooId, "RB-1");
+  assert.equal(consumedOverride.status, "applied");
+  assert.equal(consumedOverride.chosenYahooId, "WR-10");
   const resolved = runner.exportReceipts().find((entry) => entry.kind === "runner_turn_resolved");
   const rbDecision = resolved.decision.positionLeaders.find((leader) => leader.player.position === "RB");
   assert.equal(rbDecision.comparator.yahooId, "RB-3");
-  assert.deepEqual(Array.from(resolved.decision.targetYahooIds).slice(0, 2), ["RB-1", "TE-1"]);
+  assert.equal(resolved.decision.baselineChosenYahooId, "RB-1");
+  assert.deepEqual(Array.from(resolved.decision.targetYahooIds).slice(0, 3), ["WR-10", "RB-1", "TE-1"]);
+  assert.equal(resolved.decision.manualOverride.status, "applied");
   assert.equal("availablePlayers" in resolved.decision, false);
   assert.ok(JSON.stringify(resolved).length < 8000, "strategy receipt should stay compact");
+
+  stagedOverride = { roomId: "9378515", seat: 6, expectedRound: 1, targets: [{ yahooId: "MISSING" }] };
+  ownedTurn = { label: "R1P6", round: 1, pick: 6 };
+  controllerCreates = 0;
+  capturedTargets = null;
+  consumedOverride = null;
+  const rejectedRunner = api.create({
+    board,
+    expectedRoomId: "9378515",
+    expectedSeat: 6,
+    observedTeamCount: 12,
+    observedRosterSlots: mockConfig.rosterSlots,
+    readManualOverride: () => stagedOverride,
+    consumeManualOverride: (outcome) => { consumedOverride = outcome; },
+  }, environment).start();
+  await waitFor(() => controllerCreates === 1);
+  rejectedRunner.halt("test_complete");
+  assert.equal(consumedOverride.status, "rejected");
+  assert.equal(consumedOverride.reason, "manual_pin_unavailable_or_ineligible");
+  assert.equal(consumedOverride.consume, true);
+  assert.equal(capturedTargets[0].yahooId, "RB-1");
+  assert.equal(rejectedRunner.exportReceipts().find((entry) => entry.kind === "runner_turn_resolved").decision.manualOverride.status, "rejected");
 });
 
 test("runner advances across an immediate slot-12 wrap without reusing the stale ladder", async (t) => {
@@ -1111,6 +1204,7 @@ test("halt during filter arming prevents a controller from being created", async
   }, environment).start();
 
   await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(runner.getStatus().busy, true);
   runner.halt("handoff_drill");
   await new Promise((resolve) => setTimeout(resolve, 80));
   assert.equal(runner.getStatus().state, "halted");

@@ -1,7 +1,7 @@
 (function installYahooMockRunner(root) {
   "use strict";
 
-  const VERSION = "1.1.0";
+  const VERSION = "1.2.0";
   const GLOBAL_KEY = "__skrodzkaiYahooMockRunnerV1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-runner-receipts-v1";
   const OFFENSE = ["QB", "RB", "WR", "TE"];
@@ -409,6 +409,63 @@
     return { targets, decision: firstDecision };
   }
 
+  function applyManualOverride({
+    stage,
+    roomId,
+    seat,
+    round,
+    board,
+    availablePlayers,
+    baselineTargets,
+    allowed,
+    minimum = 5,
+  }) {
+    const baseline = Array.from(baselineTargets ?? []);
+    const untouched = (status = "none", reason = null) => ({
+      targets: baseline,
+      manualOverride: { status, reason, consume: Boolean(stage), expectedRound: Number(stage?.expectedRound) || null, targetYahooIds: [] },
+    });
+    if (!stage) return untouched();
+    if (String(stage.roomId ?? "") !== String(roomId) || Number(stage.seat) !== Number(seat)) {
+      return untouched("rejected", "manual_pin_room_or_seat_mismatch");
+    }
+    if (Number(stage.expectedRound) !== Number(round)) {
+      return untouched("rejected", "manual_pin_round_mismatch");
+    }
+
+    const allowedSet = new Set(Array.from(allowed ?? [], normalize));
+    const boardById = new Map(Array.from(board ?? [], (player) => [String(player.yahooId), player]));
+    const availableById = new Map(Array.from(availablePlayers ?? [], (player) => [String(player.yahooId), player]));
+    const stagedIds = Array.from(stage.targets ?? [], (target) => String(target?.yahooId ?? "")).filter(Boolean);
+    const chosenId = stagedIds.find((yahooId) => {
+      const player = boardById.get(yahooId);
+      return player && allowedSet.has(player.position) && availableById.has(yahooId);
+    });
+    if (!chosenId) return untouched("rejected", "manual_pin_unavailable_or_ineligible");
+
+    const boardPlayer = boardById.get(chosenId);
+    const livePlayer = availableById.get(chosenId);
+    const pinned = {
+      yahooId: chosenId,
+      name: String(livePlayer.name ?? boardPlayer.name ?? ""),
+      position: boardPlayer.position,
+      team: String(livePlayer.team ?? boardPlayer.team ?? ""),
+    };
+    const targets = [pinned, ...baseline.filter((target) => String(target.yahooId) !== chosenId)];
+    if (targets.length < minimum) throw new Error(`fewer_than_${minimum}_targets_after_manual_pin`);
+    return {
+      targets,
+      manualOverride: {
+        status: "applied",
+        reason: null,
+        consume: true,
+        expectedRound: Number(stage.expectedRound),
+        chosenYahooId: chosenId,
+        targetYahooIds: stagedIds,
+      },
+    };
+  }
+
   function findFilter(documentRef, label) {
     for (const select of documentRef.querySelectorAll("select")) {
       const options = [...(select.options ?? select.querySelectorAll?.("option") ?? [])];
@@ -483,6 +540,8 @@
     const filterDeadlineMs = Number(options.filterDeadlineMs ?? 5000);
     const materialEdgePoints = MATERIAL_EDGE_POINTS;
     const board = validateBoard(options.board);
+    const readManualOverride = typeof options.readManualOverride === "function" ? options.readManualOverride : () => null;
+    const consumeManualOverride = typeof options.consumeManualOverride === "function" ? options.consumeManualOverride : () => {};
     if (!expectedRoomId || !Number.isInteger(expectedSeat) || expectedSeat < 1 || expectedSeat > config.teams) {
       throw new Error("expected room and seat are required");
     }
@@ -575,7 +634,7 @@
         if (state !== "running") throw new Error("runner_not_running");
         try {
           const availablePlayers = readAvailablePlayers(documentRef, controllerApi);
-          const resolved = buildDecisionLadder({
+          const baseline = buildDecisionLadder({
             round: turn.round,
             seat: expectedSeat,
             picks,
@@ -585,7 +644,29 @@
             materialEdgePoints,
             config,
           });
-          return { ...resolved, filterReadyMs: Date.now() - startedAt };
+          const { targets, manualOverride } = applyManualOverride({
+            stage: readManualOverride(),
+            roomId: expectedRoomId,
+            seat: expectedSeat,
+            round: turn.round,
+            board,
+            availablePlayers,
+            baselineTargets: baseline.targets,
+            allowed: allowedPositions(turn.round, picks, config, expectedSeat),
+            minimum: minimumFallbacks,
+          });
+          const decision = {
+            ...baseline.decision,
+            baselineChosenYahooId: baseline.decision.chosenYahooId,
+            chosenYahooId: targets[0].yahooId,
+            targetYahooIds: targets.map((target) => target.yahooId),
+            manualOverride: {
+              status: manualOverride.status,
+              reason: manualOverride.reason,
+              chosenYahooId: manualOverride.chosenYahooId ?? null,
+            },
+          };
+          return { targets, decision, manualOverride, filterReadyMs: Date.now() - startedAt };
         } catch (error) {
           if (!String(error?.message ?? error).startsWith("fewer_than_")) throw error;
           lastEligibilityError = String(error.message);
@@ -603,7 +684,7 @@
         throw new Error(`owned_turn_mismatch:expected_R${expectedRound}P${expectedPick}:observed_${turn.label}`);
       }
       const filterLabel = filterLabelForRound(turn.round, picks, config, expectedSeat);
-      const { targets, decision, filterReadyMs } = await targetsAfterFilter(turn, filterLabel);
+      const { targets, decision, manualOverride, filterReadyMs } = await targetsAfterFilter(turn, filterLabel);
       if (state !== "running") return;
       receipt("runner_turn_resolved", {
         turn: turn.label,
@@ -613,6 +694,7 @@
         allowedPositions: allowedPositions(turn.round, picks, config, expectedSeat),
         decision,
       });
+      if (manualOverride.consume) consumeManualOverride(manualOverride);
       const nextController = controllerApi.create(
         {
           targets,
@@ -782,6 +864,7 @@
         seat: expectedSeat,
         urlSeat: room.seat,
         state,
+        busy,
         failure,
         picks: picks.slice(),
         currentController: currentController?.getStatus?.() ?? null,
@@ -816,6 +899,7 @@
       survivalBucket,
       scorePositionLeaders,
       buildDecisionLadder,
+      applyManualOverride,
       validateCompletedRoster,
     },
   };
