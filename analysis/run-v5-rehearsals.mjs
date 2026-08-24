@@ -168,6 +168,17 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     settings: { leagueKey: "18599", teamKey: "12", seat: reference.seat, requireReadOnly: true },
     yahoo: { leagueKey: "18599", teamKey: "wrong", seat: reference.seat, readOnly: true, eligiblePlayerIds: [] },
   });
+  const duplicateProbeBoard = helpers.validateBoard(board);
+  const duplicateProbe = helpers.buildDecisionLadder({
+    round: 2,
+    seat: reference.seat,
+    picks: [reference.picks[0]],
+    board: duplicateProbeBoard,
+    availablePlayers: duplicateProbeBoard,
+    minimum: 5,
+    config,
+    replacementBySlot,
+  });
   const recomputeValues = simulations.flatMap((simulation) => simulation.picks.map((pick) => pick.recomputeMs));
   const latency = {
     recomputeP95Ms: percentile(recomputeValues, 0.95),
@@ -186,7 +197,10 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
   };
   const chaos = {
     wrongTeamIdentity: { pass: identityChaos.status === "LOCKED", observed: identityChaos },
-    duplicatePick: { pass: new Set([reference.picks[0].yahooId, reference.picks[0].yahooId]).size !== 2 },
+    duplicatePick: {
+      pass: duplicateProbe.targets.every((target) => String(target.yahooId) !== String(reference.picks[0].yahooId)),
+      rejectedYahooId: reference.picks[0].yahooId,
+    },
     incompleteRoster: { pass: helpers.validateCompletedRoster(reference.picks.slice(0, -1), config) === false },
   };
   const validRosters = simulations.filter((simulation) => simulation.validRoster).length;

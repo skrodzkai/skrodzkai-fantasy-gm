@@ -1220,7 +1220,7 @@
     const preflightError = validateDraftPreflight(armRecord, room);
     if (preflightError) {
       writeReceipt(environment.localStorage, { kind: "extension_locked", roomId: room.roomId, seat: room.seat, failure: preflightError });
-      rail.setWarnings(buildUiWarnings({ room, armRecord: null, autodraft: controllerApi.runtime.isAutodraftActive(environment.document), roster: null, board: boardData.offense, expectedRosterTotal }));
+      rail.setWarnings(buildUiWarnings({ room, armRecord: null, autodraft: controllerApi.runtime.isAutodraftActive(environment.document), roster: null, board: boardData.players, expectedRosterTotal }));
       rail.render("bad", "LOCKED", `${preflightError} · arm from the approved ${executionMode.toLowerCase()} preflight`);
       return;
     }
