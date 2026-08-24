@@ -18,6 +18,7 @@
   const PANEL_BUDGET_MS = 250;
   const TURN_TO_CLICK_BUDGET_MS = 2000;
   const NEXT_TURN_COMPARISON_POOL = 6;
+  const NORMALIZED_VALUE_CACHE = new Map();
 
   const CONFIGS = Object.freeze({
     public_mock_15: Object.freeze({
@@ -65,12 +66,28 @@
   });
 
   function normalize(value) {
-    return String(value ?? "")
+    const raw = String(value ?? "");
+    const cached = NORMALIZED_VALUE_CACHE.get(raw);
+    if (cached !== undefined) return cached;
+    const normalized = raw
       .normalize("NFKD")
       .replace(/[\u0300-\u036f]/g, "")
       .replace(/[^a-zA-Z0-9/]+/g, " ")
       .trim()
       .toUpperCase();
+    NORMALIZED_VALUE_CACHE.set(raw, normalized);
+    return normalized;
+  }
+
+  function normalizedRosterSlotAccepts(eligible, normalizedSlot) {
+    if (eligible.includes(normalizedSlot)) return true;
+    if (normalizedSlot === "W/R") return eligible.some((position) => ["WR", "RB"].includes(position));
+    if (normalizedSlot === "W/R/T") return eligible.some((position) => ["WR", "RB", "TE"].includes(position));
+    if (normalizedSlot === "D") return eligible.some((position) => ["D", "DL", "DE", "DT", "LB", "DB", "CB", "S"].includes(position));
+    if (normalizedSlot === "DB") return eligible.some((position) => ["DB", "CB", "S"].includes(position));
+    if (normalizedSlot === "CB") return eligible.some((position) => ["DB", "CB"].includes(position));
+    if (normalizedSlot === "S") return eligible.some((position) => ["DB", "S"].includes(position));
+    return normalizedSlot === "BN";
   }
 
   function normalizeSlots(slots) {
@@ -105,21 +122,14 @@
   function rosterSlotAccepts(position, slot) {
     const eligible = Array.isArray(position) ? position.map(normalize) : [normalize(position)];
     const normalizedSlot = normalize(slot);
-    if (eligible.includes(normalizedSlot)) return true;
-    if (normalizedSlot === "W/R") return eligible.some((position) => ["WR", "RB"].includes(position));
-    if (normalizedSlot === "W/R/T") return eligible.some((position) => ["WR", "RB", "TE"].includes(position));
-    if (normalizedSlot === "D") return eligible.some((position) => ["D", "DL", "DE", "DT", "LB", "DB", "CB", "S"].includes(position));
-    if (normalizedSlot === "DB") return eligible.some((position) => ["DB", "CB", "S"].includes(position));
-    if (normalizedSlot === "CB") return eligible.some((position) => ["DB", "CB"].includes(position));
-    if (normalizedSlot === "S") return eligible.some((position) => ["DB", "S"].includes(position));
-    return normalizedSlot === "BN";
+    return normalizedRosterSlotAccepts(eligible, normalizedSlot);
   }
 
   function allocateRosterSlots(picks, rosterSlots) {
     const roster = Array.from(rosterSlots ?? [], (slot) => ({ slot: normalize(slot), player: null }));
     for (const pick of Array.from(picks ?? [])) {
       const eligible = Array.from(pick.eligible ?? [pick.position], normalize);
-      let index = roster.findIndex((entry) => !entry.player && entry.slot !== "BN" && rosterSlotAccepts(eligible, entry.slot));
+      let index = roster.findIndex((entry) => !entry.player && entry.slot !== "BN" && normalizedRosterSlotAccepts(eligible, entry.slot));
       if (index < 0) index = roster.findIndex((entry) => !entry.player && entry.slot === "BN");
       if (index >= 0) roster[index].player = pick;
     }
@@ -143,7 +153,7 @@
     for (const slot of ["D", "LB", "CB", "S"]) {
       const entry = observed.find((candidate) => candidate.slot === slot);
       const pick = pickById.get(entry?.yahooId ?? "");
-      if (!entry || entry.empty || !rosterSlotAccepts(playerEligibility(pick), slot)) return false;
+      if (!entry || entry.empty || !normalizedRosterSlotAccepts(playerEligibility(pick), slot)) return false;
     }
     const specialistIds = new Set(expectedPicks
       .filter((pick) => ["D", "LB", "CB", "S"].includes(normalize(pick.position)))
@@ -263,7 +273,11 @@
   }
 
   function playerEligibility(player) {
-    return [...new Set(Array.from(player?.eligible ?? [player?.position], normalize).filter(Boolean))];
+    const source = player?.eligible ?? [player?.position];
+    if (Array.isArray(source) && source.length && source.every((position, index) =>
+      Boolean(position) && typeof position === "string" && NORMALIZED_VALUE_CACHE.get(position) === position && source.indexOf(position) === index
+    )) return source;
+    return [...new Set(Array.from(source, normalize).filter(Boolean))];
   }
 
   function starterSlots(config) {
@@ -296,7 +310,7 @@
       addEdge(source, playerStart + playerIndex, 1, 0);
       const eligible = playerEligibility(players[playerIndex]);
       for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) {
-        if (!rosterSlotAccepts(eligible, slots[slotIndex])) continue;
+        if (!normalizedRosterSlotAccepts(eligible, slots[slotIndex])) continue;
         const value = Number(edgeValue(players[playerIndex], slots[slotIndex]));
         if (Number.isFinite(value) && value > 0) addEdge(playerStart + playerIndex, slotStart + slotIndex, 1, -value);
       }
@@ -433,7 +447,7 @@
       const eligible = playerEligibility(player);
       let result = baseline;
       for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) {
-        if (rosterSlotAccepts(eligible, slots[slotIndex])) {
+        if (normalizedRosterSlotAccepts(eligible, slots[slotIndex])) {
           result = Math.max(result, excludedValues[slotIndex] + 1);
         }
       }
@@ -447,7 +461,7 @@
         const eligible = playerEligibility(player);
         let withCandidate = baseUtility;
         for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) {
-          if (!rosterSlotAccepts(eligible, slots[slotIndex])) continue;
+          if (!normalizedRosterSlotAccepts(eligible, slots[slotIndex])) continue;
           withCandidate = Math.max(withCandidate, utilityWithoutSlot[slotIndex] + valueForSlot(player, slots[slotIndex]));
         }
         const marginalUtility = Math.max(0, withCandidate - baseUtility);
@@ -483,9 +497,9 @@
       const leftEligible = playerEligibility(leftPlayer);
       const rightEligible = playerEligibility(rightPlayer);
       for (let left = 0; left < slots.length; left += 1) {
-        if (!rosterSlotAccepts(leftEligible, slots[left])) continue;
+        if (!normalizedRosterSlotAccepts(leftEligible, slots[left])) continue;
         for (let right = 0; right < slots.length; right += 1) {
-          if (left === right || !rosterSlotAccepts(rightEligible, slots[right])) continue;
+          if (left === right || !normalizedRosterSlotAccepts(rightEligible, slots[right])) continue;
           const key = left < right ? `${left}:${right}` : `${right}:${left}`;
           result = Math.max(result, excludedValues.get(key) + 2);
         }
@@ -497,9 +511,9 @@
       const leftEligible = playerEligibility(leftEntry.player);
       const rightEligible = playerEligibility(rightEntry.player);
       for (let left = 0; left < slots.length; left += 1) {
-        if (!rosterSlotAccepts(leftEligible, slots[left])) continue;
+        if (!normalizedRosterSlotAccepts(leftEligible, slots[left])) continue;
         for (let right = 0; right < slots.length; right += 1) {
-          if (left === right || !rosterSlotAccepts(rightEligible, slots[right])) continue;
+          if (left === right || !normalizedRosterSlotAccepts(rightEligible, slots[right])) continue;
           const key = left < right ? `${left}:${right}` : `${right}:${left}`;
           result = Math.max(result, utilityWithoutPair.get(key) + valueForSlot(leftEntry.player, slots[left]) + valueForSlot(rightEntry.player, slots[right]));
         }
