@@ -59,7 +59,11 @@ function render() {
   elements.latest.textContent = text(state.latestText,"No confirmed selection yet.");
 
   const ladder = Array.isArray(state.recommendations) ? state.recommendations : [];
-  elements.ladder.innerHTML = ladder.length ? ladder.slice(0,6).map((player,index) => `<div class="ladder-row ${player.manual ? "pinned" : ""}"><div class="rank">${player.manual ? "PIN" : index === 0 ? "GO" : `F${index}`}</div><div><div class="player">${esc(player.name,`Yahoo ${player.yahooId}`)}</div><div class="meta">${esc(player.position)} · ${esc(player.team)}</div><div class="reason">${esc(player.reason,"verified local ladder")}</div></div><div class="score">${esc(player.edge)}<br>${esc(player.confidence)}</div></div>`).join("") : `<div class="ladder-empty">Ladder resolves on our owned turn after Yahoo availability is validated.</div>`;
+  elements.ladder.innerHTML = ladder.length ? ladder.slice(0,6).map((player,index) => `<button type="button" data-live-choice="${esc(player.yahooId)}" class="ladder-row ${player.manual ? "pinned" : ""}"><div class="rank">${player.manual ? "PIN" : index < 3 ? `${index + 1}` : `F${index}`}</div><div><div class="player">${esc(player.name,`Yahoo ${player.yahooId}`)}</div><div class="meta">${esc(player.position)} · ${esc(player.team)}</div><div class="reason">${esc(player.reason,"verified local ladder")}</div></div><div class="score">${esc(player.edge)}<br>${esc(player.confidence)}</div></button>`).join("") : `<div class="ladder-empty">Ladder resolves on our owned turn after Yahoo availability is validated.</div>`;
+  for (const button of elements.ladder.querySelectorAll("[data-live-choice]")) button.addEventListener("click", () => {
+    const player = ladder.find((candidate) => String(candidate.yahooId) === String(button.dataset.liveChoice));
+    if (player) command("pin", { targets:[player] });
+  });
   elements.ladderState.textContent = text(state.ladderState,"BASELINE READY");
   elements.topTarget.textContent = ladder[0] ? `${text(ladder[0].name)} · ${text(ladder[0].position)} · ${text(ladder[0].edge)}` : "Waiting for Yahoo availability";
   elements.pinState.textContent = text(state.pinText,"No pin staged. Five verified fallbacks remain active.");
@@ -115,3 +119,4 @@ elements.kill.addEventListener("click",()=>command("kill"));
 elements.export.addEventListener("click",()=>command("export"));
 elements.clearPin.addEventListener("click",()=>command("clear_pin"));
 elements.pin.addEventListener("click",()=>{const targets=board.filter((player)=>selectedIds.has(String(player.yahooId)));command("pin",{targets});selectedIds.clear();renderSearch();});
+document.addEventListener("keydown",(event)=>{if(["INPUT","TEXTAREA","SELECT"].includes(String(event.target?.tagName??"").toUpperCase()))return;const index=Number(event.key)-1;const player=state?.recommendations?.[index];if(index>=0&&index<3&&player){event.preventDefault();command("pin",{targets:[player]});}});

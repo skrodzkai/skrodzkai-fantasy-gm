@@ -12,10 +12,17 @@ function compactOffense(player) {
     team: player.team,
     position: player.position,
     rank: player.draftBoardRank,
+    valueRank: player.overallRank,
+    yahooRank: finite(player.yahooPreseasonRank) ? Number(player.yahooPreseasonRank) : null,
     vor: Number(player.vorp),
-    adpLow: Number(player.marketAdpLow),
-    adpHigh: Number(player.marketAdpHigh),
+    adpLow: finite(player.marketAdpLow) ? Number(player.marketAdpLow) : null,
+    adpHigh: finite(player.marketAdpHigh) ? Number(player.marketAdpHigh) : null,
     projection: Number(player.consensusPoints),
+    replacementPoints: finite(player.replacementPoints) ? Number(player.replacementPoints) : null,
+    eligible: Array.from(player.eligible ?? [player.position]),
+    automaticEligible: player.automaticEligible !== false,
+    manualEligible: player.manualEligible !== false,
+    validationStatus: player.validationStatus ?? "EXECUTABLE",
     confidence: player.sourceCount >= 2 ? "MULTI_SOURCE" : "WITHHELD",
     bye: player.bye ?? null,
   };
@@ -36,7 +43,17 @@ function compactSpecialist(player, positionOverride = null) {
     team: player.team,
     position: positionOverride ?? player.yahooPosition ?? player.position,
     rank: player.specialistRank,
+    valueRank: player.overallRank,
+    yahooRank: finite(player.yahooPreseasonRank) ? Number(player.yahooPreseasonRank) : null,
+    adpLow: finite(player.marketAdpLow) ? Number(player.marketAdpLow) : null,
+    adpHigh: finite(player.marketAdpHigh) ? Number(player.marketAdpHigh) : null,
     projection: finite(player.consensusPoints) ? Number(player.consensusPoints) : null,
+    replacementPoints: finite(player.replacementPoints) ? Number(player.replacementPoints) : null,
+    vor: finite(player.vorp) ? Number(player.vorp) : null,
+    eligible: Array.from(player.eligible ?? [positionOverride ?? player.position]),
+    automaticEligible: player.automaticEligible !== false,
+    manualEligible: player.manualEligible !== false,
+    validationStatus: player.validationStatus ?? "EXECUTABLE",
     confidence,
     bye: player.bye ?? null,
   };
@@ -49,7 +66,7 @@ function specialistHealthClear(player) {
 export function extensionBoardFromV5(board) {
   const offense = (board?.boards?.offense ?? [])
     .filter((player) => player.executable)
-    .filter((player) => finite(player.vorp) && finite(player.marketAdpLow) && finite(player.marketAdpHigh))
+    .filter((player) => finite(player.vorp))
     .map(compactOffense);
   const specialists = board?.boards?.specialists ?? {};
   const kickers = (specialists.K ?? []).filter(specialistHealthClear).map((player) => compactSpecialist(player, "K"));
@@ -73,10 +90,27 @@ export function extensionBoardFromV5(board) {
   if (offense.length < 100) throw new Error(`extension offense board too small: ${offense.length}`);
   if (kickers.length < 12) throw new Error(`extension kicker board too small: ${kickers.length}`);
   if (defenses.length !== 32) throw new Error(`extension defense board must contain 32 teams: ${defenses.length}`);
+  const playerByYahooId = new Map();
+  const positionPriority = (position) => ["QB", "RB", "WR", "TE"].includes(position)
+    ? 4
+    : ["K", "DEF"].includes(position)
+      ? 3
+      : ["LB", "CB", "S"].includes(position)
+        ? 2
+        : 1;
+  for (const player of [...offense, ...kickers, ...defenses, ...idp]) {
+    const existing = playerByYahooId.get(player.yahooId);
+    if (!existing || positionPriority(player.position) > positionPriority(existing.position)) {
+      playerByYahooId.set(player.yahooId, player);
+    }
+  }
+  const players = [...playerByYahooId.values()];
   return {
     generatedAt: board.generatedAt,
-    source: "v5 free-source board: Yahoo projections plus league-scored history/market baseline; injuries cross-checked with Yahoo and Sleeper",
+    source: "free-source board: equal-weight Yahoo and league-scored prior-history inputs; injuries cross-checked with Yahoo and Sleeper",
     scoringModel: board.scoringModel,
+    replacementBySlot: board.replacementBySlot ?? null,
+    players,
     offense,
     kickers,
     defenses,
@@ -85,7 +119,15 @@ export function extensionBoardFromV5(board) {
 }
 
 export function renderExtensionBoard(board) {
-  return `(function installYahooMockBoard(root) {\n  "use strict";\n\n  root.SKRODZKaiYahooMockBoard = Object.freeze(${JSON.stringify(board, null, 2)});\n})(globalThis);\n`;
+  const runtimeBoard = {
+    generatedAt: board.generatedAt,
+    source: board.source,
+    scoringModel: board.scoringModel,
+    replacementBySlot: board.replacementBySlot,
+    players: board.players,
+    defenses: board.defenses,
+  };
+  return `(function installYahooMockBoard(root) {\n  "use strict";\n\n  root.SKRODZKaiYahooMockBoard = Object.freeze(${JSON.stringify(runtimeBoard, null, 2)});\n})(globalThis);\n`;
 }
 
 async function main() {

@@ -34,7 +34,7 @@ test("uses four draft phases aligned to the 19-round room", () => {
   assert.equal(draftPhase(15), "specialists");
 });
 
-test("shrinks stable manager preferences toward the room prior", () => {
+test("removes manager-specific preferences and returns only the room phase prior", () => {
   const rows = [];
   for (let season = 2020; season <= 2024; season += 1) {
     for (let round = 1; round <= 4; round += 1) {
@@ -42,15 +42,14 @@ test("shrinks stable manager preferences toward the room prior", () => {
       rows.push({ season, managerId: "rb-owner", round, position: "RB" });
     }
   }
-  const model = trainPositionModel(rows, { decay: 1, shrinkage: 4, maxSeason: 2024 });
+  const model = trainPositionModel(rows, { decay: 1, maxSeason: 2024 });
   const qbOwner = predictPosition(model, "qb-owner", 2);
   const rbOwner = predictPosition(model, "rb-owner", 2);
-  assert.ok(qbOwner.QB > rbOwner.QB);
-  assert.ok(rbOwner.RB > qbOwner.RB);
+  assert.deepEqual(qbOwner, rbOwner);
   assert.deepEqual(predictPosition(model, "unknown", 2), model.roomProbabilities.opening);
 });
 
-test("builds pseudonymous profiles and keeps the raw mapping separate", () => {
+test("emits no manager profiles after the manager layer fails its held-out gate", () => {
   const header = "season,manager_id,draft_slot,pick,round,position\n";
   const lines = [];
   for (let season = 2018; season <= 2025; season += 1) {
@@ -65,15 +64,13 @@ test("builds pseudonymous profiles and keeps the raw mapping separate", () => {
     validationSeasons: [2023, 2024],
     testSeason: 2025,
     decays: [1],
-    shrinkages: [1],
     bootstrapSamples: 200,
     excludeManagerIds: ["gamma"],
   });
   assert.equal(result.calibration.events, 38);
-  assert.ok(Object.keys(result.profiles).every((key) => /^owner-[a-f0-9]{10}$/.test(key)));
-  assert.equal(result.profiles.alpha, undefined);
-  assert.equal(result.managerMap.gamma, undefined);
-  assert.match(result.managerMap.alpha, /^owner-/);
+  assert.deepEqual(result.profiles, {});
+  assert.deepEqual(result.managerMap, {});
+  assert.equal(result.managerLayer, "REMOVED_FAILED_HELD_OUT_GATE");
   assert.equal(result.calibration.excludedManagers, 1);
   assert.equal(result.calibration.excludedRows, 152);
 });

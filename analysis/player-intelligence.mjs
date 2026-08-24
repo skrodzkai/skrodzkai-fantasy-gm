@@ -5,16 +5,32 @@ const OFFENSE_SCORING = Object.freeze({
   interceptions: -2,
   rushingYards: 0.1,
   rushingTouchdowns: 6,
-  rushingHundredYardBonus: 2,
+  rushingHundredYardGames: 2,
   receptions: 0.25,
   receivingYards: 0.1,
   receivingTouchdowns: 6,
-  receivingHundredYardBonus: 2,
+  receivingHundredYardGames: 2,
   returnYards: 0.02,
   returnTouchdowns: 6,
   twoPointConversions: 2,
   fumblesLost: -2,
   offensiveFumbleReturnTouchdowns: 6,
+});
+
+const IDP_SCORING = Object.freeze({
+  soloTackles: 0.5,
+  assistedTackles: 0.25,
+  sacks: 2,
+  interceptions: 3,
+  forcedFumbles: 2,
+  fumbleRecoveries: 2,
+  touchdowns: 6,
+  safeties: 2,
+  passesDefended: 1,
+  blockedKicks: 2,
+  tacklesForLoss: 1,
+  turnoverReturnYards: 0.1,
+  extraPointReturns: 2,
 });
 
 const REQUIRED_PLAYER_FIELDS = ["playerId", "name", "position"];
@@ -51,6 +67,12 @@ function weightedMean(rows) {
 export function scoreOffenseStatLine(stats, scoring = OFFENSE_SCORING) {
   const rushingYards = finite(stats.rushingYards);
   const receivingYards = finite(stats.receivingYards);
+  const rushingHundredYardGames = stats.rushingHundredYardGames == null
+    ? (rushingYards >= 100 ? 1 : 0)
+    : finite(stats.rushingHundredYardGames);
+  const receivingHundredYardGames = stats.receivingHundredYardGames == null
+    ? (receivingYards >= 100 ? 1 : 0)
+    : finite(stats.receivingHundredYardGames);
   return (
     finite(stats.passingCompletions) * scoring.passingCompletions +
     finite(stats.passingYards) * scoring.passingYards +
@@ -58,11 +80,11 @@ export function scoreOffenseStatLine(stats, scoring = OFFENSE_SCORING) {
     finite(stats.interceptions) * scoring.interceptions +
     rushingYards * scoring.rushingYards +
     finite(stats.rushingTouchdowns) * scoring.rushingTouchdowns +
-    (rushingYards >= 100 ? scoring.rushingHundredYardBonus : 0) +
+    rushingHundredYardGames * scoring.rushingHundredYardGames +
     finite(stats.receptions) * scoring.receptions +
     receivingYards * scoring.receivingYards +
     finite(stats.receivingTouchdowns) * scoring.receivingTouchdowns +
-    (receivingYards >= 100 ? scoring.receivingHundredYardBonus : 0) +
+    receivingHundredYardGames * scoring.receivingHundredYardGames +
     finite(stats.returnYards) * scoring.returnYards +
     finite(stats.returnTouchdowns) * scoring.returnTouchdowns +
     finite(stats.twoPointConversions) * scoring.twoPointConversions +
@@ -70,6 +92,132 @@ export function scoreOffenseStatLine(stats, scoring = OFFENSE_SCORING) {
     finite(stats.offensiveFumbleReturnTouchdowns) *
       scoring.offensiveFumbleReturnTouchdowns
   );
+}
+
+export function scoreIdpStatLine(stats, scoring = IDP_SCORING) {
+  return Object.entries(scoring).reduce(
+    (points, [field, value]) => points + finite(stats?.[field]) * value,
+    0,
+  );
+}
+
+function normalizePosition(value) {
+  const position = String(value ?? "").toUpperCase();
+  if (["DE", "DT", "NT"].includes(position)) return "DL";
+  if (["FS", "SS"].includes(position)) return "S";
+  if (["ILB", "OLB"].includes(position)) return "LB";
+  return position;
+}
+
+function eligibilityFor(player) {
+  const eligible = Array.from(player?.eligible ?? [], normalizePosition).filter(Boolean);
+  const primary = normalizePosition(player?.position);
+  return [...new Set([...eligible, primary].filter(Boolean))];
+}
+
+function slotAccepts(slot, eligible) {
+  const normalizedSlot = normalizePosition(slot);
+  const positions = new Set(Array.from(eligible ?? [], normalizePosition));
+  if (positions.has(normalizedSlot)) return true;
+  if (normalizedSlot === "W/R") return positions.has("WR") || positions.has("RB");
+  if (normalizedSlot === "W/R/T") return positions.has("WR") || positions.has("RB") || positions.has("TE");
+  if (normalizedSlot === "D") return ["DL", "LB", "DB", "CB", "S", "D"].some((position) => positions.has(position));
+  if (normalizedSlot === "DB") return ["DB", "CB", "S"].some((position) => positions.has(position));
+  if (normalizedSlot === "CB") return positions.has("CB") || positions.has("DB");
+  if (normalizedSlot === "S") return positions.has("S") || positions.has("DB");
+  return false;
+}
+
+function addFlowEdge(graph, from, to, capacity, cost, metadata = null) {
+  const forward = { to, reverse: graph[to].length, capacity, cost, metadata, initialCapacity: capacity };
+  const reverse = { to: from, reverse: graph[from].length, capacity: 0, cost: -cost, metadata: null, initialCapacity: 0 };
+  graph[from].push(forward);
+  graph[to].push(reverse);
+}
+
+/**
+ * Jointly fills every league starter slot. Residual edges allow an already
+ * assigned multi-position player to move when that produces a better global
+ * allocation, so W/R/T and D are not estimated as independent rank cutoffs.
+ */
+export function deriveJointReplacementLevels({ players, teamCount, rosterSlots }) {
+  if (!Number.isInteger(teamCount) || teamCount < 2) throw new Error("teamCount must be an integer of at least two");
+  const slotCounts = Array.from(rosterSlots ?? []).reduce((counts, rawSlot) => {
+    const slot = normalizePosition(rawSlot);
+    if (!slot || ["BN", "IR"].includes(slot)) return counts;
+    counts[slot] = (counts[slot] ?? 0) + teamCount;
+    return counts;
+  }, {});
+  if (!Object.keys(slotCounts).length) throw new Error("rosterSlots must include at least one starter slot");
+
+  const eligiblePlayers = Array.from(players ?? [])
+    .filter((player) => Number.isFinite(Number(player.consensusPoints)))
+    .map((player) => ({ ...player, eligible: eligibilityFor(player), points: Number(player.consensusPoints) }))
+    .filter((player) => Object.keys(slotCounts).some((slot) => slotAccepts(slot, player.eligible)));
+  const slotNames = Object.keys(slotCounts);
+  const source = 0;
+  const firstPlayer = 1;
+  const firstSlot = firstPlayer + eligiblePlayers.length;
+  const sink = firstSlot + slotNames.length;
+  const graph = Array.from({ length: sink + 1 }, () => []);
+  eligiblePlayers.forEach((player, index) => {
+    const playerNode = firstPlayer + index;
+    addFlowEdge(graph, source, playerNode, 1, -player.points);
+    slotNames.forEach((slot, slotIndex) => {
+      if (slotAccepts(slot, player.eligible)) {
+        addFlowEdge(graph, playerNode, firstSlot + slotIndex, 1, 0, { playerId: String(player.playerId), slot, points: player.points });
+      }
+    });
+  });
+  slotNames.forEach((slot, index) => addFlowEdge(graph, firstSlot + index, sink, slotCounts[slot], 0));
+
+  const requestedFlow = Object.values(slotCounts).reduce((sum, count) => sum + count, 0);
+  let flow = 0;
+  while (flow < requestedFlow) {
+    const distance = Array(graph.length).fill(Infinity);
+    const parentNode = Array(graph.length).fill(-1);
+    const parentEdge = Array(graph.length).fill(-1);
+    distance[source] = 0;
+    for (let pass = 0; pass < graph.length - 1; pass += 1) {
+      let changed = false;
+      for (let node = 0; node < graph.length; node += 1) {
+        if (!Number.isFinite(distance[node])) continue;
+        graph[node].forEach((edge, edgeIndex) => {
+          if (edge.capacity <= 0 || distance[node] + edge.cost >= distance[edge.to]) return;
+          distance[edge.to] = distance[node] + edge.cost;
+          parentNode[edge.to] = node;
+          parentEdge[edge.to] = edgeIndex;
+          changed = true;
+        });
+      }
+      if (!changed) break;
+    }
+    if (parentNode[sink] < 0) break;
+    for (let node = sink; node !== source; node = parentNode[node]) {
+      const edge = graph[parentNode[node]][parentEdge[node]];
+      edge.capacity -= 1;
+      graph[node][edge.reverse].capacity += 1;
+    }
+    flow += 1;
+  }
+  if (flow !== requestedFlow) throw new Error(`joint replacement allocation filled ${flow} of ${requestedFlow} starter slots`);
+
+  const assignments = [];
+  eligiblePlayers.forEach((_player, index) => {
+    for (const edge of graph[firstPlayer + index]) {
+      if (edge.metadata && edge.initialCapacity === 1 && edge.capacity === 0) assignments.push(edge.metadata);
+    }
+  });
+  const replacementBySlot = {};
+  for (const slot of slotNames) {
+    const points = assignments.filter((entry) => entry.slot === slot).map((entry) => entry.points);
+    replacementBySlot[slot] = points.length ? Math.min(...points) : null;
+  }
+  if (replacementBySlot.DB != null) {
+    replacementBySlot.CB ??= replacementBySlot.DB;
+    replacementBySlot.S ??= replacementBySlot.DB;
+  }
+  return Object.freeze({ replacementBySlot, assignments, slotCounts });
 }
 
 function projectionPoints(row) {
@@ -119,6 +267,7 @@ export function buildPlayerBoard({
   asOf,
   maxAgeHours = 72,
   minimumFreshSources = 2,
+  replacementRoster = null,
 }) {
   const now = assertIsoDate(asOf, "asOf");
   if (!Array.isArray(players) || players.length === 0) {
@@ -175,8 +324,9 @@ export function buildPlayerBoard({
     return {
       ...player,
       consensusPoints: consensus,
-      lowPoints: quantile(points, 0.25),
-      highPoints: quantile(points, 0.75),
+      sourceSpreadLow: quantile(points, 0.25),
+      sourceSpreadHigh: quantile(points, 0.75),
+      uncertaintyStatus: "SOURCE_DISAGREEMENT_ONLY",
       sourceCount: evidence.length,
       sourceIds: evidence.map((row) => row.sourceId).sort(),
       executable: evidence.length >= minimumFreshSources,
@@ -199,9 +349,19 @@ export function buildPlayerBoard({
     replacementByPosition[position] = eligible[Math.min(rank - 1, eligible.length - 1)]?.consensusPoints ?? null;
   }
 
+  const joint = replacementRoster
+    ? deriveJointReplacementLevels({ players: board, ...replacementRoster })
+    : null;
   const ranked = board
     .map((player) => {
-      const replacementPoints = replacementByPosition[player.position] ?? null;
+      const jointBaselines = joint
+        ? Object.entries(joint.replacementBySlot)
+            .filter(([slot, points]) => points != null && slotAccepts(slot, eligibilityFor(player)))
+            .map(([, points]) => points)
+        : [];
+      const replacementPoints = jointBaselines.length
+        ? Math.min(...jointBaselines)
+        : replacementByPosition[player.position] ?? null;
       const vorp =
         player.consensusPoints === null || replacementPoints === null
           ? null
@@ -220,9 +380,11 @@ export function buildPlayerBoard({
     scoring: OFFENSE_SCORING,
     replacementRanks: { ...replacementRanks },
     replacementByPosition,
+    replacementBySlot: joint?.replacementBySlot ?? null,
+    replacementAllocation: joint?.assignments ?? null,
     sourceReceipts,
     players: ranked,
   });
 }
 
-export { OFFENSE_SCORING };
+export { IDP_SCORING, OFFENSE_SCORING };

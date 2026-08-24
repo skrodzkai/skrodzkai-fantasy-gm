@@ -1,7 +1,7 @@
 (function installYahooMockExtension(root) {
   "use strict";
 
-  const VERSION = "0.8.0";
+  const VERSION = "0.9.0";
   const GLOBAL_KEY = "__skrodzkaiYahooMockExtensionV1";
   const PREFLIGHT_KEY = "skrodzkai-yahoo-mock-extension-preflight-v1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-extension-receipts-v1";
@@ -325,6 +325,7 @@
         Array.from(defenseRanks ?? []).find((defense) => normalize(player.name).includes(normalize(defense.name)));
       if (!match) continue;
       ranked.push({
+        ...match,
         yahooId: String(player.yahooId),
         name: player.name,
         team: player.team,
@@ -346,10 +347,18 @@
         "Team Defenses",
         "DEF",
       );
-      const defenses = mergeDefenseBoard(availableDefenses, boardData.defenses);
-      return mode === "TEST"
-        ? [...boardData.offense, ...boardData.kickers, ...defenses, ...(boardData.idp ?? [])]
-        : [...boardData.offense, ...boardData.kickers, ...defenses];
+      const defenseRanks = Array.isArray(boardData.defenses)
+        ? boardData.defenses
+        : Array.from(boardData.players ?? []).filter((player) => normalize(player.position) === "DEF");
+      const defenses = mergeDefenseBoard(availableDefenses, defenseRanks);
+      const source = Array.isArray(boardData.players)
+        ? boardData.players
+        : [...boardData.offense, ...boardData.kickers, ...(boardData.idp ?? [])];
+      const allowed = mode === "TEST"
+        ? source
+        : source.filter((player) => ["QB", "RB", "WR", "TE", "K", "DEF"].includes(normalize(player.position)));
+      return [...new Map([...allowed.filter((player) => normalize(player.position) !== "DEF"), ...defenses]
+        .map((player) => [String(player.yahooId), player])).values()];
     } finally {
       setFilter(documentRef, environment, "All Positions");
     }
@@ -504,7 +513,7 @@
         .composition { display:flex; gap:5px; flex-wrap:wrap; padding:0 9px 9px; }
         .pill { padding:3px 5px; border:1px solid #24484c; color:#8ca8ab; font:900 7px/1 ui-monospace,SFMono-Regular,Menlo,monospace; }
         .pill b { color:var(--cyan); }
-        .board-row { display:grid; grid-template-columns:28px minmax(0,1fr) 68px; gap:7px; padding:7px 4px; border-bottom:1px solid #17363a; }
+        .board-row { display:grid; width:100%; grid-template-columns:28px minmax(0,1fr) 68px; gap:7px; padding:7px 4px; border:0; border-bottom:1px solid #17363a; text-align:left; background:transparent; }
         .board-row.primary { padding-left:7px; border-left:3px solid var(--blue-accent); background:linear-gradient(90deg,rgba(10,132,255,.12),transparent 74%); }
         .board-row.pinned { border-left-color:var(--cyan); background:linear-gradient(90deg,rgba(69,230,223,.14),transparent 74%); }
         .rank { color:#678c90; font:900 9px/1 ui-monospace,SFMono-Regular,Menlo,monospace; }
@@ -568,7 +577,7 @@
             </div>
             <div class="stack">
               <section class="section"><div class="section-head"><span>Decision ladder</span><small data-disagreement>BASELINE READY</small></div><div class="board" data-board></div></section>
-              <section class="section"><div class="section-head"><span>Next-pick override</span><small data-stage-count>BASELINE</small></div><div class="pin-state" data-pin-state>No pin staged. The verified baseline will execute.</div><div class="search"><input data-search type="search" placeholder="Search player, team, position, or exact Yahoo ID" aria-label="Search verified Yahoo board" /></div><div class="manual-list" data-manual-list></div><div class="manual-note">Set before our clock. Yahoo must expose the player row at execution; deep or paginated pins may reject. Any invalid pin is receipted and the five-target baseline executes immediately.</div><div class="manual-actions"><button class="warn" data-clear-pin type="button" disabled>Clear Pin</button><button class="primary" data-confirm type="button" disabled>Pin Next Pick</button></div></section>
+              <section class="section"><div class="section-head"><span>Player override</span><small data-stage-count>BASELINE</small></div><div class="pin-state" data-pin-state>No override staged. The verified baseline will execute.</div><div class="search"><input data-search type="search" placeholder="Search full verified player pool" aria-label="Search verified Yahoo board" /></div><div class="manual-list" data-manual-list></div><div class="manual-note">Before our turn: stage a next-pick pin. On our turn: click a player or press 1, 2, or 3 during the bounded decision window. Invalid choices are receipted and the five-target baseline remains intact.</div><div class="manual-actions"><button class="warn" data-clear-pin type="button" disabled>Clear Pin</button><button class="primary" data-confirm type="button" disabled>Choose / Pin</button></div></section>
             </div>
             <div class="stack">
               <section class="section"><div class="section-head"><span>Opponent window</span><small>Snake + survival</small></div><div class="between" data-between><div class="pressure">No owned turn validated.</div></div></section>
@@ -623,6 +632,15 @@
       ui.pinText = data.pinState.textContent;
     };
     data.search.addEventListener("input", redrawManual);
+    documentRef.addEventListener("keydown", (event) => {
+      if (["INPUT", "TEXTAREA", "SELECT"].includes(String(event.target?.tagName ?? "").toUpperCase())) return;
+      const index = Number(event.key) - 1;
+      const player = ui.recommendations[index];
+      if (index >= 0 && index < 3 && player && typeof ui.onManualConfirm === "function") {
+        event.preventDefault();
+        ui.onManualConfirm([player]);
+      }
+    });
     data.confirm.addEventListener("click", () => {
       if (typeof ui.onManualConfirm !== "function") return;
       const result = ui.onManualConfirm(ui.staged.slice());
@@ -652,7 +670,11 @@
       },
       setRecommendations(recommendations = [], meta = {}) {
         if (Array.isArray(meta.fullBoard)) ui.board = meta.fullBoard; const rows = Array.isArray(recommendations) ? recommendations : []; ui.recommendations = rows;
-        data.board.innerHTML = rows.slice(0, 6).map((player, index) => `<div class="board-row ${index === 0 ? "primary" : ""} ${player.manual ? "pinned" : ""}"><span class="rank">${player.manual ? "PIN" : index === 0 ? "GO" : `F${index}`}</span><div><div class="player">${player.name ?? `Yahoo ${player.yahooId}`} <em>${player.position ?? "—"} · ${player.team ?? "—"}</em></div><div class="reason">${player.reason ?? "verified local ladder"}</div></div><div class="metrics">${player.edge ?? "—"}<br><span class="dim">${player.confidence ?? "—"} · ${player.freshness ?? "—"}</span></div></div>`).join("") || `<div class="event">Ladder resolves on our owned turn after Yahoo availability is validated.</div>`;
+        data.board.innerHTML = rows.slice(0, 6).map((player, index) => `<button type="button" data-live-choice="${player.yahooId}" class="board-row ${index === 0 ? "primary" : ""} ${player.manual ? "pinned" : ""}"><span class="rank">${player.manual ? "PIN" : index < 3 ? `${index + 1}` : `F${index}`}</span><div><div class="player">${player.name ?? `Yahoo ${player.yahooId}`} <em>${player.position ?? "—"} · ${player.team ?? "—"}</em></div><div class="reason">${player.reason ?? "verified local ladder"}</div></div><div class="metrics">${player.edge ?? "—"}<br><span class="dim">${player.confidence ?? "—"} · ${player.freshness ?? "—"}</span></div></button>`).join("") || `<div class="event">Ladder resolves on our owned turn after Yahoo availability is validated.</div>`;
+        for (const button of data.board.querySelectorAll("[data-live-choice]")) button.addEventListener("click", () => {
+          const player = rows.find((candidate) => String(candidate.yahooId) === String(button.dataset.liveChoice));
+          if (player && typeof ui.onManualConfirm === "function") ui.onManualConfirm([player]);
+        });
         const manual = rows[0]?.manual; ui.ladderState = meta.disagreement ? "MODEL DISAGREEMENT" : manual ? "MANUAL PIN APPLIED" : "BASELINE READY"; data.disagreement.textContent = ui.ladderState; data.disagreement.className = meta.disagreement ? "danger" : ""; data.dockTarget.textContent = rows[0] ? `${rows[0].name ?? `Y!${rows[0].yahooId}`} · ${rows[0].position ?? "—"}` : "Waiting for Yahoo availability"; redrawManual();
       },
       setBetweenTurns(info = {}) {
@@ -877,10 +899,14 @@
       return [{
         ...player,
         manual,
-        edge: Number.isFinite(adjusted) ? `+${adjusted.toFixed(1)}` : "POLICY",
+        edge: Number.isFinite(adjusted) ? adjusted.toFixed(1) : "POLICY",
         confidence: player.confidence ?? "LOCAL_RULE",
         freshness: "TURN",
-        reason: manual ? "operator pin validated; baseline fallbacks retained" : `${leader?.bucket ?? "verified ladder"}; exact Yahoo ID`,
+        reason: manual
+          ? "operator pin validated; baseline fallbacks retained"
+          : leader
+            ? `BPA ${Number(leader.marginalUtility ?? 0).toFixed(1)} · wait ${Number(leader.costOfWaiting ?? 0).toFixed(1)} · Pnext ${Math.round(Number(leader.pAvailableNext ?? 0) * 100)}%`
+            : "verified local ladder; exact Yahoo ID",
       }];
     });
   }
@@ -894,7 +920,7 @@
       managerNote: executionMode === "TEST" ? "TEST ROOM · 2 Minute Drillers manager histories do not apply to these opponents." : "PUBLIC MOCK · room behavior only; historical manager profiles are not applicable.",
     };
     const atRisk = Array.from(decision.positionLeaders ?? [])
-      .filter((leader) => ["likely_gone", "ambiguous"].includes(leader.bucket))
+      .filter((leader) => Number(leader.pAvailableNext) < 0.5)
       .slice(0, 4)
       .map((leader) => `${leader.player?.name ?? "unknown"} (${leader.player?.position ?? "—"})`);
     return {
@@ -1216,6 +1242,8 @@
       minimumFallbacks: 5,
       pollMs: 25,
       filterDeadlineMs: 5000,
+      selectionHoldMs: 1200,
+      replacementBySlot: boardData.replacementBySlot,
       board,
       readManualOverride: () => readJson(environment.sessionStorage, MANUAL_STAGE_KEY, null),
       consumeManualOverride: (outcome) => {
@@ -1232,8 +1260,17 @@
       try {
         const status = runner.getStatus();
         if (status.state !== "created" && status.state !== "running") throw new Error("manual pin requires an active runner");
+        const chosen = Array.from(targets ?? [])[0];
+        if (status.pendingDecision) {
+          if (!chosen?.yahooId) throw new Error("on-clock choice requires one exact Yahoo player");
+          const applied = runner.chooseOnClock(chosen.yahooId, "command_center");
+          writeReceipt(environment.localStorage, { kind: applied ? "on_clock_choice_applied" : "on_clock_choice_rejected", roomId: room.roomId, seat: draftSeat, expectedRound: status.picks.length + 1, chosenYahooId: String(chosen.yahooId), baselineRetained: !applied });
+          rail.addEvent(applied ? "on-clock choice applied" : "on-clock choice rejected", `${chosen.name ?? `Y!${chosen.yahooId}`} · baseline ${applied ? "fallbacks retained" : "unchanged"}`);
+          if (applied) rail.render("ok", "CHOICE LOCKED", `${chosen.name ?? `Y!${chosen.yahooId}`} · Yahoo click in progress`);
+          return applied;
+        }
         if (status.busy || status.currentController || controllerApi.runtime.readOwnedTurn(environment.document)) {
-          throw new Error("manual pin must be set before our clock starts");
+          throw new Error("owned-turn decision window is not ready; baseline remains active");
         }
         const expectedRound = status.picks.length + 1;
         const stage = stageManualTargets(environment.sessionStorage, targets, { ...receiptRoom, expectedRound });
@@ -1287,7 +1324,7 @@
       const clock = "--:--";
       const clockVerified = false;
       const autodraft = controllerApi.runtime.isAutodraftActive(environment.document);
-      const marker = JSON.stringify([status.state, status.picks.length, status.failure, turn?.label ?? null, clock, autodraft]);
+      const marker = JSON.stringify([status.state, status.picks.length, status.failure, status.pendingDecision?.targetYahooIds ?? null, turn?.label ?? null, clock, autodraft]);
       if (marker === last) return;
       last = marker;
       const kind = status.state === "completed" ? "complete" : status.state === "running" ? "ok" : "bad";
