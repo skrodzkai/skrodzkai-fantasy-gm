@@ -45,21 +45,21 @@ The controller persists receipts in Yahoo-origin local storage under `skrodzkai-
 
 ## Public-mock qualification runner
 
-`yahoo-mock-runner.js` layers a roster-aware 15-round public-mock policy over the exact-row controller. It requires a programmatically observed 12-team room, expected seat, empty 15-player roster, exact public-mock roster shape, and five visible Yahoo-ID fallbacks. Offensive board entries must include finite VORP and both endpoints of an observed market-ADP range; DEF and K retain current Yahoo preseason-rank ordering.
+`yahoo-mock-runner.js` layers a roster-aware policy over the exact-row controller. It requires a programmatically observed 12-team room, expected seat, empty roster, exact qualified roster shape, joint replacement baselines, and five visible exact-Yahoo-ID fallbacks. The player pool retains Yahoo multi-position eligibility and league-scored projections; observed market ranges or Yahoo preseason rank affect only availability estimates, never football value.
 
-The runner waits for the controller's exact owned-turn signal before reading the live rows and resolving the strategy. For Rounds 1–12 it compares the highest-VORP available player at each eligible position with the best same-position player expected to remain at the next snake turn. Zero-opponent wraps are treated as certain availability. Otherwise the observed ADP range classifies the leader as likely gone, likely available, or ambiguous. An ambiguous gap must clear the 15-point material-edge allowance, representing one point per week across the 15-week fantasy season.
+The runner waits for the controller's exact owned-turn signal before reading the live rows. Every round uses one unified BPA pool. It computes the maximum league-point gain over the jointly allocated replacement roster, estimates continuous next-turn survival from the observed ADP range or explicitly uncalibrated Yahoo-rank fallback, and evaluates the best one-turn alternatives. Position runs alter only the survival estimate. They cannot alter a projection, replacement level, or marginal utility.
 
-Through Round 4, the hypothetical post-pick roster must contain at least `round - 1` RB/WR players. The exception is evaluated only in Round 4, when a second QB/TE may break that final floor if its adjusted drop-off beats the best RB/WR by the same 15-point material edge; allowing the exception earlier can create an unrecoverable Round 4 deficit. This preserves an early elite-TE selection when the actual scarcity gap supports it without hardcoding an elite headcount. Round 13 uses terminal offensive VORP because the remaining turns are specialist-only. Rounds 14 and 15 switch Yahoo to Team Defenses and Kickers.
+There is no position-by-round script, RB/WR floor, specialist phase, QB/TE timing rule, or fixed material-edge constant. Exact roster feasibility and configured position maxima are the only gates. Missing-market players remain visible with labeled fallback evidence rather than disappearing from the board.
 
-Fallbacks are built iteratively: after choosing a position leader, the runner removes it hypothetically and recomputes the position leaders. The compact per-turn receipt records the snake window, one leader and comparator per position, survival bucket, drop-off scores, roster-floor result, chosen Yahoo ID, and final target IDs. It does not persist the full live board. The QB1/TE1 limits, balanced offense requirement, exact-row click contract, and non-navigating failure behavior remain unchanged.
+The compact per-turn receipt records the snake window, marginal utility, expected next-turn utility, cost of waiting, continuous availability probability, chosen Yahoo ID, and five target IDs. A recompute over 100 ms falls back to the static verified value order. The on-clock chooser exposes the same three leading targets plus searchable exact-ID selection, keeps all five baseline fallbacks, and starts the page-local click controller synchronously. The exact-row click contract and non-navigating failure behavior remain unchanged.
 
-The exact `test_league_19_idp` lane is bound to retained team 12 in Yahoo league 18599. It separates the URL team ID from the snake draft slot, requires the observed 12-team 19-slot roster, holds at least 4 RB and 4 WR plus QB1/TE1, blocks QB2 before Round 12 and TE2 before Round 13, and fills K/DEF/D/LB/CB/S in Rounds 14–19. K/DEF order still rotates by seat, but generic `D` is always the first IDP because Yahoo assigns the first eligible defender to that slot. League-specific Yahoo eligibility supplies at least five exact CB targets. The separate `real_league_19_idp` configuration remains unverified and non-executable; the real league ID 420010 is hard-disabled.
+The exact `test_league_19_idp` lane is bound to retained team 12 in Yahoo league 18599. It separates the URL team ID from the snake draft slot and requires the observed 12-team, 19-slot roster. K, DEF, D, LB, CB, and S compete in the same value pool as offense while roster feasibility guarantees the final legal shape. Dual-role offense/IDP players remain manual-only until Yahoo scoring credit is verified. The separate `real_league_19_idp` configuration remains unverified and non-executable; real league 420010 is hard-disabled.
 
 The runner exposes a one-way `halt()` kill switch. A halted runner cannot resume; a new, explicitly armed runner is required.
 
 ## Local Chrome extension
 
-The repository root is also a dependency-free Manifest V3 extension. Load the repository directory as an unpacked extension in Chrome. It requests no general extension permissions and runs only on Yahoo's public mock waiting room, the exact league-18599 settings, draft, team-roster pages, and NFL draftclient paths except real league 420010. After every unpacked-extension reload, hard-refresh every open Yahoo tab. Version `0.8.0` verifies the installed background version at boot, arm, and immediately before runner start; stale or mismatched contexts disable every command and require a hard refresh.
+The repository root is also a dependency-free Manifest V3 extension. Load the repository directory as an unpacked extension in Chrome. It requests no general extension permissions and runs only on Yahoo's public mock waiting room, the exact league-18599 settings, draft, team-roster pages, and NFL draftclient paths except real league 420010. After every unpacked-extension reload, hard-refresh every open Yahoo tab. Version `0.9.0` verifies the installed background version at boot, arm, and immediately before runner start; stale or mismatched contexts disable every command and require a hard refresh.
 
 The expandable `SKRODZKai` command center arms public mocks from `/f1/mock_waiting`. The test lane first parses `/f1/18599/settings` for the exact 12-team, 19-active-slot plus three-IR roster and 75-second clock. It can then arm from `/f1/18599/draft` only after Yahoo publishes the snake slot and the page still exposes `SKRODZKai` team 12 plus the exact league summary. Each tab-scoped token binds the observed room, URL team, snake slot, team count, and roster shape. The draftclient refuses to start without the matching token, and league 420010 is excluded at the manifest and runtime layers.
 
@@ -82,13 +82,12 @@ The extension permits public mocks and the exact retained test league only. The 
 The dependency-free scripts under `analysis/` keep model work outside the live
 click path:
 
-- `opponent-calibration.mjs` trains a recency-weighted, owner-to-room-shrunk
-  position-demand model and enables it only when an untouched season plus a
-  manager-clustered interval beat the room baseline. Its CLI requires Joe's
-  owner ID to be excluded from every stage.
-- `opponent-window.mjs` converts an observed owner-to-seat order into exact
-  snake-window position pressure without exposing raw owner identities in its
-  output.
+- `opponent-calibration.mjs` trains only a recency-weighted room-phase prior
+  and enables it only when an untouched season plus a manager-clustered
+  interval beat the global room baseline. Its CLI excludes Joe's history from
+  every stage. The failed manager-specific predictor is not emitted.
+- `opponent-window.mjs` converts the exact snake horizon into room-phase
+  position pressure. It accepts no owner mapping and emits no manager profile.
 - `draft-committee.mjs` creates compact, packet-hashed candidate ballots and
   accepts consensus only when both responses are valid, available, and inside
   the deadline. Otherwise the deterministic baseline order is unchanged.

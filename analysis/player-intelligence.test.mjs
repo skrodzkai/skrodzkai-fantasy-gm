@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 
 import {
   buildPlayerBoard,
+  deriveJointReplacementLevels,
   deriveReplacementRanks,
   scoreOffenseStatLine,
+  scoreIdpStatLine,
 } from "./player-intelligence.mjs";
 
 test("scores the league's QB premium and yardage bonuses exactly", () => {
@@ -19,6 +21,63 @@ test("scores the league's QB premium and yardage bonuses exactly", () => {
     }),
     48.5,
   );
+});
+
+test("counts every weekly 100-yard event instead of awarding one season bonus", () => {
+  assert.equal(
+    scoreOffenseStatLine({
+      rushingYards: 650,
+      rushingHundredYardGames: 3,
+      receivingYards: 1_200,
+      receivingHundredYardGames: 5,
+    }),
+    201,
+  );
+});
+
+test("scores every observed IDP category with the league's exact values", () => {
+  assert.equal(scoreIdpStatLine({
+    soloTackles: 10,
+    assistedTackles: 4,
+    sacks: 2,
+    interceptions: 1,
+    forcedFumbles: 1,
+    fumbleRecoveries: 1,
+    touchdowns: 1,
+    safeties: 1,
+    passesDefended: 2,
+    blockedKicks: 1,
+    tacklesForLoss: 3,
+    turnoverReturnYards: 20,
+    extraPointReturns: 1,
+  }), 36);
+});
+
+test("joint replacement reassigns multi-position players across flex and IDP slots", () => {
+  const result = deriveJointReplacementLevels({
+    teamCount: 2,
+    rosterSlots: ["WR", "W/R/T", "D", "DB", "LB"],
+    players: [
+      { playerId: "w1", position: "WR", eligible: ["WR"], consensusPoints: 100 },
+      { playerId: "w2", position: "WR", eligible: ["WR"], consensusPoints: 90 },
+      { playerId: "w3", position: "WR", eligible: ["WR"], consensusPoints: 80 },
+      { playerId: "w4", position: "WR", eligible: ["WR"], consensusPoints: 70 },
+      { playerId: "r1", position: "RB", eligible: ["RB"], consensusPoints: 75 },
+      { playerId: "r2", position: "RB", eligible: ["RB"], consensusPoints: 65 },
+      { playerId: "d1", position: "DL", eligible: ["DL", "D"], consensusPoints: 60 },
+      { playerId: "d2", position: "DL", eligible: ["DL", "D"], consensusPoints: 50 },
+      { playerId: "b1", position: "DB", eligible: ["DB", "D"], consensusPoints: 55 },
+      { playerId: "b2", position: "DB", eligible: ["DB", "D"], consensusPoints: 45 },
+      { playerId: "b3", position: "DB", eligible: ["DB", "D"], consensusPoints: 35 },
+      { playerId: "b4", position: "DB", eligible: ["DB", "D"], consensusPoints: 25 },
+      { playerId: "l1", position: "LB", eligible: ["LB", "D"], consensusPoints: 58 },
+      { playerId: "l2", position: "LB", eligible: ["LB", "D"], consensusPoints: 48 },
+      { playerId: "l3", position: "LB", eligible: ["LB", "D"], consensusPoints: 38 },
+      { playerId: "l4", position: "LB", eligible: ["LB", "D"], consensusPoints: 28 },
+    ],
+  });
+  assert.equal(result.assignments.length, 10);
+  assert.deepEqual(result.replacementBySlot, { WR: 90, "W/R/T": 75, D: 50, DB: 45, LB: 48, CB: 45, S: 45 });
 });
 
 test("derives replacement ranks while exposing every roster-share assumption", () => {

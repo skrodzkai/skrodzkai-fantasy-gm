@@ -63,7 +63,7 @@ function validPayload() {
     empty:!entry.player,
   }));
   return {
-    extensionVersion: "0.8.0",
+    extensionVersion: "0.9.0",
     roomId,
     seat: draftSlot,
     urlSeat,
@@ -71,7 +71,7 @@ function validPayload() {
     status: { runId: runnerRunId, roomId, seat: draftSlot, urlSeat, state: "completed", picks: picks.map((pick) => ({ ...pick })) },
     runnerReceipts,
     controllerReceipts,
-    extensionReceipts: [{ at:iso(20_500), version:"0.8.0", roomId, seat:draftSlot, urlSeat, runId:runnerRunId, kind:"final_roster_readback", valid:true, finalRosterSlots }],
+    extensionReceipts: [{ at:iso(20_500), version:"0.9.0", roomId, seat:draftSlot, urlSeat, runId:runnerRunId, kind:"final_roster_readback", valid:true, finalRosterSlots }],
   };
 }
 

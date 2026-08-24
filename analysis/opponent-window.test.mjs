@@ -17,32 +17,29 @@ test("maps snake picks in both directions", () => {
 });
 
 test("finds exact opponent windows for endpoint and middle seats", () => {
-  const seats = Object.fromEntries(Array.from({ length: 12 }, (_, index) => [String(index + 1), `m${index + 1}`]));
-  assert.equal(turnsBeforeNextPick({ round: 1, ourSeat: 1, seatManagers: seats }).length, 22);
-  assert.equal(turnsBeforeNextPick({ round: 1, ourSeat: 6, seatManagers: seats }).length, 12);
-  assert.equal(turnsBeforeNextPick({ round: 1, ourSeat: 12, seatManagers: seats }).length, 0);
-  assert.equal(turnsBeforeNextPick({ round: 2, ourSeat: 12, seatManagers: seats }).length, 22);
-  assert.deepEqual(turnsBeforeNextPick({ round: 19, ourSeat: 6, seatManagers: seats, rounds: 19 }), []);
+  assert.equal(turnsBeforeNextPick({ round: 1, ourSeat: 1 }).length, 22);
+  assert.equal(turnsBeforeNextPick({ round: 1, ourSeat: 6 }).length, 12);
+  assert.equal(turnsBeforeNextPick({ round: 1, ourSeat: 12 }).length, 0);
+  assert.equal(turnsBeforeNextPick({ round: 2, ourSeat: 12 }).length, 22);
+  assert.deepEqual(turnsBeforeNextPick({ round: 19, ourSeat: 6, rounds: 19 }), []);
 });
 
-test("combines owner probabilities without exposing manager identities", () => {
+test("uses only the held-out-cleared room phase and no manager predictor", () => {
   const probabilities = { QB: 0.1, RB: 0.5, WR: 0.4, TE: 0, K: 0, DEF: 0, LB: 0, DB: 0, DL: 0 };
   const calibration = {
     room: { opening: probabilities },
-    profiles: { "owner-a": { opening: probabilities } },
   };
   const result = estimatePositionPressure({
     turns: [
-      { overall: 2, round: 1, seat: 2, managerId: "raw-a" },
-      { overall: 3, round: 1, seat: 3, managerId: "raw-b" },
+      { overall: 2, round: 1, seat: 2 },
+      { overall: 3, round: 1, seat: 3 },
     ],
     calibration,
-    managerMap: { "raw-a": "owner-a" },
   });
-  assert.equal(result.coverage.profileTurns, 1);
-  assert.equal(result.coverage.roomFallbackTurns, 1);
+  assert.equal(result.coverage.managerProfiles, 0);
+  assert.equal(result.coverage.roomPhaseTurns, 2);
   assert.equal(result.positions.RB.expectedPicks, 1);
   assert.equal(result.positions.RB.probabilityAtLeastOne, 0.75);
   assert.equal(result.turns[0].managerId, undefined);
-  assert.equal(result.turns[0].profileId, "owner-a");
+  assert.equal(result.turns[0].profileId, undefined);
 });

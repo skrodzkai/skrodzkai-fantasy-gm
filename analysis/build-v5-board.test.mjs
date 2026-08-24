@@ -38,13 +38,14 @@ function fixture(overrides = {}) {
     specialistSnapshot: { observedAt: "2026-08-22T10:01:00Z", positions: {}, eligibilityEvidence: {} },
     sleeperPlayers: { s1: { yahoo_id: 1, status: "Active", injury_status: null } },
     eligibilitySnapshot: null,
+    replacementRoster: null,
     ...overrides,
   });
 }
 
 test("combines Yahoo and the league-scored baseline with visible weights", () => {
   const board = fixture();
-  assert.equal(board.players[0].consensusPoints, 413);
+  assert.equal(board.players[0].consensusPoints, 410);
   assert.deepEqual(board.players[0].sourceIds, [
     "league-scored-history-market-baseline",
     "yahoo-season-projection",
@@ -131,10 +132,13 @@ test("an exact name-team baseline match preserves Travis Hunter as the verified 
     },
     sleeperPlayers: {},
   });
-  assert.equal(board.players[0].position, "DB");
+  assert.equal(board.players[0].position, "WR");
   assert.equal(board.players[0].yahooPosition, "WR");
   assert.equal(board.players[0].sourceCount, 2);
   assert.deepEqual(board.players[0].eligible, ["WR", "W/R/T", "CB", "DB", "D"]);
+  assert.equal(board.players[0].automaticEligible, false);
+  assert.equal(board.players[0].manualEligible, true);
+  assert.equal(board.players[0].validationStatus, "DUAL_ROLE_SCORING_UNVERIFIED");
   assert.equal(board.boards.specialists.DB[0].yahooId, "41787");
 });
 
@@ -147,7 +151,7 @@ test("league-specific eligibility adds unprojected CB fallbacks without inventin
     },
   });
   const corner = board.players.find((player) => player.yahooId === "2");
-  assert.equal(corner.position, "DB");
+  assert.equal(corner.position, "CB");
   assert.deepEqual(corner.eligible, ["CB"]);
   assert.equal(corner.consensusPoints, null);
   assert.equal(corner.executable, false);
@@ -200,7 +204,7 @@ test("an offense row keeps its own projection and injury timestamp when it also 
     },
   });
   const player = board.players[0];
-  assert.equal(player.consensusPoints, 413);
+  assert.equal(player.consensusPoints, 410);
   assert.equal(player.injury.evidence.find((entry) => entry.sourceId === "yahoo-player-list").observedAt, "2026-08-22T10:00:00Z");
   assert.equal(player.injury.draftAction, "CLEAR");
   assert.equal(player.injury.evidence.find((entry) => entry.sourceId === "yahoo-player-list").status, "CLEAR");

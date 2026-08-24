@@ -1,7 +1,7 @@
 (function installYahooMockRunner(root) {
   "use strict";
 
-  const VERSION = "1.3.0";
+  const VERSION = "2.0.0";
   const GLOBAL_KEY = "__skrodzkaiYahooMockRunnerV1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-runner-receipts-v1";
   const OFFENSE = ["QB", "RB", "WR", "TE"];
@@ -14,7 +14,11 @@
     CB: "Defensive Backs",
     S: "Defensive Backs",
   });
-  const MATERIAL_EDGE_POINTS = 15;
+  const DECISION_RECOMPUTE_BUDGET_MS = 100;
+  const PANEL_BUDGET_MS = 250;
+  const TURN_TO_CLICK_BUDGET_MS = 2000;
+  const NEXT_TURN_COMPARISON_POOL = 6;
+  const NORMALIZED_VALUE_CACHE = new Map();
 
   const CONFIGS = Object.freeze({
     public_mock_15: Object.freeze({
@@ -42,10 +46,8 @@
         "D", "LB", "CB", "S", "BN", "BN", "BN", "BN", "BN", "BN",
       ]),
       offenseStarters: Object.freeze({ QB: 1, RB: 2, WR: 2, TE: 0, FLEX: 2 }),
-      offenseMinimums: Object.freeze({ QB: 1, RB: 4, WR: 4, TE: 1 }),
-      positionLimits: Object.freeze({ QB: 2, RB: 6, WR: 6, TE: 2, K: 1, DEF: 1, D: 1, LB: 1, CB: 1, S: 1 }),
+      positionLimits: Object.freeze({ QB: 2, RB: 6, WR: 6, TE: 2, K: 1, DEF: 1, D: 4, LB: 4, CB: 4, S: 4 }),
       specialistPositions: Object.freeze(TEST_SPECIALISTS),
-      specialistStartRound: 14,
       qualification: "verified-test-room",
     }),
     real_league_19_idp: Object.freeze({
@@ -57,17 +59,35 @@
         "QB", "WR", "WR", "WR", "RB", "RB", "TE", "W/R/T", "K", "DEF",
         "D", "DB", "LB", "BN", "BN", "BN", "BN", "BN", "BN",
       ]),
+      offenseStarters: Object.freeze({ QB: 1, RB: 2, WR: 3, TE: 1, FLEX: 1 }),
+      positionLimits: Object.freeze({ QB: 2, RB: 6, WR: 7, TE: 3, K: 1, DEF: 1, D: 3, LB: 3, CB: 3, S: 3 }),
       qualification: "unverified-real-room",
     }),
   });
 
   function normalize(value) {
-    return String(value ?? "")
+    const raw = String(value ?? "");
+    const cached = NORMALIZED_VALUE_CACHE.get(raw);
+    if (cached !== undefined) return cached;
+    const normalized = raw
       .normalize("NFKD")
       .replace(/[\u0300-\u036f]/g, "")
       .replace(/[^a-zA-Z0-9/]+/g, " ")
       .trim()
       .toUpperCase();
+    NORMALIZED_VALUE_CACHE.set(raw, normalized);
+    return normalized;
+  }
+
+  function normalizedRosterSlotAccepts(eligible, normalizedSlot) {
+    if (eligible.includes(normalizedSlot)) return true;
+    if (normalizedSlot === "W/R") return eligible.some((position) => ["WR", "RB"].includes(position));
+    if (normalizedSlot === "W/R/T") return eligible.some((position) => ["WR", "RB", "TE"].includes(position));
+    if (normalizedSlot === "D") return eligible.some((position) => ["D", "DL", "DE", "DT", "LB", "DB", "CB", "S"].includes(position));
+    if (normalizedSlot === "DB") return eligible.some((position) => ["DB", "CB", "S"].includes(position));
+    if (normalizedSlot === "CB") return eligible.some((position) => ["DB", "CB"].includes(position));
+    if (normalizedSlot === "S") return eligible.some((position) => ["DB", "S"].includes(position));
+    return normalizedSlot === "BN";
   }
 
   function normalizeSlots(slots) {
@@ -99,27 +119,17 @@
     );
   }
 
-  function specialistOrderForSeat(seat) {
-    const opening = seat >= 5 && seat <= 8 ? ["DEF", "K"] : ["K", "DEF"];
-    const idp = seat % 3 === 1 ? ["D", "LB", "S", "CB"] : seat % 3 === 2 ? ["D", "S", "LB", "CB"] : ["D", "CB", "S", "LB"];
-    return [...opening, ...idp];
-  }
-
   function rosterSlotAccepts(position, slot) {
-    const normalizedPosition = normalize(position);
+    const eligible = Array.isArray(position) ? position.map(normalize) : [normalize(position)];
     const normalizedSlot = normalize(slot);
-    if (normalizedSlot === normalizedPosition) return true;
-    if (normalizedSlot === "W/R") return ["WR", "RB"].includes(normalizedPosition);
-    if (normalizedSlot === "W/R/T") return ["WR", "RB", "TE"].includes(normalizedPosition);
-    if (normalizedSlot === "D") return ["D", "LB", "CB", "S"].includes(normalizedPosition);
-    return normalizedSlot === "BN";
+    return normalizedRosterSlotAccepts(eligible, normalizedSlot);
   }
 
   function allocateRosterSlots(picks, rosterSlots) {
     const roster = Array.from(rosterSlots ?? [], (slot) => ({ slot: normalize(slot), player: null }));
     for (const pick of Array.from(picks ?? [])) {
-      const position = normalize(pick.position);
-      let index = roster.findIndex((entry) => !entry.player && entry.slot !== "BN" && rosterSlotAccepts(position, entry.slot));
+      const eligible = Array.from(pick.eligible ?? [pick.position], normalize);
+      let index = roster.findIndex((entry) => !entry.player && entry.slot !== "BN" && normalizedRosterSlotAccepts(eligible, entry.slot));
       if (index < 0) index = roster.findIndex((entry) => !entry.player && entry.slot === "BN");
       if (index >= 0) roster[index].player = pick;
     }
@@ -143,7 +153,7 @@
     for (const slot of ["D", "LB", "CB", "S"]) {
       const entry = observed.find((candidate) => candidate.slot === slot);
       const pick = pickById.get(entry?.yahooId ?? "");
-      if (!entry || entry.empty || normalize(pick?.position) !== slot) return false;
+      if (!entry || entry.empty || !normalizedRosterSlotAccepts(playerEligibility(pick), slot)) return false;
     }
     const specialistIds = new Set(expectedPicks
       .filter((pick) => ["D", "LB", "CB", "S"].includes(normalize(pick.position)))
@@ -152,56 +162,16 @@
   }
 
   function allowedPositions(round, picks, config = CONFIGS.public_mock_15, seat = 1) {
-    if (config.name === "test_league_19_idp") {
-      if (round < 1 || round > config.rounds) return [];
-      if (round >= config.specialistStartRound) {
-        const counts = positionCounts(picks);
-        const next = specialistOrderForSeat(seat).find((position) => (counts[position] ?? 0) < config.positionLimits[position]);
-        return next ? [next] : [];
-      }
-      const counts = positionCounts(picks);
-      const allowed = new Set(OFFENSE);
-      for (const position of OFFENSE) if ((counts[position] ?? 0) >= config.positionLimits[position]) allowed.delete(position);
-      if ((counts.QB ?? 0) >= 1 && round < 12) allowed.delete("QB");
-      if ((counts.TE ?? 0) >= 1 && round < 13) allowed.delete("TE");
-      const offensePicksRemaining = config.specialistStartRound - round;
-      const shortages = OFFENSE.filter((position) => (counts[position] ?? 0) < config.offenseMinimums[position]);
-      const shortagePicks = shortages.reduce((sum, position) => sum + config.offenseMinimums[position] - (counts[position] ?? 0), 0);
-      if (shortagePicks >= offensePicksRemaining) {
-        for (const position of OFFENSE) if (!shortages.includes(position)) allowed.delete(position);
-      }
-      if (!offenseComplete(counts, config)) {
-        if ((counts.RB ?? 0) >= config.offenseStarters.RB + 2) allowed.delete("RB");
-        if ((counts.WR ?? 0) >= config.offenseStarters.WR + 2) allowed.delete("WR");
-      }
-      return [...allowed];
-    }
-    if (config.name !== "public_mock_15") return [];
-    if (round === 14) return ["DEF"];
-    if (round === 15) return ["K"];
-    if (round < 1 || round > 13) return [];
-
+    void seat;
+    if (round < 1 || round > config.rounds) return [];
     const counts = positionCounts(picks);
-    const allowed = new Set(OFFENSE);
-    if ((counts.QB ?? 0) >= config.positionLimits.QB) allowed.delete("QB");
-    if ((counts.TE ?? 0) >= config.positionLimits.TE) allowed.delete("TE");
-    if ((counts.RB ?? 0) >= config.positionLimits.RB) allowed.delete("RB");
-    if ((counts.WR ?? 0) >= config.positionLimits.WR) allowed.delete("WR");
-
-    if (!offenseComplete(counts, config)) {
-      if ((counts.RB ?? 0) >= config.offenseStarters.RB + 1) allowed.delete("RB");
-      if ((counts.WR ?? 0) >= config.offenseStarters.WR + 1) allowed.delete("WR");
-    }
-    return [...allowed];
+    return Object.entries(config.positionLimits)
+      .filter(([position, limit]) => (counts[position] ?? 0) < limit)
+      .map(([position]) => position);
   }
 
   function filterLabelForRound(round, picks = [], config = CONFIGS.public_mock_15, seat = 1) {
-    if (config.name === "test_league_19_idp") {
-      const position = allowedPositions(round, picks, config, seat)[0];
-      return FILTER_LABELS[position] ?? "All Positions";
-    }
-    if (round === 14) return "Team Defenses";
-    if (round === 15) return "Kickers";
+    void round; void picks; void config; void seat;
     return "All Positions";
   }
 
@@ -223,26 +193,48 @@
         name: String(player.name ?? ""),
         position,
         team: normalize(player.team),
-        rank: Number(player.rank ?? index + 1),
+        rank: Number(player.valueRank ?? player.rank ?? index + 1),
+        yahooRank: player.yahooRank == null || player.yahooRank === "" ? null : Number(player.yahooRank),
+        projection: player.projection == null || player.projection === "" ? null : Number(player.projection),
+        replacementPoints: player.replacementPoints == null || player.replacementPoints === "" ? null : Number(player.replacementPoints),
+        eligible: [...new Set(Array.from(player.eligible ?? [position], normalize).filter(Boolean))],
+        automaticEligible: player.automaticEligible !== false,
+        manualEligible: player.manualEligible !== false,
+        validationStatus: String(player.validationStatus ?? "EXECUTABLE"),
       };
       if (!copy.yahooId) throw new Error(`board player ${index} requires a verified Yahoo ID`);
       if (!OFFENSE.includes(position) && !["K", "DEF", "D", "LB", "CB", "S"].includes(position)) {
         throw new Error(`board player ${index} has unsupported draft position`);
       }
       if (!Number.isFinite(copy.rank)) throw new Error(`board player ${index} has invalid rank`);
-      if (OFFENSE.includes(position)) {
-        const vor = Number(player.vor);
-        const firstEndpoint = Number(player.adpLow ?? player.adp_low);
-        const secondEndpoint = Number(player.adpHigh ?? player.adp_high);
-        if (!Number.isFinite(vor)) throw new Error(`board player ${index} has invalid VORP`);
-        if (!Number.isFinite(firstEndpoint) || !Number.isFinite(secondEndpoint)) {
-          throw new Error(`board player ${index} requires a finite observed ADP range`);
-        }
-        copy.vor = vor;
+      if (!Number.isFinite(copy.projection) && (copy.automaticEligible || copy.manualEligible)) {
+        throw new Error(`board player ${index} has invalid league projection`);
+      }
+      if (!copy.eligible.length) throw new Error(`board player ${index} requires Yahoo eligibility`);
+      const vor = Number(player.vor);
+      copy.vor = Number.isFinite(vor)
+        ? vor
+        : Number.isFinite(copy.replacementPoints)
+          ? copy.projection - copy.replacementPoints
+          : 0;
+      const firstEndpoint = player.adpLow ?? player.adp_low;
+      const secondEndpoint = player.adpHigh ?? player.adp_high;
+      if (firstEndpoint !== null && firstEndpoint !== "" && secondEndpoint !== null && secondEndpoint !== "" &&
+          Number.isFinite(Number(firstEndpoint)) && Number.isFinite(Number(secondEndpoint))) {
         copy.adpEarliest = Math.min(firstEndpoint, secondEndpoint);
         copy.adpLatest = Math.max(firstEndpoint, secondEndpoint);
-      } else if (Number.isFinite(Number(player.projection))) {
-        copy.projection = Number(player.projection);
+        copy.marketMean = (copy.adpEarliest + copy.adpLatest) / 2;
+        copy.marketStatus = "OBSERVED_RANGE_UNCALIBRATED";
+      } else if (Number.isFinite(copy.yahooRank)) {
+        copy.adpEarliest = null;
+        copy.adpLatest = null;
+        copy.marketMean = copy.yahooRank;
+        copy.marketStatus = "YAHOO_PRESEASON_RANK_UNCALIBRATED";
+      } else {
+        copy.adpEarliest = null;
+        copy.adpLatest = null;
+        copy.marketMean = copy.rank;
+        copy.marketStatus = "BOARD_RANK_FALLBACK_UNCALIBRATED";
       }
       const key = boardKey(copy);
       if (seen.has(key)) throw new Error(`duplicate board player ${key}`);
@@ -280,16 +272,141 @@
     return { currentPick, nextPick, interveningOpponentPicks: nextPick - currentPick - 1 };
   }
 
-  function survivalBucket(player, nextPick, interveningOpponentPicks) {
-    if (interveningOpponentPicks === 0) return "certain_through_wrap";
-    if (!Number.isFinite(nextPick)) return "terminal";
-    if (player.adpLatest < nextPick) return "likely_gone";
-    if (player.adpEarliest > nextPick) return "likely_there";
-    return "ambiguous";
+  function playerEligibility(player) {
+    const source = player?.eligible ?? [player?.position];
+    if (Array.isArray(source) && source.length && source.every((position, index) =>
+      Boolean(position) && typeof position === "string" && NORMALIZED_VALUE_CACHE.get(position) === position && source.indexOf(position) === index
+    )) return source;
+    return [...new Set(Array.from(source, normalize).filter(Boolean))];
   }
 
-  function byVorThenRank(left, right) {
-    return right.vor - left.vor || left.rank - right.rank;
+  function starterSlots(config) {
+    return Array.from(config?.rosterSlots ?? [], normalize).filter((slot) => !["BN", "IR"].includes(slot));
+  }
+
+  function baselineForSlot(slot, replacementBySlot = {}) {
+    const direct = Number(replacementBySlot?.[slot]);
+    if (Number.isFinite(direct)) return direct;
+    const accepted = Object.entries(replacementBySlot ?? {})
+      .filter(([position, value]) => Number.isFinite(Number(value)) && rosterSlotAccepts([position], slot))
+      .map(([, value]) => Number(value));
+    return accepted.length ? Math.max(...accepted) : 0;
+  }
+
+  function maximumAssignment(picks, slots, edgeValue) {
+    const players = Array.from(picks ?? []).filter((player) => playerEligibility(player).length);
+    const source = 0;
+    const playerStart = 1;
+    const slotStart = playerStart + players.length;
+    const sink = slotStart + slots.length;
+    const graph = Array.from({ length: sink + 1 }, () => []);
+    const addEdge = (from, to, capacity, cost) => {
+      const forward = { to, capacity, cost, reverse: graph[to].length };
+      const reverse = { to: from, capacity: 0, cost: -cost, reverse: graph[from].length };
+      graph[from].push(forward);
+      graph[to].push(reverse);
+    };
+    for (let playerIndex = 0; playerIndex < players.length; playerIndex += 1) {
+      addEdge(source, playerStart + playerIndex, 1, 0);
+      const eligible = playerEligibility(players[playerIndex]);
+      for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) {
+        if (!normalizedRosterSlotAccepts(eligible, slots[slotIndex])) continue;
+        const value = Number(edgeValue(players[playerIndex], slots[slotIndex]));
+        if (Number.isFinite(value) && value > 0) addEdge(playerStart + playerIndex, slotStart + slotIndex, 1, -value);
+      }
+    }
+    for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) addEdge(slotStart + slotIndex, sink, 1, 0);
+
+    let totalCost = 0;
+    let count = 0;
+    while (true) {
+      const distance = new Float64Array(graph.length);
+      distance.fill(Number.POSITIVE_INFINITY);
+      distance[source] = 0;
+      const previousNode = new Int32Array(graph.length).fill(-1);
+      const previousEdge = new Int32Array(graph.length).fill(-1);
+      const queued = new Uint8Array(graph.length);
+      const queue = [source];
+      queued[source] = 1;
+      for (let cursor = 0; cursor < queue.length; cursor += 1) {
+        const node = queue[cursor];
+        queued[node] = 0;
+        for (let edgeIndex = 0; edgeIndex < graph[node].length; edgeIndex += 1) {
+          const edge = graph[node][edgeIndex];
+          if (edge.capacity <= 0 || distance[node] + edge.cost >= distance[edge.to] - 1e-9) continue;
+          distance[edge.to] = distance[node] + edge.cost;
+          previousNode[edge.to] = node;
+          previousEdge[edge.to] = edgeIndex;
+          if (!queued[edge.to]) {
+            queued[edge.to] = 1;
+            queue.push(edge.to);
+          }
+        }
+      }
+      if (!Number.isFinite(distance[sink]) || distance[sink] >= -1e-9) break;
+      for (let node = sink; node !== source; node = previousNode[node]) {
+        const edge = graph[previousNode[node]][previousEdge[node]];
+        edge.capacity -= 1;
+        graph[node][edge.reverse].capacity += 1;
+      }
+      totalCost += distance[sink];
+      count += 1;
+    }
+    return { count, value: -totalCost };
+  }
+
+  function optimalRosterUtility(picks, config, replacementBySlot = {}) {
+    const slots = starterSlots(config);
+    return maximumAssignment(picks, slots, (player, slot) => {
+      const projection = Number(player.projection);
+      return Number.isFinite(projection) ? Math.max(0, projection - baselineForSlot(slot, replacementBySlot)) : 0;
+    }).value;
+  }
+
+  function maximumFilledStarterSlots(picks, config) {
+    const slots = starterSlots(config);
+    return maximumAssignment(picks, slots, () => 1).count;
+  }
+
+  function withinPositionLimit(player, picks, config) {
+    const counts = positionCounts(picks);
+    const position = normalize(player.position);
+    const limit = config.positionLimits[position];
+    if (limit == null || (counts[position] ?? 0) >= limit) return false;
+    const category = position === "K" ? "K" : position === "DEF" ? "DEF" : ["D", "LB", "CB", "S"].includes(position) ? "IDP" : null;
+    if (!category) return true;
+    const categorySlots = starterSlots(config).filter((slot) => category === "IDP"
+      ? ["D", "DB", "LB", "CB", "S"].includes(slot)
+      : slot === category
+    );
+    const categoryPicks = Array.from(picks ?? []).filter((pick) => {
+      const drafted = normalize(pick.position);
+      return category === "IDP" ? ["D", "LB", "CB", "S"].includes(drafted) : drafted === category;
+    });
+    const before = maximumAssignment(categoryPicks, categorySlots, () => 1).count;
+    const after = maximumAssignment([...categoryPicks, player], categorySlots, () => 1).count;
+    return after === before + 1;
+  }
+
+  function canCompleteRoster({ player, picks, config }) {
+    if (!withinPositionLimit(player, picks, config)) return false;
+    const after = [...Array.from(picks ?? []), player];
+    if (after.length > config.rounds) return false;
+    const starters = starterSlots(config).length;
+    const filled = maximumFilledStarterSlots(after, config);
+    const picksRemaining = config.rounds - after.length;
+    return starters - filled <= picksRemaining;
+  }
+
+  function survivalProbability(player, nextPick, runPressure = 0) {
+    if (!Number.isFinite(nextPick)) return 0;
+    const observedRange = Number.isFinite(player.adpEarliest) && Number.isFinite(player.adpLatest);
+    const mean = observedRange ? (player.adpEarliest + player.adpLatest) / 2 : player.marketMean ?? player.rank;
+    const spread = observedRange
+      ? Math.max(3, (player.adpLatest - player.adpEarliest) / 3.29)
+      : Math.max(6, mean * 0.12);
+    const adjustedMean = mean - Math.max(-2, Math.min(2, Number(runPressure) || 0)) * spread * 0.5;
+    return Math.max(0.01, Math.min(0.99, 1 / (1 + Math.exp((nextPick - adjustedMean) / spread))));
   }
 
   function compactPlayer(player) {
@@ -299,119 +416,165 @@
       position: player.position,
       rank: player.rank,
       vor: player.vor,
+      projection: player.projection,
+      eligible: player.eligible,
       adpEarliest: player.adpEarliest,
       adpLatest: player.adpLatest,
+      yahooRank: player.yahooRank,
+      marketMean: player.marketMean,
+      marketStatus: player.marketStatus,
     };
   }
 
-  function scorePositionLeaders({ round, seat, picks, pool, materialEdgePoints, config }) {
-    const allowed = allowedPositions(round, picks, config, seat);
+  function scoreCandidates({ round, seat, picks, pool, config, replacementBySlot, runPressureByPosition = {} }) {
+    const startedAt = Date.now();
     const window = turnWindow(round, seat, config.teams, config.rounds);
-    const counts = positionCounts(picks);
-    const rbwrBefore = (counts.RB ?? 0) + (counts.WR ?? 0);
-    const floorRequired = round <= 4 ? round - 1 : 0;
-    const leaders = [];
-
-    for (const position of allowed) {
-      const candidates = pool.filter((player) => player.position === position);
-      if (!candidates.length) continue;
-      if (["DEF", "K", "D", "LB", "CB", "S"].includes(position)) {
-        leaders.push({
-          player: candidates.sort((left, right) => left.rank - right.rank)[0],
-          comparator: null,
-          bucket: "specialist",
-          rawScore: 0,
-          adjustedScore: 0,
-        });
-        continue;
-      }
-
-      candidates.sort(byVorThenRank);
-      const player = candidates[0];
-      if (round === 13) {
-        leaders.push({
-          player,
-          comparator: null,
-          bucket: "terminal_offense",
-          rawScore: player.vor,
-          adjustedScore: player.vor,
-        });
-        continue;
-      }
-
-      const bucket = survivalBucket(player, window.nextPick, window.interveningOpponentPicks);
-      let comparator = player;
-      if (!["certain_through_wrap", "likely_there"].includes(bucket)) {
-        comparator = candidates.slice(1).find((candidate) =>
-          survivalBucket(candidate, window.nextPick, window.interveningOpponentPicks) !== "likely_gone"
-        );
-        if (!comparator) {
-          leaders.push({
-            player,
-            comparator: null,
-            bucket: "position_unavailable_next_turn",
-            rawScore: Math.max(0, player.vor),
-            adjustedScore: Math.max(0, player.vor),
-          });
-          continue;
+    const slots = starterSlots(config);
+    const valueForSlot = (player, slot) => {
+      const projection = Number(player.projection);
+      return Number.isFinite(projection) ? Math.max(0, projection - baselineForSlot(slot, replacementBySlot)) : 0;
+    };
+    const baseUtility = maximumAssignment(picks, slots, valueForSlot).value;
+    const utilityWithoutSlot = slots.map((_, excludedIndex) =>
+      maximumAssignment(picks, slots.filter((__, index) => index !== excludedIndex), valueForSlot).value
+    );
+    const baseFilled = maximumFilledStarterSlots(picks, config);
+    const filledWithoutSlot = slots.map((_, excludedIndex) =>
+      maximumAssignment(picks, slots.filter((__, index) => index !== excludedIndex), () => 1).count
+    );
+    const remainingAfterCandidate = config.rounds - Array.from(picks ?? []).length - 1;
+    const assignmentWithOne = (player, excludedValues, baseline) => {
+      const eligible = playerEligibility(player);
+      let result = baseline;
+      for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) {
+        if (normalizedRosterSlotAccepts(eligible, slots[slotIndex])) {
+          result = Math.max(result, excludedValues[slotIndex] + 1);
         }
       }
-      const rawScore = Math.max(0, player.vor - comparator.vor);
-      const adjustedScore = bucket === "likely_gone"
-        ? rawScore
-        : bucket === "ambiguous"
-          ? Math.max(0, rawScore - materialEdgePoints)
-          : 0;
-      leaders.push({ player, comparator, bucket, rawScore, adjustedScore });
+      return result;
+    };
+    const entries = pool
+      .filter((player) => player.automaticEligible !== false)
+      .filter((player) => withinPositionLimit(player, picks, config))
+      .filter((player) => slots.length - assignmentWithOne(player, filledWithoutSlot, baseFilled) <= remainingAfterCandidate)
+      .map((player) => {
+        const eligible = playerEligibility(player);
+        let withCandidate = baseUtility;
+        for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) {
+          if (!normalizedRosterSlotAccepts(eligible, slots[slotIndex])) continue;
+          withCandidate = Math.max(withCandidate, utilityWithoutSlot[slotIndex] + valueForSlot(player, slots[slotIndex]));
+        }
+        const marginalUtility = Math.max(0, withCandidate - baseUtility);
+        const pressure = Math.max(...playerEligibility(player).map((position) => Number(runPressureByPosition[position] ?? 0)));
+        return {
+          player,
+          marginalUtility,
+          utilityAfter: withCandidate,
+          pAvailableNext: survivalProbability(player, window.nextPick, pressure),
+          survivalStatus: player.marketStatus,
+        };
+      });
+    const nextCandidates = entries
+      .slice()
+      .sort((left, right) => right.marginalUtility - left.marginalUtility || left.player.rank - right.player.rank)
+      .slice(0, NEXT_TURN_COMPARISON_POOL);
+    const utilityWithoutPair = new Map();
+    const filledWithoutPair = new Map();
+    if (Number.isFinite(window.nextPick)) {
+      for (let left = 0; left < slots.length; left += 1) {
+        for (let right = left + 1; right < slots.length; right += 1) {
+          const remainingSlots = slots.filter((_, index) => index !== left && index !== right);
+          const key = `${left}:${right}`;
+          utilityWithoutPair.set(key, maximumAssignment(picks, remainingSlots, valueForSlot).value);
+          if (round + 1 >= config.rounds) {
+            filledWithoutPair.set(key, maximumAssignment(picks, remainingSlots, () => 1).count);
+          }
+        }
+      }
     }
-
-    if (!leaders.length) throw new Error("no_position_leaders_available");
-    const rbwrScores = leaders
-      .filter((leader) => ["RB", "WR"].includes(leader.player.position))
-      .map((leader) => leader.adjustedScore);
-    const bestRbwrScore = rbwrScores.length ? Math.max(...rbwrScores) : null;
-
-    for (const leader of leaders) {
-      const isRbwr = ["RB", "WR"].includes(leader.player.position);
-      const postPickRbwr = rbwrBefore + (isRbwr ? 1 : 0);
-      const floorPass = postPickRbwr >= floorRequired;
-      const floorException = round === 4 && !floorPass && !isRbwr && bestRbwrScore != null &&
-        leader.adjustedScore >= bestRbwrScore + materialEdgePoints;
-      leader.postPickRbwr = postPickRbwr;
-      leader.floorRequired = floorRequired;
-      leader.floorPass = floorPass;
-      leader.floorException = floorException;
-      leader.eligible = floorPass || floorException;
+    const assignmentWithPair = (leftPlayer, rightPlayer, excludedValues, baseline) => {
+      let result = baseline;
+      const leftEligible = playerEligibility(leftPlayer);
+      const rightEligible = playerEligibility(rightPlayer);
+      for (let left = 0; left < slots.length; left += 1) {
+        if (!normalizedRosterSlotAccepts(leftEligible, slots[left])) continue;
+        for (let right = 0; right < slots.length; right += 1) {
+          if (left === right || !normalizedRosterSlotAccepts(rightEligible, slots[right])) continue;
+          const key = left < right ? `${left}:${right}` : `${right}:${left}`;
+          result = Math.max(result, excludedValues.get(key) + 2);
+        }
+      }
+      return result;
+    };
+    const utilityWithPair = (leftEntry, rightEntry) => {
+      let result = Math.max(leftEntry.utilityAfter, rightEntry.utilityAfter);
+      const leftEligible = playerEligibility(leftEntry.player);
+      const rightEligible = playerEligibility(rightEntry.player);
+      for (let left = 0; left < slots.length; left += 1) {
+        if (!normalizedRosterSlotAccepts(leftEligible, slots[left])) continue;
+        for (let right = 0; right < slots.length; right += 1) {
+          if (left === right || !normalizedRosterSlotAccepts(rightEligible, slots[right])) continue;
+          const key = left < right ? `${left}:${right}` : `${right}:${left}`;
+          result = Math.max(result, utilityWithoutPair.get(key) + valueForSlot(leftEntry.player, slots[left]) + valueForSlot(rightEntry.player, slots[right]));
+        }
+      }
+      return result;
+    };
+    const remainingAfterPair = config.rounds - Array.from(picks ?? []).length - 2;
+    for (const entry of entries) {
+      const alternatives = !Number.isFinite(window.nextPick) ? [] : nextCandidates
+        .filter((candidate) => candidate !== entry)
+        .filter((candidate) => withinPositionLimit(candidate.player, [...picks, entry.player], config))
+        .filter((candidate) => round + 1 < config.rounds || slots.length - assignmentWithPair(entry.player, candidate.player, filledWithoutPair, Math.max(
+          assignmentWithOne(entry.player, filledWithoutSlot, baseFilled),
+          assignmentWithOne(candidate.player, filledWithoutSlot, baseFilled),
+        )) <= remainingAfterPair)
+        .map((candidate) => ({
+          ...candidate,
+          marginalAfterEntry: Math.max(0, utilityWithPair(entry, candidate) - entry.utilityAfter),
+        }))
+        .sort((left, right) => right.marginalAfterEntry - left.marginalAfterEntry || left.player.rank - right.player.rank);
+      let noneBetter = 1;
+      let expectedNextUtility = 0;
+      for (const candidate of alternatives) {
+        expectedNextUtility += noneBetter * candidate.pAvailableNext * candidate.marginalAfterEntry;
+        noneBetter *= 1 - candidate.pAvailableNext;
+      }
+      entry.expectedNextUtility = Number.isFinite(window.nextPick) ? expectedNextUtility : 0;
+      entry.costOfWaiting = Math.max(0, entry.marginalUtility - expectedNextUtility);
+      entry.decisionScore = entry.marginalUtility + entry.expectedNextUtility;
     }
-
-    const ranked = leaders
-      .filter((leader) => leader.eligible)
-      .sort((left, right) =>
-        right.adjustedScore - left.adjustedScore || left.player.rank - right.player.rank
-      );
-    if (!ranked.length) throw new Error("roster_floor_blocked_all_positions");
-    return { window, leaders, ranked, bestRbwrScore, floorRequired, rbwrBefore };
+    const ranked = entries.sort((left, right) =>
+      right.decisionScore - left.decisionScore ||
+      right.marginalUtility - left.marginalUtility ||
+      left.player.rank - right.player.rank
+    );
+    if (!ranked.length) throw new Error("no_legal_bpa_candidates");
+    return { window, ranked, recomputeMs: Date.now() - startedAt };
   }
 
-  function summarizeDecision(scored, chosen, materialEdgePoints) {
+  function summarizeDecision(scored, selected, fallbackUsed = false) {
+    const chosen = selected[0];
     return {
       currentPick: scored.window.currentPick,
       nextPick: scored.window.nextPick,
       interveningOpponentPicks: scored.window.interveningOpponentPicks,
-      materialEdgePoints,
-      rbwrBefore: scored.rbwrBefore,
-      floorRequired: scored.floorRequired,
-      bestRbwrScore: scored.bestRbwrScore,
-      positionLeaders: scored.leaders.map((leader) => ({
-        player: compactPlayer(leader.player),
-        comparator: compactPlayer(leader.comparator),
-        bucket: leader.bucket,
-        rawScore: leader.rawScore,
-        adjustedScore: leader.adjustedScore,
-        postPickRbwr: leader.postPickRbwr,
-        floorPass: leader.floorPass,
-        floorException: leader.floorException,
-        eligible: leader.eligible,
+      policy: "JOINT_BPA_ONE_TURN_VONA",
+      recomputeMs: scored.recomputeMs,
+      fallbackUsed,
+      latencyBudgetMs: DECISION_RECOMPUTE_BUDGET_MS,
+      positionLeaders: selected.map((entry) => ({
+        player: compactPlayer(entry.player),
+        comparator: null,
+        bucket: "probability_weighted_next_turn",
+        rawScore: entry.marginalUtility,
+        adjustedScore: entry.decisionScore,
+        marginalUtility: entry.marginalUtility,
+        expectedNextUtility: entry.expectedNextUtility,
+        costOfWaiting: entry.costOfWaiting,
+        pAvailableNext: entry.pAvailableNext,
+        survivalStatus: entry.survivalStatus,
+        eligible: true,
       })),
       chosenYahooId: chosen.player.yahooId,
     };
@@ -424,47 +587,41 @@
     board,
     availablePlayers,
     minimum = 5,
-    materialEdgePoints = MATERIAL_EDGE_POINTS,
     config = CONFIGS.public_mock_15,
+    replacementBySlot = {},
+    runPressureByPosition = {},
+    recomputeBudgetMs = DECISION_RECOMPUTE_BUDGET_MS,
   }) {
-    const allowed = new Set(allowedPositions(round, picks, config, seat));
     const used = new Set(Array.from(picks ?? [], boardKey));
     const availableById = new Map(
       Array.from(availablePlayers ?? [], (player) => [String(player.yahooId), player]),
     );
     let pool = board
-      .filter((player) => allowed.has(player.position))
       .filter((player) => !used.has(boardKey(player)))
       .filter((player) => availableById.has(player.yahooId));
     if (pool.length < minimum) {
       throw new Error(`fewer_than_${minimum}_eligible_targets`);
     }
 
-    const selected = [];
-    let firstDecision = null;
-    while (selected.length < minimum) {
-      const scored = scorePositionLeaders({
-        round,
-        seat,
-        picks,
-        pool,
-        materialEdgePoints,
-        config,
-      });
-      const chosen = scored.ranked[0];
-      if (!firstDecision) firstDecision = summarizeDecision(scored, chosen, materialEdgePoints);
-      selected.push(chosen.player);
-      pool = pool.filter((player) => player.yahooId !== chosen.player.yahooId);
-    }
+    const scored = scoreCandidates({ round, seat, picks, pool, config, replacementBySlot, runPressureByPosition });
+    const fallbackUsed = scored.recomputeMs > recomputeBudgetMs;
+    const selected = (fallbackUsed
+      ? scored.ranked.slice().sort((left, right) => left.player.rank - right.player.rank)
+      : scored.ranked
+    ).slice(0, minimum);
+    if (selected.length < minimum) throw new Error(`fewer_than_${minimum}_legal_bpa_targets`);
 
-    const targets = selected.map((player) => ({
+    const targets = selected.map(({ player }) => ({
       yahooId: player.yahooId,
       name: availableById.get(player.yahooId).name,
       position: player.position,
       team: availableById.get(player.yahooId).team,
+      eligible: player.eligible,
+      projection: player.projection,
     }));
-    firstDecision.targetYahooIds = targets.map((target) => target.yahooId);
-    return { targets, decision: firstDecision };
+    const decision = summarizeDecision(scored, selected, fallbackUsed);
+    decision.targetYahooIds = targets.map((target) => target.yahooId);
+    return { targets, decision };
   }
 
   function applyManualOverride({
@@ -477,6 +634,8 @@
     baselineTargets,
     allowed,
     minimum = 5,
+    picks = [],
+    config = CONFIGS.public_mock_15,
   }) {
     const baseline = Array.from(baselineTargets ?? []);
     const untouched = (status = "none", reason = null) => ({
@@ -491,13 +650,13 @@
       return untouched("rejected", "manual_pin_round_mismatch");
     }
 
-    const allowedSet = new Set(Array.from(allowed ?? [], normalize));
+    void allowed;
     const boardById = new Map(Array.from(board ?? [], (player) => [String(player.yahooId), player]));
     const availableById = new Map(Array.from(availablePlayers ?? [], (player) => [String(player.yahooId), player]));
     const stagedIds = Array.from(stage.targets ?? [], (target) => String(target?.yahooId ?? "")).filter(Boolean);
     const chosenId = stagedIds.find((yahooId) => {
       const player = boardById.get(yahooId);
-      return player && allowedSet.has(player.position) && availableById.has(yahooId);
+      return player && player.manualEligible !== false && availableById.has(yahooId) && canCompleteRoster({ player, picks, config });
     });
     if (!chosenId) return untouched("rejected", "manual_pin_unavailable_or_ineligible");
 
@@ -508,6 +667,8 @@
       name: String(livePlayer.name ?? boardPlayer.name ?? ""),
       position: boardPlayer.position,
       team: String(livePlayer.team ?? boardPlayer.team ?? ""),
+      eligible: boardPlayer.eligible,
+      projection: boardPlayer.projection,
     };
     const targets = [pinned, ...baseline.filter((target) => String(target.yahooId) !== chosenId)];
     if (targets.length < minimum) throw new Error(`fewer_than_${minimum}_targets_after_manual_pin`);
@@ -547,24 +708,10 @@
 
   function validateCompletedRoster(picks, config = CONFIGS.public_mock_15) {
     const counts = positionCounts(picks);
-    if (config.name === "test_league_19_idp") {
-      return (
-        picks.length === config.rounds &&
-        offenseComplete(counts, config) &&
-        OFFENSE.every((position) => (counts[position] ?? 0) >= config.offenseMinimums[position]) &&
-        config.specialistPositions.every((position) => (counts[position] ?? 0) === 1) &&
-        OFFENSE.every((position) => (counts[position] ?? 0) <= config.positionLimits[position])
-      );
-    }
     return (
       picks.length === config.rounds &&
-      offenseComplete(counts, config) &&
-      (counts.QB ?? 0) === 1 &&
-      (counts.TE ?? 0) === 1 &&
-      (counts.DEF ?? 0) === 1 &&
-      (counts.K ?? 0) === 1 &&
-      (counts.RB ?? 0) <= config.positionLimits.RB &&
-      (counts.WR ?? 0) <= config.positionLimits.WR
+      maximumFilledStarterSlots(picks, config) === starterSlots(config).length &&
+      Object.entries(config.positionLimits).every(([position, limit]) => (counts[position] ?? 0) <= limit)
     );
   }
 
@@ -596,7 +743,9 @@
     const minimumFallbacks = Number(options.minimumFallbacks ?? 5);
     const pollMs = Number(options.pollMs ?? 25);
     const filterDeadlineMs = Number(options.filterDeadlineMs ?? 5000);
-    const materialEdgePoints = MATERIAL_EDGE_POINTS;
+    const selectionHoldMs = Number(options.selectionHoldMs ?? 1200);
+    const replacementBySlot = options.replacementBySlot ?? {};
+    const runPressureByPosition = options.runPressureByPosition ?? {};
     const board = validateBoard(options.board);
     const readManualOverride = typeof options.readManualOverride === "function" ? options.readManualOverride : () => null;
     const consumeManualOverride = typeof options.consumeManualOverride === "function" ? options.consumeManualOverride : () => {};
@@ -609,8 +758,11 @@
     if (observedTeamCount !== config.teams) throw new Error("draft room must contain exactly 12 teams");
     if (!sameSlots(observedRosterSlots, config.rosterSlots)) throw new Error(`draft roster shape does not match ${config.name}`);
     if (!Number.isInteger(minimumFallbacks) || minimumFallbacks < 5) throw new Error("minimumFallbacks must be at least 5");
-    if (pollMs < 25 || filterDeadlineMs <= 0) {
+    if (pollMs < 25 || filterDeadlineMs <= 0 || selectionHoldMs < 0 || selectionHoldMs > 1500) {
       throw new Error("invalid runner timing configuration");
+    }
+    if (!replacementBySlot || typeof replacementBySlot !== "object" || !Object.keys(replacementBySlot).length) {
+      throw new Error("joint replacement baselines are required");
     }
     if (typeof controllerApi.runtime?.readOwnedTurn !== "function") {
       throw new Error("controller owned-turn runtime hook is required");
@@ -632,6 +784,8 @@
     let state = "created";
     let failure = null;
     let busy = false;
+    let pendingDecision = null;
+    let activeTurnMetrics = null;
 
     function readReceipts() {
       const parsed = JSON.parse(storage.getItem(RECEIPT_KEY) ?? "[]");
@@ -699,8 +853,9 @@
             board,
             availablePlayers,
             minimum: minimumFallbacks,
-            materialEdgePoints,
             config,
+            replacementBySlot,
+            runPressureByPosition,
           });
           const { targets, manualOverride } = applyManualOverride({
             stage: readManualOverride(),
@@ -712,6 +867,8 @@
             baselineTargets: baseline.targets,
             allowed: allowedPositions(turn.round, picks, config, expectedSeat),
             minimum: minimumFallbacks,
+            picks,
+            config,
           });
           const decision = {
             ...baseline.decision,
@@ -724,9 +881,9 @@
               chosenYahooId: manualOverride.chosenYahooId ?? null,
             },
           };
-          return { targets, decision, manualOverride, filterReadyMs: Date.now() - startedAt };
+          return { targets, decision, manualOverride, availablePlayers, filterReadyMs: Date.now() - startedAt };
         } catch (error) {
-          if (!String(error?.message ?? error).startsWith("fewer_than_")) throw error;
+          if (!/^(fewer_than_|no_legal_bpa_candidates)/.test(String(error?.message ?? error))) throw error;
           lastEligibilityError = String(error.message);
         }
         await delay(25);
@@ -734,30 +891,39 @@
       throw new Error(lastEligibilityError ?? `position_filter_timeout:${label}`);
     }
 
-    async function resolveOwnedTurn(turn) {
-      if (state !== "running") return;
-      const expectedRound = picks.length + 1;
-      const expectedPick = overallPick(expectedRound, expectedSeat, config.teams);
-      if (turn.round !== expectedRound || turn.pick !== expectedPick) {
-        throw new Error(`owned_turn_mismatch:expected_R${expectedRound}P${expectedPick}:observed_${turn.label}`);
+    function startPendingController(chosenYahooId = null, source = "baseline_timeout") {
+      if (!pendingDecision || state !== "running") return false;
+      const pending = pendingDecision;
+      let targets = pending.targets;
+      if (chosenYahooId) {
+        const chosenId = String(chosenYahooId);
+        const boardPlayer = board.find((player) => player.yahooId === chosenId);
+        const livePlayer = pending.availablePlayers.find((player) => String(player.yahooId) === chosenId);
+        if (!boardPlayer || !livePlayer || boardPlayer.manualEligible === false ||
+            !canCompleteRoster({ player: boardPlayer, picks, config })) {
+          receipt("runner_on_clock_choice_rejected", { turn: pending.turn.label, chosenYahooId: chosenId, reason: "unavailable_ineligible_or_roster_illegal", baselineRetained: true });
+          return false;
+        }
+        const chosen = {
+          yahooId: chosenId,
+          name: String(livePlayer.name ?? boardPlayer.name),
+          position: boardPlayer.position,
+          team: String(livePlayer.team ?? boardPlayer.team),
+          eligible: boardPlayer.eligible,
+          projection: boardPlayer.projection,
+        };
+        targets = [chosen, ...targets.filter((target) => String(target.yahooId) !== chosenId)];
+        receipt("runner_on_clock_choice_applied", { turn: pending.turn.label, chosenYahooId: chosenId, source, baselineFallbacks: pending.targets.map((target) => target.yahooId) });
       }
-      const filterLabel = filterLabelForRound(turn.round, picks, config, expectedSeat);
-      const { targets, decision, manualOverride, filterReadyMs } = await targetsAfterFilter(turn, filterLabel);
-      if (state !== "running") return;
-      receipt("runner_turn_resolved", {
-        turn: turn.label,
-        filterLabel,
-        filterReadyMs,
-        targetCount: targets.length,
-        allowedPositions: allowedPositions(turn.round, picks, config, expectedSeat),
-        decision,
-      });
-      if (manualOverride.consume) consumeManualOverride(manualOverride);
+      pendingDecision = null;
+      const elapsed = Date.now() - pending.detectedAt;
+      if (elapsed >= TURN_TO_CLICK_BUDGET_MS) throw new Error("turn_to_click_budget_exhausted");
+      const remainingSelectionBudget = TURN_TO_CLICK_BUDGET_MS - elapsed;
       const nextController = controllerApi.create(
         {
           targets,
-          pollMs: 50,
-          selectionDeadlineMs: 10000,
+          pollMs: 25,
+          selectionDeadlineMs: remainingSelectionBudget,
           confirmationDeadlineMs: 5000,
           minimumAvailableTargets: minimumFallbacks,
           maxConfirmedPicks: 1,
@@ -769,16 +935,62 @@
         environment,
       );
       try {
+        activeTurnMetrics = { turn: pending.turn.label, detectedAt: pending.detectedAt, controllerStartedAt: Date.now(), source };
         currentController = nextController.start();
       } catch (error) {
         nextController.stop("start_failed");
         throw error;
+      }
+      return true;
+    }
+
+    function chooseOnClock(yahooId, source = "operator") {
+      try {
+        return startPendingController(yahooId, source);
+      } catch (error) {
+        fail(String(error?.message ?? error));
+        return false;
+      }
+    }
+
+    async function resolveOwnedTurn(turn) {
+      if (state !== "running") return;
+      const detectedAt = Date.now();
+      const expectedRound = picks.length + 1;
+      const expectedPick = overallPick(expectedRound, expectedSeat, config.teams);
+      if (turn.round !== expectedRound || turn.pick !== expectedPick) {
+        throw new Error(`owned_turn_mismatch:expected_R${expectedRound}P${expectedPick}:observed_${turn.label}`);
+      }
+      const filterLabel = filterLabelForRound(turn.round, picks, config, expectedSeat);
+      const { targets, decision, manualOverride, availablePlayers, filterReadyMs } = await targetsAfterFilter(turn, filterLabel);
+      if (state !== "running") return;
+      const panelReadyMs = Date.now() - detectedAt;
+      receipt("runner_turn_resolved", {
+        turn: turn.label,
+        filterLabel,
+        filterReadyMs,
+        targetCount: targets.length,
+        allowedPositions: allowedPositions(turn.round, picks, config, expectedSeat),
+        panelReadyMs,
+        panelBudgetMs: PANEL_BUDGET_MS,
+        decision,
+      });
+      if (panelReadyMs >= PANEL_BUDGET_MS) throw new Error("panel_ready_budget_exhausted");
+      if (manualOverride.consume) consumeManualOverride(manualOverride);
+      pendingDecision = { turn, detectedAt, targets, decision, availablePlayers };
+      if (manualOverride.status === "applied" || selectionHoldMs === 0) {
+        startPendingController(null, manualOverride.status === "applied" ? "pre_staged_pin" : "baseline_immediate");
+      } else {
+        environment.setTimeout(() => {
+          try { startPendingController(null, "baseline_timeout"); } catch (error) { fail(String(error?.message ?? error)); }
+        }, selectionHoldMs);
       }
     }
 
     async function advance() {
       if (busy || state !== "running") return;
       if (!currentController) {
+        if (pendingDecision) return;
         const turn = controllerApi.runtime.readOwnedTurn(documentRef);
         if (!turn) return;
         busy = true;
@@ -803,13 +1015,19 @@
         const confirmations = controllerReceipts.filter((entry) => entry.kind === "pick_confirmed");
         if (clicks.length !== 1 || confirmations.length !== 1) throw new Error("pick_receipt_contract_failed");
         const confirmation = confirmations[0];
+        const boardPlayer = board.find((player) => player.yahooId === String(confirmation.yahooId));
+        const turnDetectionToClickMs = (activeTurnMetrics?.controllerStartedAt - activeTurnMetrics?.detectedAt) + clicks[0].detectionToClickMs;
         const pick = {
           yahooId: confirmation.yahooId,
           name: confirmation.name,
           position: positionForConfirmedPick(board, confirmation),
           team: confirmation.team,
+          eligible: boardPlayer?.eligible ?? [positionForConfirmedPick(board, confirmation)],
+          projection: boardPlayer?.projection ?? null,
           turn: confirmation.turn,
           detectionToClickMs: clicks[0].detectionToClickMs,
+          turnDetectionToClickMs,
+          turnToClickBudgetMs: TURN_TO_CLICK_BUDGET_MS,
           clickToConfirmationMs: confirmation.clickToConfirmationMs,
         };
         picks.push(pick);
@@ -822,6 +1040,7 @@
         receipt("runner_pick_confirmed", { round: picks.length, pick });
         currentController.stop("round_complete");
         currentController = null;
+        activeTurnMetrics = null;
 
         if (picks.length === config.rounds) {
           const roster = controllerApi.runtime.parseRosterCount(documentRef.body?.innerText);
@@ -864,8 +1083,9 @@
         observedTeamCount,
         observedRosterSlots,
         minimumFallbacks,
-        materialEdgePoints,
-        strategy: config.name === "test_league_19_idp" ? "13_offense_then_generic_d_first_verified_specialists" : "position_leader_dropoff_to_next_turn",
+        replacementBySlot,
+        selectionHoldMs,
+        strategy: "joint_marginal_roster_utility_plus_probability_weighted_one_turn_vona",
       });
       monitorId = environment.setInterval(advance, pollMs);
       advance();
@@ -884,6 +1104,7 @@
         controllerReceipts = [];
       }
       stopMonitor();
+      pendingDecision = null;
       let stopError = null;
       try {
         currentController?.stop?.(reason);
@@ -908,6 +1129,7 @@
     function stop(reason = "operator_stop") {
       if (["completed", "failed", "halted", "stopped"].includes(state)) return;
       stopMonitor();
+      pendingDecision = null;
       currentController?.stop?.(reason);
       currentController = null;
       state = "stopped";
@@ -926,6 +1148,12 @@
         failure,
         picks: picks.slice(),
         currentController: currentController?.getStatus?.() ?? null,
+        pendingDecision: pendingDecision ? {
+          turn: pendingDecision.turn.label,
+          detectedAt: pendingDecision.detectedAt,
+          deadlineAt: pendingDecision.detectedAt + selectionHoldMs,
+          targetYahooIds: pendingDecision.targets.slice(0, 3).map((target) => target.yahooId),
+        } : null,
       };
     }
 
@@ -933,7 +1161,7 @@
       return readReceipts().filter((entry) => entry.runId === runId);
     }
 
-    const api = { start, halt, stop, getStatus, exportReceipts };
+    const api = { start, halt, stop, chooseOnClock, getStatus, exportReceipts };
     environment[GLOBAL_KEY] = api;
     return api;
   }
@@ -955,12 +1183,14 @@
       positionForConfirmedPick,
       overallPick,
       turnWindow,
-      survivalBucket,
-      scorePositionLeaders,
+      survivalProbability,
+      optimalRosterUtility,
+      maximumFilledStarterSlots,
+      canCompleteRoster,
+      scoreCandidates,
       buildDecisionLadder,
       applyManualOverride,
       validateCompletedRoster,
-      specialistOrderForSeat,
       rosterSlotAccepts,
       allocateRosterSlots,
       validateObservedTestRoster,

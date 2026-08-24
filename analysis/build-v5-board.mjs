@@ -16,6 +16,10 @@ export const LEAGUE_REPLACEMENT_RANKS = Object.freeze({
   DB: 18,
 });
 
+export const LEAGUE_STARTER_SLOTS = Object.freeze([
+  "QB", "WR", "WR", "WR", "RB", "RB", "TE", "W/R/T", "K", "DEF", "D", "DB", "LB",
+]);
+
 const YAHOO_STATUS = Object.freeze({
   Q: "QUESTIONABLE",
   D: "DOUBTFUL",
@@ -38,7 +42,7 @@ function parsePayload(row) {
 function normalizePosition(value) {
   const position = String(value ?? "").toUpperCase();
   if (["DE", "DT", "NT"].includes(position)) return "DL";
-  if (["CB", "S", "FS", "SS"].includes(position)) return "DB";
+  if (["FS", "SS"].includes(position)) return "S";
   if (["ILB", "OLB"].includes(position)) return "LB";
   return position;
 }
@@ -104,6 +108,7 @@ export function assembleV5Board({
   asOf,
   baselineObservedAt,
   sleeperObservedAt,
+  replacementRoster = { teamCount: 12, rosterSlots: LEAGUE_STARTER_SLOTS },
 }) {
   const offenseObservedAt = requireObservedAt(offenseSnapshot, "offenseSnapshot");
   const specialistObservedAt = requireObservedAt(specialistSnapshot, "specialistSnapshot");
@@ -141,13 +146,16 @@ export function assembleV5Board({
     const baseline = baselineForYahooRow(row);
     const observedEligibility = eligibilityByYahooId.get(String(row.yahooId));
     const yahooFilters = filterMembership.get(String(row.yahooId)) ?? [];
-    const eligibilityOnlyCb = observedEligibility?.eligible?.includes("CB") && yahooFilters.length === 1 && yahooFilters[0] === "CB";
-    const dualRolePosition = baseline?.payload?.specialist_qualified && yahooFilters.includes("DB")
-      ? baseline.payload.specialist?.draft_position
-      : eligibilityOnlyCb
-        ? "DB"
-        : null;
-    const position = normalizePosition(dualRolePosition || baseline?.position || row.position);
+    const position = normalizePosition(row.position || baseline?.position);
+    const specialistPosition = baseline?.payload?.specialist_qualified
+      ? normalizePosition(baseline.payload.specialist?.draft_position)
+      : null;
+    const eligible = [...new Set([
+      ...(observedEligibility?.eligible ?? []),
+      ...(baseline?.payload?.eligible ?? []),
+      position,
+      specialistPosition,
+    ].map(normalizePosition).filter(Boolean))];
     return {
       playerId: String(row.yahooId),
       yahooId: String(row.yahooId),
@@ -156,9 +164,10 @@ export function assembleV5Board({
       name: baseline?.name || row.name,
       team: baseline?.team || row.team,
       position,
+      specialistPosition,
       yahooPosition: String(row.position ?? position).toUpperCase(),
       yahooEligibilityFilters: yahooFilters,
-      eligible: observedEligibility?.eligible ?? baseline?.payload?.eligible ?? [position],
+      eligible,
       bye: row.bye,
       yahooPreseasonRank: row.yahooPreseasonRank,
       yahooRosteredPercent: row.rosteredPercent,
@@ -172,7 +181,7 @@ export function assembleV5Board({
   const yahooOffenseSource = {
     sourceId: "yahoo-season-projection",
     updatedAt: offenseObservedAt,
-    weight: 0.65,
+    weight: 1,
     rows: yahooRows
       .filter((row) => offenseIds.has(String(row.yahooId)))
       .filter((row) => hasFiniteProjection(row.yahooProjectedPoints))
@@ -181,7 +190,7 @@ export function assembleV5Board({
   const yahooSpecialistSource = {
     sourceId: "yahoo-specialist-season-projection",
     updatedAt: specialistObservedAt,
-    weight: 0.65,
+    weight: 1,
     rows: yahooRows
       .filter((row) => !offenseIds.has(String(row.yahooId)) && specialistIds.has(String(row.yahooId)))
       .filter((row) => hasFiniteProjection(row.yahooProjectedPoints))
@@ -190,7 +199,7 @@ export function assembleV5Board({
   const baselineSource = {
     sourceId: "league-scored-history-market-baseline",
     updatedAt: baselineObservedAt,
-    weight: 0.35,
+    weight: 1,
     rows: yahooRows
       .map((row) => ({ row, baseline: baselineForYahooRow(row) }))
       .filter(({ baseline }) => hasFiniteProjection(baseline?.projection))
@@ -204,6 +213,7 @@ export function assembleV5Board({
     asOf,
     maxAgeHours: 96,
     minimumFreshSources: 2,
+    replacementRoster,
   });
 
   const reports = [];
@@ -246,26 +256,34 @@ export function assembleV5Board({
       conflict: false,
       evidence: [],
     };
+    const dualRole = player.eligible.some((position) => ["QB", "RB", "WR", "TE"].includes(position)) &&
+      player.eligible.some((position) => ["DL", "LB", "DB", "CB", "S", "D"].includes(position));
     const executable = player.executable && injury.executable;
-    const specialist = ["K", "DEF", "DL", "LB", "DB"].includes(player.position);
     return {
       ...player,
       injury,
       executable,
       blockReason: executable ? null : [player.blockReason, injury.blockReason].filter(Boolean).join("; "),
-      draftPhase: specialist ? "SPECIALIST_ONLY" : "OFFENSE",
+      automaticEligible: executable && !dualRole,
+      manualEligible: executable,
+      validationStatus: dualRole ? "DUAL_ROLE_SCORING_UNVERIFIED" : "EXECUTABLE",
+      draftPhase: "UNIFIED",
     };
   });
 
   const offense = combined
-    .filter((player) => player.draftPhase === "OFFENSE")
+    .filter((player) => player.eligible.some((position) => ["QB", "RB", "WR", "TE"].includes(position)))
     .sort((left, right) => (right.vorp ?? -Infinity) - (left.vorp ?? -Infinity))
     .map((player, index) => ({ ...player, draftBoardRank: player.vorp === null ? null : index + 1 }));
   const specialists = Object.fromEntries(
     ["K", "DEF", "DL", "LB", "DB"].map((position) => [
       position,
       combined
-        .filter((player) => player.position === position)
+        .filter((player) => {
+          if (position === "DL") return player.eligible.some((eligible) => ["DL", "D"].includes(eligible));
+          if (position === "DB") return player.eligible.some((eligible) => ["DB", "CB", "S"].includes(eligible));
+          return player.eligible.includes(position);
+        })
         .sort((left, right) => {
           if (["K", "DEF"].includes(position)) {
             const leftRank = hasFiniteProjection(left.yahooPreseasonRank) ? Number(left.yahooPreseasonRank) : Infinity;
@@ -284,8 +302,9 @@ export function assembleV5Board({
     leagueId: "420010",
     scoringModel: "2-minute-drillers-2026",
     replacementRanks: LEAGUE_REPLACEMENT_RANKS,
-    replacementRankBasis: "2-minute-drillers real-league 2026 roster assumptions",
-    specialistRankingBasis: { K: "Yahoo preseason rank", DEF: "Yahoo preseason rank", DL: "league-scored consensus", LB: "league-scored consensus", DB: "league-scored consensus" },
+    replacementBySlot: projectionBoard.replacementBySlot,
+    replacementRankBasis: "joint maximum-weight allocation of every 2 Minute Drillers starter slot",
+    specialistRankingBasis: { K: "Yahoo preseason rank", DEF: "Yahoo preseason rank", DL: "exact league-scored Yahoo plus prior-history baseline; uncalibrated", LB: "exact league-scored Yahoo plus prior-history baseline; uncalibrated", DB: "exact league-scored Yahoo plus prior-history baseline; uncalibrated" },
     sources: projectionBoard.sourceReceipts,
     snapshotReceipts: {
       yahooOffenseObservedAt: offenseObservedAt,
@@ -295,7 +314,7 @@ export function assembleV5Board({
     injuryWatchlist: buildDraftWatchlist(injuryBoard),
     eligibilityEvidence: specialistSnapshot.eligibilityEvidence ?? {},
     players: combined,
-    boards: { offense, specialists },
+    boards: { unified: combined, offense, specialists },
   });
 }
 

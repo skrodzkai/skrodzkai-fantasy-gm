@@ -226,7 +226,7 @@ test("exports runner and controller receipts using distinct draft-slot and Yahoo
 test("manifest has only the two public-mock surfaces plus the exact verified test league and no broad permissions", async () => {
   const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "0.8.0");
+  assert.equal(manifest.version, "0.9.0");
   assert.deepEqual(manifest.permissions, ["storage"]);
   assert.equal(manifest.host_permissions, undefined);
   assert.deepEqual(manifest.background, { service_worker: "extension/command-center-background.js" });
@@ -344,7 +344,7 @@ test("bridge locks every action when Chrome invalidates the extension context", 
 });
 
 test("version handshake requires the current installed background version", async () => {
-  assert.equal(await helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.8.0" }) } } }), "0.8.0");
+  assert.equal(await helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.9.0" }) } } }), "0.9.0");
   await assert.rejects(
     helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.7.5" }) } } }),
     /extension_version_mismatch/,
@@ -353,7 +353,7 @@ test("version handshake requires the current installed background version", asyn
     helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage() { throw new Error("invalidated"); } } } }),
     /extension_context_invalidated/,
   );
-  assert.equal(backgroundHelpers.extensionVersion({ runtime:{ getManifest:() => ({ version:"0.8.0" }) } }), "0.8.0");
+  assert.equal(backgroundHelpers.extensionVersion({ runtime:{ getManifest:() => ({ version:"0.9.0" }) } }), "0.9.0");
   assert.doesNotMatch(backgroundSource, /identify_arm_surface|tabs\.query/);
 });
 
@@ -416,11 +416,17 @@ test("war-room recommendations show only the resolved live ladder with real metr
   assert.deepEqual([...helpers.buildUiRecommendations(board, null)], []);
   const [recommendation] = helpers.buildUiRecommendations(board, {
     targetYahooIds: ["1"],
-    positionLeaders: [{ player: { yahooId: "1" }, bucket: "likely_gone", adjustedScore: 8.25 }],
+    positionLeaders: [{
+      player: { yahooId: "1" },
+      adjustedScore: 8.25,
+      marginalUtility: 8.25,
+      costOfWaiting: 2.1,
+      pAvailableNext: 0.2,
+    }],
   });
-  assert.equal(recommendation.edge, "+8.3");
+  assert.equal(recommendation.edge, "8.3");
   assert.equal(recommendation.confidence, "MULTI_SOURCE");
-  assert.match(recommendation.reason, /likely_gone/);
+  assert.match(recommendation.reason, /BPA 8\.3 · wait 2\.1 · Pnext 20%/);
   const [manual] = helpers.buildUiRecommendations(board, {
     targetYahooIds: ["1"],
     manualOverride: { status: "applied", chosenYahooId: "1" },
@@ -436,8 +442,8 @@ test("opponent window stays honest about TEST-room history while exposing the sn
     nextPick: 32,
     interveningOpponentPicks: 14,
     positionLeaders: [
-      { bucket: "likely_gone", player: { name: "Alpha", position: "RB" } },
-      { bucket: "likely_available", player: { name: "Beta", position: "WR" } },
+      { pAvailableNext: 0.2, player: { name: "Alpha", position: "RB" } },
+      { pAvailableNext: 0.8, player: { name: "Beta", position: "WR" } },
     ],
   }, "TEST");
   assert.equal(window.currentPick, 17);
@@ -447,19 +453,32 @@ test("opponent window stays honest about TEST-room history while exposing the sn
   assert.match(window.managerNote, /2 Minute Drillers.*intentionally withheld/);
 });
 
-test("bundled board contains unique current IDs and complete observed offense ranges", () => {
+test("bundled board contains unique IDs and labeled market evidence or fallback", () => {
   const board = context.SKRODZKaiYahooMockBoard;
-  assert.ok(board.offense.length >= 100);
-  assert.ok(board.kickers.length >= 12);
+  const offense = board.players.filter((player) => ["QB", "RB", "WR", "TE"].includes(player.position));
+  const kickers = board.players.filter((player) => player.position === "K");
+  const idp = board.players.filter((player) => ["D", "LB", "CB", "S"].includes(player.position));
+  assert.ok(offense.length >= 100);
+  assert.ok(kickers.length >= 12);
   assert.equal(board.defenses.length, 32);
-  assert.ok(board.idp.length >= 36);
-  const ids = [...board.offense, ...board.kickers].map((player) => String(player.yahooId));
+  assert.ok(idp.length >= 36);
+  const ids = [...offense, ...kickers].map((player) => String(player.yahooId));
   assert.equal(new Set(ids).size, ids.length);
-  assert.match(board.source, /v5 free-source board/);
-  for (const player of board.offense) {
+  assert.equal(new Set(board.players.map((player) => String(player.yahooId))).size, board.players.length);
+  const hunter = board.players.find((player) => String(player.yahooId) === "41787");
+  assert.equal(hunter.position, "WR");
+  assert.equal(hunter.automaticEligible, false);
+  assert.equal(hunter.manualEligible, true);
+  assert.match(board.source, /equal-weight Yahoo and league-scored prior-history/);
+  for (const player of offense) {
     assert.equal(Number.isFinite(player.vor), true);
-    assert.equal(Number.isFinite(player.adpLow), true);
-    assert.equal(Number.isFinite(player.adpHigh), true);
+    if (player.adpLow == null) {
+      assert.equal(player.adpHigh, null);
+      assert.equal(Number.isFinite(player.yahooRank) || Number.isFinite(player.valueRank), true);
+    } else {
+      assert.equal(Number.isFinite(player.adpLow), true);
+      assert.equal(Number.isFinite(player.adpHigh), true);
+    }
     assert.equal(player.confidence, "MULTI_SOURCE");
   }
 });
@@ -507,7 +526,7 @@ test("popup command-center rendering exposes the operations, override, intel, an
   for (const label of [
     "Draft Command Center", "FANTASY OPERATIONS", "League", "Room", "Seat", "Round / Pick", "Clock",
     "Armed", "Autodraft", "Kill switch", "Our roster", "Decision ladder", "Opponent window",
-    "Next-pick override", "Warnings", "Decision receipts", "Pin next pick", "KILL SWITCH",
+    "Next-pick override", "Warnings", "Decision receipts", "Choose / Pin", "KILL SWITCH",
   ]) assert.match(combinedUi, new RegExp(label.replace(/[.*+?^${}()|[\\]\\]/g, "\\\\$&")));
   assert.match(combinedUi, /width: min\(380px, calc\(100vw - 32px\)\)/);
   assert.match(popupCss, /grid-template-columns:250px minmax\(390px,1fr\) 300px/);

@@ -30,6 +30,7 @@ test("exports only executable offense while retaining explicitly labeled special
   const board = extensionBoardFromV5({
     generatedAt: "2026-08-22T00:00:00Z",
     scoringModel: "test",
+    replacementBySlot: { QB: 200, RB: 100, WR: 100, TE: 80, K: 70, DEF: 60, D: 50, DB: 45, LB: 48 },
     boards: { offense, specialists: {
       K: Array.from({ length: 12 }, (_, index) => player("K", index + 1, { sourceCount: 1, sourceIds: ["yahoo-season-projection"] })),
       DEF: Array.from({ length: 32 }, (_, index) => player("DEF", index + 1, { sourceCount: 1, sourceIds: ["yahoo-season-projection"] })),
@@ -37,18 +38,22 @@ test("exports only executable offense while retaining explicitly labeled special
       LB: [player("LB", 1)],
       DB: [
         player("DB", 1, { yahooPosition: "CB" }),
-        player("DB", 2, { yahooPosition: "WR", eligible: ["WR", "CB", "DB", "D"] }),
+        player("DB", 2, { yahooId: "WR-102", yahooPosition: "WR", eligible: ["WR", "CB", "DB", "D"] }),
         player("DB", 3, { yahooPosition: "DB", eligible: ["DB"] }),
         player("DB", 4, { yahooPosition: "S", injury: { draftAction: "BLOCK", conflict: true } }),
       ],
     } },
   });
-  assert.equal(board.offense.length, 100);
+  assert.equal(board.offense.length, 101);
   assert.equal(board.offense.some((entry) => entry.yahooId === "RB-1"), false);
-  assert.equal(board.offense.some((entry) => entry.yahooId === "RB-2"), false);
+  assert.equal(board.offense.some((entry) => entry.yahooId === "RB-2"), true);
+  assert.equal(board.offense.find((entry) => entry.yahooId === "RB-2").adpLow, null);
   assert.equal(board.kickers[0].confidence, "YAHOO_ONLY");
   assert.equal(board.defenses.length, 32);
   assert.equal(board.idp.length, 4);
+  assert.equal(board.players.length > board.offense.length, true);
+  assert.equal(board.players.find((entry) => entry.yahooId === "WR-102").position, "WR");
+  assert.equal(board.replacementBySlot.D, 50);
   assert.deepEqual(board.idp.slice(-2).map((entry) => entry.position), ["CB", "CB"]);
   assert.match(renderExtensionBoard(board), /SKRODZKaiYahooMockBoard/);
 });
