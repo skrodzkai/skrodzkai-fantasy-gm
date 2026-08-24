@@ -8,6 +8,7 @@ const TEST_CONFIG = globalThis.SKRODZKaiYahooMockRunner.configs.test_league_19_i
 const TEST_VALIDATOR = globalThis.SKRODZKaiYahooMockRunner._test.validateCompletedRoster;
 const TEST_OVERALL_PICK = globalThis.SKRODZKaiYahooMockRunner._test.overallPick;
 const TEST_SAME_SLOTS = globalThis.SKRODZKaiYahooMockRunner._test.sameSlots;
+const TEST_OBSERVED_ROSTER_VALIDATOR = globalThis.SKRODZKaiYahooMockRunner._test.validateObservedTestRoster;
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -64,18 +65,22 @@ function completedRunnerRun(receipts, errors) {
 }
 
 function replayDecision(decision) {
+  const manual = decision?.manualOverride?.status === "applied";
   const ranked = asArray(decision?.positionLeaders)
     .filter((leader) => leader?.eligible === true && leader?.player?.yahooId)
     .sort((left, right) =>
       Number(right.adjustedScore) - Number(left.adjustedScore) ||
       Number(left.player.rank) - Number(right.player.rank),
     );
-  const expectedYahooId = ranked[0]?.player?.yahooId == null ? null : String(ranked[0].player.yahooId);
+  const expectedYahooId = manual
+    ? String(decision?.manualOverride?.chosenYahooId ?? "") || null
+    : ranked[0]?.player?.yahooId == null ? null : String(ranked[0].player.yahooId);
   const chosenYahooId = decision?.chosenYahooId == null ? null : String(decision.chosenYahooId);
   return {
     consistent: expectedYahooId !== null && expectedYahooId === chosenYahooId,
     expectedYahooId,
     chosenYahooId,
+    manualOverride: manual,
     counterfactual: "not_available",
   };
 }
@@ -113,6 +118,7 @@ export function evaluateTestDraftExport(payload, options = {}) {
   const errors = [];
   const runnerReceipts = asArray(payload?.runnerReceipts);
   const controllerReceipts = asArray(payload?.controllerReceipts);
+  const extensionReceipts = asArray(payload?.extensionReceipts);
 
   if (String(payload?.roomId ?? "") !== expectedRoomId) errors.push("test_room_identity_mismatch");
   if (Number(payload?.urlSeat) !== expectedUrlSeat) errors.push("test_url_team_identity_mismatch");
@@ -121,7 +127,23 @@ export function evaluateTestDraftExport(payload, options = {}) {
   }
   if (payload?.status?.state !== "completed") errors.push("exported_runner_status_not_completed");
   if (asArray(payload?.status?.picks).length !== TEST_CONFIG.rounds) errors.push("exported_status_pick_count_mismatch");
-  if (!payload?.extensionVersion) errors.push("extension_version_missing");
+  if (payload?.extensionVersion !== "0.8.0") errors.push("extension_version_mismatch");
+  const operatorAttestation = payload?.operatorAttestation;
+  if (operatorAttestation?.status === "intervention") {
+    if (
+      operatorAttestation.source !== "operator_attested" ||
+      !timestamp(operatorAttestation.attestedAt) ||
+      !asArray(operatorAttestation.interventions).some((entry) => entry?.kind === "prevented_autodraft")
+    ) errors.push("owner_intervention_evidence_malformed");
+    errors.push("owner_intervention_prevented_autodraft");
+  } else if (
+    operatorAttestation?.status !== "none" ||
+    operatorAttestation.source !== "operator_attested" ||
+    !timestamp(operatorAttestation.attestedAt) ||
+    asArray(operatorAttestation.interventions).length !== 0
+  ) {
+    errors.push("owner_intervention_evidence_missing");
+  }
 
   const selectedRun = completedRunnerRun(runnerReceipts, errors);
   const runReceipts = selectedRun.receipts.sort((left, right) => timestamp(left.at) - timestamp(right.at));
@@ -192,6 +214,18 @@ export function evaluateTestDraftExport(payload, options = {}) {
   if (!TEST_VALIDATOR(picks, TEST_CONFIG)) errors.push("test_roster_policy_failed");
   if (!sameCounts(completed[0]?.counts, countsByPosition(picks))) errors.push("runner_completed_counts_mismatch");
 
+  const finalRosterReceipts = extensionReceipts.filter((entry) =>
+    entry.kind === "final_roster_readback" && entry.runId === selectedRun.runId
+  );
+  if (finalRosterReceipts.length !== 1) {
+    errors.push(finalRosterReceipts.length ? "ambiguous_final_roster_readback" : "final_roster_readback_missing");
+  } else if (
+    finalRosterReceipts[0].valid !== true ||
+    !TEST_OBSERVED_ROSTER_VALIDATOR(finalRosterReceipts[0].finalRosterSlots, picks)
+  ) {
+    errors.push("final_roster_slot_occupancy_failed");
+  }
+
   const replays = picks.map((pick, index) => {
     const replay = replayDecision(pick.decision);
     if (!replay.consistent) errors.push(`round_${index + 1}_decision_replay_mismatch`);
@@ -234,6 +268,7 @@ export function evaluateTestDraftExport(payload, options = {}) {
     draftSlot: Number(payload?.seat),
     urlTeamId: Number(payload?.urlSeat),
     extensionVersion: payload?.extensionVersion ?? null,
+    operatorAttestation: operatorAttestation?.status ?? "missing",
     runnerRunId: selectedRun.runId,
     confirmedPicks: picks.length,
     latencyBudgetMs,

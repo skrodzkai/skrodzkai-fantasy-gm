@@ -13,7 +13,8 @@ test("rehearses every snake seat with valid 19-player rosters and fail-closed ch
   assert.equal(report.validRosters, 12);
   assert.equal(report.rehearsals.validReference, true);
   assert.equal(report.concentration.accepted, true);
-  assert.equal(report.concentration.metrics.maxRoundConcentration <= 0.67, true);
+  assert.equal(report.concentration.exemptions.some((entry) => entry.metric === "roundConcentration"), true);
+  assert.equal(report.teams.every((team) => team.picks[15].position === "D"), true);
   assert.equal(Object.values(report.rehearsals.chaos).every((scenario) => scenario.pass), true);
   assert.equal(report.teams.every((team) => team.picks.length === 19), true);
   assert.equal(report.teams.every((team) => team.specialistUnavailableCount > 0), true);

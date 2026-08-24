@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { evaluateTestDraftExport } from "./test-draft-acceptance.mjs";
+import "../controller/yahoo-mock-runner.js";
+
+const TEST_ALLOCATOR = globalThis.SKRODZKaiYahooMockRunner._test.allocateRosterSlots;
 
 const POSITIONS = ["QB", "QB", "RB", "RB", "RB", "RB", "RB", "WR", "WR", "WR", "WR", "WR", "TE", "K", "DEF", "D", "LB", "CB", "S"];
 
@@ -53,15 +56,22 @@ function validPayload() {
   }
   const counts = POSITIONS.reduce((result, position) => ({ ...result, [position]: (result[position] ?? 0) + 1 }), {});
   runnerReceipts.push({ at: iso(20_000), runId: runnerRunId, roomId, seat: draftSlot, urlSeat, kind: "runner_completed", picks: 19, counts });
+  const finalRosterSlots = TEST_ALLOCATOR(picks, rosterSlots).map((entry) => ({
+    slot:entry.slot,
+    yahooId:entry.player?.yahooId ?? null,
+    name:entry.player?.name ?? null,
+    empty:!entry.player,
+  }));
   return {
-    extensionVersion: "0.5.1",
+    extensionVersion: "0.8.0",
     roomId,
     seat: draftSlot,
     urlSeat,
+    operatorAttestation: { status:"none", source:"operator_attested", attestedAt:iso(21_000), interventions:[] },
     status: { runId: runnerRunId, roomId, seat: draftSlot, urlSeat, state: "completed", picks: picks.map((pick) => ({ ...pick })) },
     runnerReceipts,
     controllerReceipts,
-    extensionReceipts: [],
+    extensionReceipts: [{ at:iso(20_500), version:"0.8.0", roomId, seat:draftSlot, urlSeat, runId:runnerRunId, kind:"final_roster_readback", valid:true, finalRosterSlots }],
   };
 }
 
@@ -80,6 +90,26 @@ test("locks when a recorded decision does not reproduce the chosen player", () =
   const result = evaluateTestDraftExport(payload);
   assert.equal(result.status, "LOCKED");
   assert.ok(result.errors.includes("round_1_decision_replay_mismatch"));
+});
+
+test("acceptance replays an applied manual pin against its receipted Yahoo ID", () => {
+  const payload = validPayload();
+  const oldId = payload.status.picks[0].yahooId;
+  const pinnedId = "49999";
+  payload.status.picks[0] = { ...payload.status.picks[0], yahooId:pinnedId, name:"Pinned Player" };
+  const turn = payload.runnerReceipts.find((entry) => entry.kind === "runner_turn_resolved" && entry.turn === "R1P6");
+  turn.decision.chosenYahooId = pinnedId;
+  turn.decision.targetYahooIds[0] = pinnedId;
+  turn.decision.manualOverride = { status:"applied", chosenYahooId:pinnedId };
+  const pick = payload.runnerReceipts.find((entry) => entry.kind === "runner_pick_confirmed" && entry.round === 1);
+  pick.pick = { ...pick.pick, yahooId:pinnedId, name:"Pinned Player" };
+  for (const entry of payload.controllerReceipts.filter((entry) => entry.turn === "R1P6")) entry.yahooId = pinnedId;
+  const rosterEntry = payload.extensionReceipts[0].finalRosterSlots.find((entry) => entry.yahooId === oldId);
+  rosterEntry.yahooId = pinnedId;
+  rosterEntry.name = "Pinned Player";
+  const result = evaluateTestDraftExport(payload);
+  assert.equal(result.status, "PASS", JSON.stringify(result.errors));
+  assert.equal(result.picks[0].decisionReplay, "MATCH");
 });
 
 test("locks when exported status picks disagree with the runner receipts", () => {
@@ -122,4 +152,47 @@ test("locks on any runner failure, HALT, or Autodraft evidence", () => {
   assert.equal(result.status, "LOCKED");
   assert.ok(result.errors.includes("runner_failure_or_halt_observed"));
   assert.ok(result.errors.includes("autodraft_event_observed"));
+});
+
+test("locks when owner intervention prevented Yahoo Autodraft even without a completed auto-selection", () => {
+  const payload = validPayload();
+  payload.operatorAttestation = {
+    status:"intervention",
+    source:"operator_attested",
+    attestedAt:iso(21_000),
+    interventions:[{ kind:"prevented_autodraft", detail:"prevented Yahoo from taking Chase" }],
+  };
+  const result = evaluateTestDraftExport(payload);
+  assert.equal(result.status, "LOCKED");
+  assert.ok(result.errors.includes("owner_intervention_prevented_autodraft"));
+});
+
+test("locks when owner-intervention evidence is missing", () => {
+  const payload = validPayload();
+  delete payload.operatorAttestation;
+  const result = evaluateTestDraftExport(payload);
+  assert.equal(result.status, "LOCKED");
+  assert.ok(result.errors.includes("owner_intervention_evidence_missing"));
+});
+
+test("locks the exact Watts-in-D and Hutchinson-on-bench final occupancy", () => {
+  const payload = validPayload();
+  const receipt = payload.extensionReceipts[0];
+  const dPick = payload.status.picks.find((pick) => pick.position === "D");
+  const sPick = payload.status.picks.find((pick) => pick.position === "S");
+  const dSlot = receipt.finalRosterSlots.find((entry) => entry.slot === "D");
+  const sSlot = receipt.finalRosterSlots.find((entry) => entry.slot === "S");
+  const bench = receipt.finalRosterSlots.find((entry) => entry.slot === "BN");
+  dSlot.yahooId = sPick.yahooId;
+  dSlot.name = sPick.name;
+  sSlot.yahooId = null;
+  sSlot.name = null;
+  sSlot.empty = true;
+  bench.yahooId = dPick.yahooId;
+  bench.name = dPick.name;
+  bench.empty = false;
+  receipt.valid = false;
+  const result = evaluateTestDraftExport(payload);
+  assert.equal(result.status, "LOCKED");
+  assert.ok(result.errors.includes("final_roster_slot_occupancy_failed"));
 });

@@ -1,7 +1,7 @@
 (function installYahooMockExtension(root) {
   "use strict";
 
-  const VERSION = "0.6.1";
+  const VERSION = "0.8.0";
   const GLOBAL_KEY = "__skrodzkaiYahooMockExtensionV1";
   const PREFLIGHT_KEY = "skrodzkai-yahoo-mock-extension-preflight-v1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-extension-receipts-v1";
@@ -79,6 +79,12 @@
     return a.length === b.length && a.every((slot, index) => slot === b[index]);
   }
 
+  function requiredTestFilterLabels(environment = root) {
+    const readLabels = environment.SKRODZKaiYahooMockRunner?._test?.requiredTestFilterLabels;
+    if (typeof readLabels !== "function") throw new Error("runner_filter_contract_missing");
+    return readLabels();
+  }
+
   function parseSequentialTeamCount(bodyText) {
     let best = 0;
     for (const line of String(bodyText ?? "").split("\n")) {
@@ -113,6 +119,8 @@
     if (!body.includes("League Name:\tHORSE COLLAR #2")) errors.push("verified_test_league_missing");
     if (!body.includes("Draft Type:\tLive Standard Draft")) errors.push("verified_test_draft_type_mismatch");
     if (!body.includes("Live Draft Pick Time:\t1 Minute, 15 Seconds")) errors.push("verified_test_clock_mismatch");
+    if (!/Passing Touchdowns\s+4\b/i.test(body)) errors.push("verified_test_passing_td_mismatch");
+    if (!/Receptions(?:\s+Yahoo Default)?\s+1(?:\s|$)/i.test(body)) errors.push("verified_test_ppr_mismatch");
     if (teamCount !== 12) errors.push("test_team_count_not_12");
     if (!sameSlots(rosterSlots, TEST_SETTINGS_ROSTER_SLOTS)) errors.push("test_roster_shape_mismatch");
     return { roomId: TEST_LEAGUE_ID, teamCount, rosterSlots, activeRosterSlots: rosterSlots.slice(0, TEST_ROSTER_SLOTS.length), errors, ready: errors.length === 0 };
@@ -211,8 +219,38 @@
     };
   }
 
+  function parseTestDraftClient(documentRef, locationRef, settingsReceipt = null, now = Date.now()) {
+    const body = String(documentRef?.body?.innerText ?? "");
+    const path = String(locationRef?.pathname ?? "");
+    const pathMatch = path.match(/^\/draftclient\/f1\/(\d+)\/(\d+)\/?$/);
+    const seatMatch = body.match(/YOUR TURN\s*-\s*(\d+)(?:ST|ND|RD|TH)\s+PICK/i);
+    const rosterMatch = body.match(/YOUR TEAM\s*\(\s*(\d+)\s*\/\s*(\d+)\s*\)/i);
+    const seat = seatMatch ? Number(seatMatch[1]) : null;
+    const filled = rosterMatch ? Number(rosterMatch[1]) : null;
+    const total = rosterMatch ? Number(rosterMatch[2]) : null;
+    const missingFilters = requiredTestFilterLabels().filter((label) => !findFilter(documentRef, label));
+    const errors = [];
+    if (!pathMatch || pathMatch[1] !== TEST_LEAGUE_ID || Number(pathMatch[2]) !== TEST_TEAM_ID) errors.push("test_draftclient_identity_mismatch");
+    if (!/HORSE COLLAR #2/i.test(body)) errors.push("verified_test_league_missing");
+    if (!validTestSettingsReceipt(settingsReceipt, now)) errors.push("verified_test_settings_preflight_required");
+    if (!Number.isInteger(seat) || seat < 1 || seat > 12) errors.push("test_draft_slot_missing");
+    if (filled !== 0 || total !== TEST_ROSTER_SLOTS.length) errors.push("test_draft_roster_not_empty");
+    if (missingFilters.length) errors.push(`test_specialist_filters_missing:${missingFilters.join(",")}`);
+    return {
+      roomId: TEST_LEAGUE_ID,
+      urlSeat: TEST_TEAM_ID,
+      seat,
+      teamCount: validTestSettingsReceipt(settingsReceipt, now) ? Number(settingsReceipt.observedTeamCount) : 0,
+      rosterSlots: validTestSettingsReceipt(settingsReceipt, now) ? [...settingsReceipt.observedRosterSlots] : [],
+      missingFilters,
+      errors,
+      ready: errors.length === 0,
+    };
+  }
+
   function validateDraftPreflight(token, room, now = Date.now()) {
     if (!token || !["public_mock_15", "test_league_19_idp"].includes(token.mode)) return "approved_draft_arm_required";
+    if (token.version !== VERSION) return "draft_arm_version_mismatch";
     if (String(room?.roomId ?? token.roomId) === DISABLED_LEAGUE_ID) return "league_420010_hard_disabled";
     if (!Number.isFinite(token.expiresAt) || token.expiresAt <= now) return "draft_arm_expired";
     const expectedUrlSeat = token.mode === "test_league_19_idp" ? Number(token.urlSeat) : Number(token.seat);
@@ -317,18 +355,54 @@
     }
   }
 
-  function buildExportPayload({ roomId, seat, urlSeat = seat, storage, runner }) {
+  function makeOperatorAttestation(input, now = new Date().toISOString()) {
+    const value = String(input ?? "").trim();
+    if (value === "NONE") {
+      return { status:"none", source:"operator_attested", attestedAt:now, interventions:[] };
+    }
+    const intervention = value.match(/^INTERVENTION\s*:\s*(.+)$/i);
+    if (intervention) {
+      return {
+        status:"intervention",
+        source:"operator_attested",
+        attestedAt:now,
+        interventions:[{ kind:"prevented_autodraft", detail:intervention[1].trim() }],
+      };
+    }
+    return { status:"missing", source:"operator_attestation_missing", attestedAt:null, interventions:[] };
+  }
+
+  function statusFromRunnerReceipts(receipts) {
+    const completed = Array.from(receipts ?? []).filter((entry) => entry.kind === "runner_completed").at(-1);
+    if (!completed?.runId) return null;
+    const picks = Array.from(receipts ?? [])
+      .filter((entry) => entry.runId === completed.runId && entry.kind === "runner_pick_confirmed")
+      .sort((left, right) => Number(left.round) - Number(right.round))
+      .map((entry) => entry.pick);
+    return {
+      runId: completed.runId,
+      roomId: completed.roomId,
+      seat: completed.seat,
+      urlSeat: completed.urlSeat,
+      state: "completed",
+      picks,
+    };
+  }
+
+  function buildExportPayload({ roomId, seat, urlSeat = seat, storage, runner, operatorAttestation = null }) {
     const belongsToDraftSeat = (entry) => String(entry.roomId) === String(roomId) && Number(entry.seat) === Number(seat);
     const belongsToUrlSeat = (entry) => String(entry.roomId) === String(roomId) && Number(entry.seat) === Number(urlSeat);
+    const runnerReceipts = readJson(storage, RUNNER_RECEIPT_KEY, []).filter(belongsToDraftSeat);
     return {
       exportedAt: new Date().toISOString(),
       extensionVersion: VERSION,
       roomId: String(roomId),
       seat: Number(seat),
       urlSeat: Number(urlSeat),
-      status: runner?.getStatus?.() ?? null,
+      operatorAttestation: operatorAttestation ?? makeOperatorAttestation(null),
+      status: runner?.getStatus?.() ?? statusFromRunnerReceipts(runnerReceipts),
       extensionReceipts: readJson(storage, RECEIPT_KEY, []).filter(belongsToDraftSeat),
-      runnerReceipts: readJson(storage, RUNNER_RECEIPT_KEY, []).filter(belongsToDraftSeat),
+      runnerReceipts,
       controllerReceipts: readJson(storage, CONTROLLER_RECEIPT_KEY, []).filter(belongsToUrlSeat),
     };
   }
@@ -347,12 +421,16 @@
     if (!room) return;
     rail.controls.export.disabled = false;
     rail.controls.export.onclick = () => {
+      const attestation = makeOperatorAttestation(environment.prompt?.(
+        "Owner attestation required. Type NONE if Yahoo never required a rescue, or INTERVENTION: followed by a brief description if you prevented or replaced an automatic Yahoo selection.",
+      ));
       const payload = buildExportPayload({
         roomId: room.roomId,
         seat: room.seat,
         urlSeat: room.urlSeat ?? room.seat,
         storage: environment.localStorage,
         runner: runner ?? environment[GLOBAL_KEY]?.runner ?? null,
+        operatorAttestation: attestation,
       });
       downloadJson(environment, `skrodzkai-mock-${room.roomId}-seat-${room.seat}.json`, payload);
     };
@@ -474,7 +552,7 @@
         <header class="cap">
           <div class="brand-lockup"><img class="brand-image" src="${root.chrome?.runtime?.getURL?.("extension/assets/skrodzkai-globe-mark.png") ?? ""}" alt="SKRODZKai" /></div>
           <div class="dock-readout"><strong data-dock-primary>SAFE · --:--</strong><span data-compact-status>MOCK · ROOM — · SEAT —</span><span data-dock-target>Waiting for Yahoo availability</span></div>
-          <div class="dock-actions"><button class="expand" type="button">Open Center</button><button class="dock-kill danger" type="button">Kill</button></div>
+          <div class="dock-actions"><button class="expand" type="button">Open Center</button><button class="dock-kill danger" type="button" disabled>Kill</button></div>
         </header>
         <div class="mode-strip"><span class="mode-chip active">MOCK</span><span class="mode-chip">TEST</span><span class="mode-chip blocked">REAL ⛔</span></div>
         <div class="body">
@@ -511,9 +589,16 @@
       board: shadow.querySelector("[data-board]"), between: shadow.querySelector("[data-between]"), warnings: shadow.querySelector("[data-warnings]"), warningCount: shadow.querySelector("[data-warning-count]"), events: shadow.querySelector("[data-events]"), disagreement: shadow.querySelector("[data-disagreement]"),
       stageCount: shadow.querySelector("[data-stage-count]"), pinState: shadow.querySelector("[data-pin-state]"), search: shadow.querySelector("[data-search]"), manualList: shadow.querySelector("[data-manual-list]"), clearPin: shadow.querySelector("[data-clear-pin]"), confirm: shadow.querySelector("[data-confirm]"), compact: shadow.querySelector("[data-compact-status]"), dockPrimary: shadow.querySelector("[data-dock-primary]"), dockTarget: shadow.querySelector("[data-dock-target]"), modeLabel: shadow.querySelector(".mode"), modeChips: [...shadow.querySelectorAll(".mode-chip")],
     };
-    const controls = { arm: shadow.querySelector(".arm"), halt: shadow.querySelector(".halt"), export: shadow.querySelector(".export") };
-    const ui = { mode:"MOCK", kind:"", label:"LOCKED", detail:"Waiting for a verified draft room.", context:{}, roster:[], recommendations:[], board:[], between:{}, warnings:[], staged:[], pinned:null, pinOutcome:null, pinText:"No pin staged. Five verified fallbacks remain active.", pinLabel:"BASELINE", ladderState:"BASELINE READY", latestText:"No confirmed selection yet.", events:[], latestPickId:"", onManualConfirm:null, onManualClear:null, onOpen:null };
+    const controls = { arm: shadow.querySelector(".arm"), halt: shadow.querySelector(".halt"), export: shadow.querySelector(".export"), dock: shadow.querySelector(".dock-kill"), expand: shadow.querySelector(".expand") };
+    const ui = { mode:"MOCK", kind:"", label:"LOCKED", detail:"Waiting for a verified draft room.", context:{}, roster:[], recommendations:[], board:[], between:{}, warnings:[], staged:[], pinned:null, pinOutcome:null, pinText:"No pin staged. Five verified fallbacks remain active.", pinLabel:"BASELINE", ladderState:"BASELINE READY", latestText:"No confirmed selection yet.", events:[], latestPickId:"", onManualConfirm:null, onManualClear:null, onOpen:null, locked:false, observers:[] };
     const redrawManual = () => {
+      if (ui.locked) {
+        data.manualList.innerHTML = `<div class="event">Hard-refresh Yahoo to restore extension controls.</div>`;
+        data.confirm.disabled = true;
+        data.clearPin.disabled = true;
+        data.search.disabled = true;
+        return;
+      }
       const query = String(data.search.value ?? "").trim().toUpperCase();
       const matches = ui.board.filter((player) => `${player.name} ${player.position} ${player.team} ${player.yahooId}`.toUpperCase().includes(query)).slice(0, 10);
       data.manualList.innerHTML = matches.map((player) => `<div class="manual-row"><button type="button" data-stage-id="${player.yahooId}">${player.name} <small>${player.position} · ${player.team} · Y!${player.yahooId}</small></button></div>`).join("") || `<div class="event">No verified Yahoo IDs match.</div>`;
@@ -544,8 +629,8 @@
       if (result !== false) { ui.staged = []; redrawManual(); }
     });
     data.clearPin.addEventListener("click", () => { if (typeof ui.onManualClear === "function" && ui.onManualClear() !== false) { ui.pinned = null; ui.pinOutcome = { status:"cleared", expectedRound:null, reason:"deterministic baseline active" }; redrawManual(); } });
-    shadow.querySelector(".expand").addEventListener("click", () => ui.onOpen?.());
-    shadow.querySelector(".dock-kill").addEventListener("click", () => controls.halt.click());
+    controls.expand.addEventListener("click", () => ui.onOpen?.());
+    controls.dock.addEventListener("click", () => controls.halt.click());
     const setStatus = (key, value, kind = "") => { if (!data.status[key]) return; data.status[key].textContent = value; data.status[key].className = `value ${kind}`.trim(); };
     const api = {
       controls,
@@ -578,14 +663,32 @@
       setWarnings(warnings = []) { const list = Array.isArray(warnings) ? warnings.filter(Boolean) : []; ui.warnings=list; data.warningCount.textContent = String(list.length); data.warnings.innerHTML = list.length ? list.map((warning) => `<div class="warning ${warning.severity === "danger" ? "danger" : ""}">⚠ ${warning.text ?? warning}</div>`).join("") : `<div class="warning">No active warnings.</div>`; },
       addEvent(kind, detailText = "") { ui.events.unshift({ at:new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" }), kind, detail:detailText }); ui.events = ui.events.slice(0, 18); data.events.innerHTML = ui.events.map((event) => `<div class="event">${event.at} <b>${event.kind}</b>${event.detail ? ` · ${event.detail}` : ""}</div>`).join(""); },
       setBoard(board = []) { ui.board = Array.isArray(board) ? board : []; redrawManual(); },
-      setManualHandler(confirmHandler, clearHandler = null) { ui.onManualConfirm = confirmHandler; ui.onManualClear = clearHandler; },
+      setManualHandler(confirmHandler, clearHandler = null) { if (ui.locked) return; ui.onManualConfirm = confirmHandler; ui.onManualClear = clearHandler; },
       setPinned(stage = null) { ui.pinned = stage; if (stage) ui.pinOutcome = null; redrawManual(); },
       setPinOutcome(outcome = null) { ui.pinned = null; ui.pinOutcome = outcome; redrawManual(); },
       getManualStage() { return ui.staged.slice(); },
+      isLocked() { return ui.locked; },
+      trackObserver(observer) { if (observer?.disconnect) ui.observers.push(observer); },
+      lock(reason = "Extension was reloaded. Hard-refresh this Yahoo tab before arming.", label = "EXTENSION RELOAD REQUIRED") {
+        ui.locked = true;
+        for (const observer of ui.observers) observer.disconnect();
+        ui.observers = [];
+        for (const control of Object.values(controls)) control.disabled = true;
+        data.confirm.disabled = true;
+        data.clearPin.disabled = true;
+        data.search.disabled = true;
+        ui.onManualConfirm = null;
+        ui.onManualClear = null;
+        ui.onOpen = null;
+        redrawManual();
+        api.setWarnings([{ severity:"danger", text:reason }]);
+        api.render("bad", label, reason);
+      },
       command(name, payload = null) {
-        if (name === "arm") { controls.arm.click(); return true; }
-        if (name === "kill") { controls.halt.click(); return true; }
-        if (name === "export") { controls.export.click(); return true; }
+        if (ui.locked) return false;
+        if (name === "arm") { if (controls.arm.disabled) return false; controls.arm.click(); return true; }
+        if (name === "kill") { if (controls.halt.disabled) return false; controls.halt.click(); return true; }
+        if (name === "export") { if (controls.export.disabled) return false; controls.export.click(); return true; }
         if (name === "clear_pin" && typeof ui.onManualClear === "function") {
           const cleared = ui.onManualClear();
           if (cleared !== false) { ui.pinned = null; ui.pinOutcome = { status:"cleared", expectedRound:null, reason:"deterministic baseline active" }; redrawManual(); }
@@ -603,17 +706,92 @@
 
   function commandCenterRole(pathname = "") {
     if (/^\/draftclient\/f1\/\d+\/\d+\/?$/.test(pathname)) return "runner";
-    if (pathname === "/f1/mock_waiting" || pathname === `/f1/${TEST_LEAGUE_ID}/draft`) return "arm-owner";
+    if (pathname === "/f1/mock_waiting" || pathname === `/f1/${TEST_LEAGUE_ID}/draft` || pathname === `/f1/${TEST_LEAGUE_ID}/${TEST_TEAM_ID}`) return "arm-owner";
     return "observer";
+  }
+
+  function extensionContextFailureMessage() {
+    return "Extension was reloaded or its version changed. Hard-refresh this Yahoo tab before arming.";
+  }
+
+  function lockExtensionContext(environment, rail, error = null) {
+    const active = environment[GLOBAL_KEY];
+    if (active?.statusTimer != null) environment.clearInterval(active.statusTimer);
+    if (active) active.statusTimer = null;
+    try { active?.runner?.halt?.("extension_context_invalidated"); } catch { /* Visible lock remains authoritative. */ }
+    const detail = extensionContextFailureMessage();
+    rail.lock?.(detail);
+    try {
+      writeReceipt(environment.localStorage, {
+        kind:"extension_context_invalidated",
+        roomId:active?.room?.roomId ?? null,
+        seat:active?.token?.seat ?? null,
+        failure:error ? String(error?.message ?? error) : "extension_bridge_unavailable",
+      });
+    } catch { /* Visible lock remains authoritative when receipt storage is unavailable. */ }
+    return detail;
+  }
+
+  async function requireCurrentExtensionVersion(environment) {
+    const runtime = environment.chrome?.runtime ?? root.chrome?.runtime;
+    if (!runtime?.sendMessage) throw new Error("extension_bridge_unavailable_hard_refresh_required");
+    let response;
+    try {
+      response = await runtime.sendMessage({ type:"version_handshake", version:VERSION });
+    } catch {
+      throw new Error("extension_context_invalidated_hard_refresh_required");
+    }
+    if (response?.ok !== true || String(response.version ?? "") !== VERSION) {
+      throw new Error(`extension_version_mismatch:content_${VERSION}:background_${String(response?.version ?? "missing")}`);
+    }
+    return VERSION;
+  }
+
+  async function verifyCurrentExtensionVersion(environment, rail) {
+    try {
+      await requireCurrentExtensionVersion(environment);
+      return true;
+    } catch (error) {
+      lockExtensionContext(environment, rail, error);
+      return false;
+    }
   }
 
   function attachCommandCenterBridge(environment, rail) {
     const runtime = environment.chrome?.runtime ?? root.chrome?.runtime;
-    if (!runtime?.sendMessage || !runtime?.onMessage || typeof rail?.getSnapshot !== "function") return null;
+    if (!runtime?.sendMessage || !runtime?.onMessage || typeof rail?.getSnapshot !== "function") {
+      lockExtensionContext(environment, rail);
+      return null;
+    }
     const role = commandCenterRole(environment.location?.pathname);
     let boardHash = "";
     let snapshotHash = "";
+    let timer = null;
+    let stopped = false;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      if (timer != null) environment.clearInterval(timer);
+      timer = null;
+      try { runtime.onMessage.removeListener(onMessage); } catch { /* Context may already be invalid. */ }
+    };
+    const invalidate = (error) => {
+      stop();
+      lockExtensionContext(environment, rail, error);
+    };
+    const send = (message) => {
+      if (stopped) return null;
+      try {
+        const pending = runtime.sendMessage(message);
+        void Promise.resolve(pending).catch(invalidate);
+        return pending;
+      } catch (error) {
+        invalidate(error);
+        return null;
+      }
+    };
     const publish = () => {
+      if (stopped) return;
       const full = rail.getSnapshot();
       const board = Array.isArray(full.board) ? full.board : [];
       const nextBoardHash = JSON.stringify(board);
@@ -624,9 +802,9 @@
       const snapshotChanged = nextSnapshotHash !== snapshotHash;
       if (boardChanged) boardHash = nextBoardHash;
       if (snapshotChanged) snapshotHash = nextSnapshotHash;
-      void runtime.sendMessage({ type:"state", role, at:Date.now(), snapshot:snapshotChanged ? snapshot : undefined, board:role === "runner" && boardChanged ? board : undefined });
+      send({ type:"state", role, at:Date.now(), snapshot:snapshotChanged ? snapshot : undefined, board:role === "runner" && boardChanged ? board : undefined });
     };
-    rail.setOpenHandler(() => void runtime.sendMessage({ type:"open_command_center" }));
+    rail.setOpenHandler(() => send({ type:"open_command_center" }));
     const onMessage = (message, _sender, sendResponse) => {
       if (message?.type !== "command") return;
       const ok = rail.command(message.command, message.payload);
@@ -635,8 +813,8 @@
     };
     runtime.onMessage.addListener(onMessage);
     publish();
-    const timer = environment.setInterval(publish, 250);
-    return { publish, stop() { environment.clearInterval(timer); runtime.onMessage.removeListener(onMessage); } };
+    if (!stopped) timer = environment.setInterval(publish, 250);
+    return { publish, stop };
   }
 
   async function waitForEmptyDraft(documentRef, controllerApi, environment, expectedRosterTotal = 15, executionMode = "MOCK", deadlineMs = 15000) {
@@ -644,32 +822,46 @@
     while (Date.now() - startedAt < deadlineMs) {
       const roster = controllerApi.runtime.parseRosterCount(documentRef.body?.innerText);
       const labels = executionMode === "TEST"
-        ? ["All Positions", "Team Defenses", "Kickers", "Defensive Players", "Linebackers", "Defensive Backs"]
+        ? requiredTestFilterLabels(environment)
         : ["All Positions", "Team Defenses", "Kickers"];
       const filtersReady = labels
         .every((label) => findFilter(documentRef, label));
       if (roster?.filled === 0 && roster?.total === expectedRosterTotal && filtersReady) return roster;
       await new Promise((resolve) => environment.setTimeout(resolve, 50));
     }
-    throw new Error("empty_public_mock_draft_not_ready");
-  }
-
-  function fitsRosterSlot(position, slot) {
-    if (slot === position) return true;
-    if (slot === "W/R") return ["WR", "RB"].includes(position);
-    if (slot === "W/R/T") return ["WR", "RB", "TE"].includes(position);
-    return slot === "BN";
+    throw new Error(executionMode === "TEST" ? "empty_test_draft_not_ready" : "empty_public_mock_draft_not_ready");
   }
 
   function buildUiRoster(picks = [], rosterSlots = PUBLIC_ROSTER_SLOTS) {
-    const roster = Array.from(rosterSlots, (slot) => ({ slot, player: null }));
-    for (const pick of Array.from(picks)) {
-      const position = normalize(pick.position);
-      let index = roster.findIndex((entry) => !entry.player && entry.slot !== "BN" && fitsRosterSlot(position, entry.slot));
-      if (index < 0) index = roster.findIndex((entry) => !entry.player && entry.slot === "BN");
-      if (index >= 0) roster[index].player = pick;
+    const allocate = root.SKRODZKaiYahooMockRunner?._test?.allocateRosterSlots;
+    if (typeof allocate !== "function") throw new Error("runner_roster_allocator_missing");
+    return allocate(picks, rosterSlots);
+  }
+
+  function parseFinalRosterDocument(documentRef, picks = []) {
+    const byId = new Map(Array.from(picks, (pick) => [String(pick.yahooId), pick]));
+    const rows = [];
+    for (const row of documentRef.querySelectorAll("tr.editable")) {
+      const cells = [...row.querySelectorAll("td")];
+      const slot = normalize(cells[0]?.innerText);
+      if (![...TEST_ROSTER_SLOTS, "BN"].includes(slot)) continue;
+      const empty = row.classList?.contains?.("empty-position") || /\(EMPTY\)/i.test(String(cells[1]?.innerText ?? ""));
+      if (empty) {
+        rows.push({ slot, yahooId:null, name:null, empty:true });
+        continue;
+      }
+      const link = row.querySelector('a[href*="/nfl/players/"], a[href*="/nfl/teams/"]');
+      const href = String(link?.getAttribute?.("href") ?? "");
+      const linkedId = href.match(/\/nfl\/players\/(\d+)/)?.[1] ?? "";
+      const linkedName = String(link?.textContent ?? link?.innerText ?? "").trim();
+      const matches = linkedId
+        ? [byId.get(linkedId)].filter(Boolean)
+        : Array.from(picks).filter((pick) => normalize(pick.name) === normalize(linkedName));
+      if (matches.length !== 1) throw new Error(`final_roster_player_unmatched:${slot}:${linkedName || linkedId || "missing"}`);
+      rows.push({ slot, yahooId:String(matches[0].yahooId), name:String(matches[0].name), empty:false });
     }
-    return roster;
+    if (!rows.length) throw new Error("final_roster_rows_missing");
+    return rows;
   }
 
   function buildUiRecommendations(board = [], decision = null) {
@@ -730,6 +922,7 @@
 
   function bootWaitingRoom(environment, rail) {
     const update = () => {
+      if (rail.isLocked()) return false;
       const snapshot = parseWaitingRoom(environment.document, environment.location);
       const armed = readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
       const active = armed && !validateDraftPreflight(armed, { roomId: snapshot.roomId, seat: snapshot.seat });
@@ -746,7 +939,8 @@
       rail.controls.arm.textContent = active ? "DISARM" : "ARM MOCK";
       return true;
     };
-    rail.controls.arm.addEventListener("click", () => {
+    rail.controls.arm.addEventListener("click", async () => {
+      if (!await verifyCurrentExtensionVersion(environment, rail)) return;
       const snapshot = parseWaitingRoom(environment.document, environment.location);
       if (!snapshot.ready) {
         update();
@@ -769,6 +963,7 @@
       const observer = new environment.MutationObserver(() => {
         if (update()) observer.disconnect();
       });
+      rail.trackObserver(observer);
       observer.observe(environment.document.body, { childList: true, subtree: true, characterData: true });
     }
   }
@@ -779,7 +974,8 @@
     rail.setBetweenTurns(buildUiOpponentWindow(null, "TEST"));
     rail.setRoster(TEST_ROSTER_SLOTS.map((slot) => ({ slot })));
     const update = () => {
-      const settingsReceipt = readJson(environment.sessionStorage, TEST_SETTINGS_KEY, null);
+      if (rail.isLocked()) return false;
+      const settingsReceipt = readJson(environment.localStorage, TEST_SETTINGS_KEY, null);
       const snapshot = parseTestDraftHome(environment.document, environment.location, settingsReceipt);
       const armed = readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
       const active = armed?.mode === "test_league_19_idp" && !validateDraftPreflight(armed, { roomId: TEST_LEAGUE_ID, seat: TEST_TEAM_ID });
@@ -799,8 +995,9 @@
       rail.controls.arm.textContent = active ? "DISARM" : "ARM TEST";
       return true;
     };
-    rail.controls.arm.addEventListener("click", () => {
-      const settingsReceipt = readJson(environment.sessionStorage, TEST_SETTINGS_KEY, null);
+    rail.controls.arm.addEventListener("click", async () => {
+      if (!await verifyCurrentExtensionVersion(environment, rail)) return;
+      const settingsReceipt = readJson(environment.localStorage, TEST_SETTINGS_KEY, null);
       const snapshot = parseTestDraftHome(environment.document, environment.location, settingsReceipt);
       if (!snapshot.ready) return update();
       const active = readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
@@ -818,6 +1015,7 @@
     });
     if (!update() && environment.MutationObserver) {
       const observer = new environment.MutationObserver(() => { if (update()) observer.disconnect(); });
+      rail.trackObserver(observer);
       observer.observe(environment.document.body, { childList: true, subtree: true, characterData: true });
     }
   }
@@ -827,15 +1025,16 @@
     rail.setBetweenTurns(buildUiOpponentWindow(null, "TEST"));
     rail.setRoster(TEST_ROSTER_SLOTS.map((slot) => ({ slot })));
     const update = () => {
+      if (rail.isLocked()) return false;
       const snapshot = parseTestSettings(environment.document, environment.location);
       if (!snapshot.ready) {
-        environment.sessionStorage.removeItem(TEST_SETTINGS_KEY);
+        environment.localStorage.removeItem(TEST_SETTINGS_KEY);
         rail.setWarnings(snapshot.errors.map((text) => ({ severity: "danger", text })));
         rail.render("bad", "TEST SETTINGS LOCKED", snapshot.errors.join(" · "));
         return false;
       }
       const receipt = makeTestSettingsReceipt(snapshot);
-      environment.sessionStorage.setItem(TEST_SETTINGS_KEY, JSON.stringify(receipt));
+      environment.localStorage.setItem(TEST_SETTINGS_KEY, JSON.stringify(receipt));
       rail.setContext({ roomId: TEST_LEAGUE_ID, league: "HORSE COLLAR #2", armed: false, autodraft: false, kill: false });
       rail.setWarnings([]);
       rail.render("ok", "TEST SETTINGS VERIFIED", "12 teams · 19 active roster slots · 3 IR · 75-second clock");
@@ -844,7 +1043,74 @@
     };
     if (!update() && environment.MutationObserver) {
       const observer = new environment.MutationObserver(() => { if (update()) observer.disconnect(); });
+      rail.trackObserver(observer);
       observer.observe(environment.document.body, { childList: true, subtree: true, characterData: true });
+    }
+  }
+
+  function completedTestRun(storage) {
+    const receipts = readJson(storage, RUNNER_RECEIPT_KEY, [])
+      .filter((entry) => String(entry.roomId) === TEST_LEAGUE_ID);
+    const completed = receipts.filter((entry) => entry.kind === "runner_completed").at(-1);
+    if (!completed?.runId) return null;
+    const picks = receipts
+      .filter((entry) => entry.runId === completed.runId && entry.kind === "runner_pick_confirmed")
+      .sort((left, right) => Number(left.round) - Number(right.round))
+      .map((entry) => entry.pick);
+    if (picks.length !== TEST_ROSTER_SLOTS.length) return null;
+    return { completed, picks };
+  }
+
+  function bootTestTeamRoster(environment, rail) {
+    rail.setMode("TEST");
+    rail.setExpanded(true);
+    const run = completedTestRun(environment.localStorage);
+    if (!run) {
+      rail.lock("A completed 19-pick TEST runner receipt is required before final roster readback.", "FINAL ROSTER LOCKED");
+      return;
+    }
+    const update = () => {
+      if (rail.isLocked()) return false;
+      let finalRosterSlots;
+      try {
+        finalRosterSlots = parseFinalRosterDocument(environment.document, run.picks);
+      } catch (error) {
+        if (String(error?.message ?? error) !== "final_roster_rows_missing") throw error;
+        rail.render("", "WAITING FOR FINAL ROSTER", "Yahoo has not rendered the roster rows yet.");
+        return false;
+      }
+      const validate = environment.SKRODZKaiYahooMockRunner?._test?.validateObservedTestRoster;
+      if (typeof validate !== "function") throw new Error("runner_final_roster_validator_missing");
+      const valid = validate(finalRosterSlots, run.picks);
+      const previous = readJson(environment.localStorage, RECEIPT_KEY, [])
+        .filter((entry) => entry.kind === "final_roster_readback" && entry.runId === run.completed.runId);
+      if (previous.length > 1 || previous.length === 1 && JSON.stringify(previous[0].finalRosterSlots) !== JSON.stringify(finalRosterSlots)) {
+        rail.lock("Yahoo's roster changed after the first final-roster receipt. Preserve both states and do not grade this run.", "FINAL ROSTER LOCKED");
+        return false;
+      }
+      if (!previous.length) {
+        writeReceipt(environment.localStorage, {
+          kind:"final_roster_readback",
+          roomId:TEST_LEAGUE_ID,
+          seat:Number(run.completed.seat),
+          urlSeat:TEST_TEAM_ID,
+          runId:run.completed.runId,
+          valid,
+          finalRosterSlots,
+        });
+      }
+      const pickById = new Map(run.picks.map((pick) => [String(pick.yahooId), pick]));
+      rail.setRoster(finalRosterSlots.map((entry) => ({ slot:entry.slot, player:entry.empty ? null : pickById.get(entry.yahooId) ?? null })));
+      rail.setContext({ roomId:TEST_LEAGUE_ID, seat:Number(run.completed.seat), league:"HORSE COLLAR #2", armed:false, autodraft:false, kill:false });
+      rail.setWarnings(valid ? [] : [{ severity:"danger", text:"Yahoo final slot occupancy does not satisfy the TEST roster contract." }]);
+      rail.render(valid ? "complete" : "bad", valid ? "FINAL ROSTER VERIFIED" : "FINAL ROSTER LOCKED", valid ? "Observed Yahoo starter and bench slots match all 19 confirmed picks." : "Dedicated D/LB/CB/S occupancy or bench placement failed validation.");
+      enableExport(environment, rail, { roomId:TEST_LEAGUE_ID, seat:Number(run.completed.seat), urlSeat:TEST_TEAM_ID });
+      return true;
+    };
+    if (!update() && environment.MutationObserver && !rail.isLocked()) {
+      const observer = new environment.MutationObserver(() => { if (update()) observer.disconnect(); });
+      rail.trackObserver(observer);
+      observer.observe(environment.document.body, { childList:true, subtree:true, characterData:true });
     }
   }
 
@@ -855,7 +1121,57 @@
     if (!controllerApi || !runnerApi || !boardData) throw new Error("extension_dependencies_missing");
     const room = controllerApi.runtime.parseRoom(environment.location.pathname);
     if (!room) throw new Error("draft_room_missing");
-    const armRecord = readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
+    let armRecord = readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
+    if (!armRecord && room.roomId === TEST_LEAGUE_ID && Number(room.seat) === TEST_TEAM_ID) {
+      rail.setMode("TEST");
+      rail.setExpanded(true);
+      rail.setRoster(TEST_ROSTER_SLOTS.map((slot) => ({ slot })));
+      rail.setBetweenTurns(buildUiOpponentWindow(null, "TEST"));
+      const update = () => {
+        if (rail.isLocked()) return false;
+        const settingsReceipt = readJson(environment.localStorage, TEST_SETTINGS_KEY, null);
+        const snapshot = parseTestDraftClient(environment.document, environment.location, settingsReceipt);
+        const autodraft = controllerApi.runtime.isAutodraftActive(environment.document);
+        rail.setContext({ roomId: TEST_LEAGUE_ID, seat: snapshot.seat, league: "HORSE COLLAR #2", armed: false, autodraft, kill: false });
+        rail.setWarnings([
+          ...snapshot.errors.map((text) => ({ severity: "danger", text })),
+          ...(autodraft ? [{ severity: "danger", text: "Autodraft is active: execution is fail-closed." }] : []),
+        ]);
+        rail.controls.arm.textContent = "ARM TEST";
+        if (!snapshot.ready || autodraft) {
+          rail.render("bad", "TEST PREFLIGHT LOCKED", [...snapshot.errors, ...(autodraft ? ["autodraft_active"] : [])].join(" · "));
+          rail.controls.arm.disabled = true;
+          return false;
+        }
+        rail.render("ok", "READY TO ARM TEST", `League ${TEST_LEAGUE_ID} · draft slot ${snapshot.seat} · 12 teams · 19 rounds`);
+        rail.controls.arm.disabled = false;
+        return true;
+      };
+      rail.controls.arm.addEventListener("click", async () => {
+        if (!await verifyCurrentExtensionVersion(environment, rail)) return;
+        const fresh = parseTestDraftClient(environment.document, environment.location, readJson(environment.localStorage, TEST_SETTINGS_KEY, null));
+        const currentAutodraft = controllerApi.runtime.isAutodraftActive(environment.document);
+        if (!fresh.ready || currentAutodraft) {
+          rail.setWarnings([
+            ...fresh.errors.map((text) => ({ severity: "danger", text })),
+            ...(currentAutodraft ? [{ severity: "danger", text: "Autodraft is active: execution is fail-closed." }] : []),
+          ]);
+          rail.render("bad", "TEST PREFLIGHT LOCKED", [...fresh.errors, ...(currentAutodraft ? ["autodraft_active"] : [])].join(" · "));
+          return;
+        }
+        armRecord = makeTestPreflight(fresh);
+        environment.sessionStorage.setItem(PREFLIGHT_KEY, JSON.stringify(armRecord));
+        writeReceipt(environment.localStorage, { kind: "test_armed_from_draftclient", roomId: TEST_LEAGUE_ID, seat: fresh.seat, urlSeat: TEST_TEAM_ID, expiresAt: armRecord.expiresAt });
+        rail.addEvent("test armed", `league ${TEST_LEAGUE_ID} · draft slot ${fresh.seat}`);
+        environment.location.reload();
+      });
+      if (!update() && environment.MutationObserver) {
+        const observer = new environment.MutationObserver(() => { if (update()) observer.disconnect(); });
+        rail.trackObserver(observer);
+        observer.observe(environment.document.body, { childList: true, subtree: true, characterData: true });
+      }
+      return;
+    }
     const executionMode = armRecord?.mode === "test_league_19_idp" ? "TEST" : "MOCK";
     const mode = modeAllowlist({ mode: executionMode, leagueId: room.roomId });
     const draftSeat = executionMode === "TEST" ? Number(armRecord?.seat) : room.seat;
@@ -911,7 +1227,7 @@
       },
       onAlert: ({ state, failure, reason }) => rail.render("bad", state, failure?.code ?? reason ?? "runner stopped"),
     }, environment);
-    environment[GLOBAL_KEY] = { runner, room, token: armRecord };
+    environment[GLOBAL_KEY] = { runner, room, token: armRecord, statusTimer:null };
     rail.setManualHandler((targets) => {
       try {
         const status = runner.getStatus();
@@ -942,6 +1258,8 @@
     const existingPin = readJson(environment.sessionStorage, MANUAL_STAGE_KEY, null);
     if (existingPin?.roomId === room.roomId && Number(existingPin.seat) === draftSeat) rail.setPinned(existingPin);
     rail.controls.halt.disabled = false;
+    rail.controls.dock.disabled = false;
+    rail.controls.dock.textContent = "KILL";
     enableExport(environment, rail, receiptRoom, runner);
     rail.controls.halt.addEventListener("click", () => {
       runner.halt("operator_kill_switch");
@@ -950,7 +1268,9 @@
       rail.setContext({ roomId: room.roomId, seat: draftSeat, league: leagueLabel, armed: false, autodraft: controllerApi.runtime.isAutodraftActive(environment.document), kill: true });
       rail.render("bad", "HALTED", "One-way kill switch engaged. Re-arm from a new waiting room.");
       rail.controls.halt.disabled = true;
+      rail.controls.dock.disabled = true;
     });
+    if (!await verifyCurrentExtensionVersion(environment, rail)) return;
     runner.start();
     if (runner.getStatus().state !== "running") {
       rail.controls.halt.disabled = true;
@@ -985,8 +1305,10 @@
         environment.sessionStorage.removeItem(MANUAL_STAGE_KEY);
         rail.setPinned(null);
         rail.controls.halt.disabled = true;
+        rail.controls.dock.disabled = true;
       }
     }, 100);
+    environment[GLOBAL_KEY].statusTimer = statusTimer;
   }
 
   async function boot(environment = root) {
@@ -994,12 +1316,15 @@
     const rail = createRail(environment.document);
     attachCommandCenterBridge(environment, rail);
     try {
+      if (!await verifyCurrentExtensionVersion(environment, rail)) return rail;
       if (environment.location.pathname === "/f1/mock_waiting") {
         bootWaitingRoom(environment, rail);
       } else if (environment.location.pathname === `/f1/${TEST_LEAGUE_ID}/settings`) {
         bootTestSettings(environment, rail);
       } else if (environment.location.pathname === `/f1/${TEST_LEAGUE_ID}/draft`) {
         bootTestDraftHome(environment, rail);
+      } else if (environment.location.pathname === `/f1/${TEST_LEAGUE_ID}/${TEST_TEAM_ID}`) {
+        bootTestTeamRoster(environment, rail);
       } else if (/^\/draftclient\/f1\/\d+\/\d+\/?$/.test(environment.location.pathname)) {
         await bootDraft(environment, rail);
       }
@@ -1036,12 +1361,18 @@
       makeTestSettingsReceipt,
       validTestSettingsReceipt,
       parseTestDraftHome,
+      parseTestDraftClient,
+      requiredTestFilterLabels,
+      parseFinalRosterDocument,
       makeTestPreflight,
       validateDraftPreflight,
       modeAllowlist,
       validateExactYahooTargets,
       stageManualTargets,
       mergeDefenseBoard,
+      makeOperatorAttestation,
+      statusFromRunnerReceipts,
+      requireCurrentExtensionVersion,
       buildExportPayload,
       buildUiRoster,
       buildUiRecommendations,

@@ -3,6 +3,10 @@
 
   const HEARTBEAT_TTL_MS = 3000;
 
+  function extensionVersion(chromeApi) {
+    return String(chromeApi.runtime.getManifest().version);
+  }
+
   function createStateRouter(session, clock = () => Date.now()) {
     const fresh = (seenAt) => Number.isFinite(Number(seenAt)) && clock() - Number(seenAt) >= 0 && clock() - Number(seenAt) <= HEARTBEAT_TTL_MS;
 
@@ -48,7 +52,7 @@
       const stored = await session.get(["skz.runnerTabId", "skz.runnerSeenAt", "skz.armTabId", "skz.armSeenAt"]);
       const runner = fresh(stored["skz.runnerSeenAt"]) && Number.isInteger(Number(stored["skz.runnerTabId"])) ? Number(stored["skz.runnerTabId"]) : null;
       const armOwner = fresh(stored["skz.armSeenAt"]) && Number.isInteger(Number(stored["skz.armTabId"])) ? Number(stored["skz.armTabId"]) : null;
-      if (command === "arm") return armOwner;
+      if (command === "arm") return armOwner ?? runner;
       if (command === "export") return runner ?? armOwner;
       return runner;
     }
@@ -98,6 +102,10 @@
     });
     chromeApi.tabs.onRemoved.addListener((tabId) => { void enqueue(() => router.removeTab(tabId)); });
     chromeApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (message?.type === "version_handshake") {
+        sendResponse({ ok:true, version:extensionVersion(chromeApi) });
+        return false;
+      }
       if (message?.type === "state") {
         void enqueue(() => router.handleState(message, sender)).then((ok) => sendResponse({ ok })).catch((error) => sendResponse({ ok:false, error:String(error?.message ?? error) }));
         return true;
@@ -115,6 +123,6 @@
     });
   }
 
-  root.SKRODZKaiCommandCenterBackground = { HEARTBEAT_TTL_MS, createStateRouter };
+  root.SKRODZKaiCommandCenterBackground = { HEARTBEAT_TTL_MS, createStateRouter, extensionVersion };
   if (root.chrome) register(root.chrome);
 })(globalThis);
