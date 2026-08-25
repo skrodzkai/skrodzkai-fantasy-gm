@@ -12,6 +12,7 @@ test("rehearses the real league shape in every snake seat without enabling execu
   assert.equal(report.simulations, 60);
   assert.equal(report.validRosters, 60);
   assert.equal(report.accepted, true);
+  assert.equal(Object.values(report.acceptanceGates).every(Boolean), true, JSON.stringify({ acceptanceGates: report.acceptanceGates, latency: report.latency }));
   assert.equal(report.rehearsals.validReference, true);
   assert.equal(report.latency.recomputeP95Ms < 100, true);
   assert.equal(Number.isInteger(report.latency.fallbackCount), true);

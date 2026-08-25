@@ -141,6 +141,123 @@ test("joint roster utility allocates flex and IDP eligibility instead of compari
   assert.equal(helpers.maximumFilledStarterSlots(picks, config), 3);
 });
 
+test("weekly utility gives bench and QB2 picks real bye-week value after starters are filled", () => {
+  const config = {
+    ...testConfig,
+    rounds: 4,
+    rosterSlots: ["QB", "RB", "BN", "BN"],
+    positionLimits: { QB: 2, RB: 3 },
+  };
+  const weekly = (points, byeIndex = null) => Array.from({ length: 17 }, (_, index) => index === byeIndex ? 0 : points);
+  const picks = helpers.validateBoard([
+    player("QB", 1, 1, { projection: 480, weeklyPoints: weekly(30, 4), weeklyAvailability: weekly(1, 4) }),
+    player("RB", 1, 2, { projection: 400, weeklyPoints: weekly(25, 5), weeklyAvailability: weekly(1, 5) }),
+  ]);
+  const pool = helpers.validateBoard([
+    player("QB", 2, 3, { projection: 384, weeklyPoints: weekly(24), weeklyAvailability: weekly(1) }),
+    player("RB", 2, 4, { projection: 368, weeklyPoints: weekly(23), weeklyAvailability: weekly(1) }),
+  ]);
+  const result = helpers.scoreCandidates({ round: 3, seat: 6, picks, pool, config, replacementBySlot });
+  assert.equal(result.utilityModel, "WEEKLY_OPTIMAL_LINEUP_W1_17");
+  assert.ok(result.ranked.find((entry) => entry.player.position === "QB").marginalUtility > 0);
+  assert.ok(result.ranked.find((entry) => entry.player.position === "RB").marginalUtility > 0);
+});
+
+test("a confirmed target preserves its weekly profile for the following round", () => {
+  const weekly = (points, byeIndex = null) => Array.from({ length: 17 }, (_, index) => index === byeIndex ? 0 : points);
+  const board = helpers.validateBoard([
+    player("QB", 1, 1, { weeklyPoints: weekly(30, 4), weeklyAvailability: weekly(1, 4) }),
+    player("RB", 1, 2, { weeklyPoints: weekly(25, 5), weeklyAvailability: weekly(1, 5) }),
+    player("WR", 1, 3, { weeklyPoints: weekly(24, 6), weeklyAvailability: weekly(1, 6) }),
+    player("TE", 1, 4, { weeklyPoints: weekly(20, 7), weeklyAvailability: weekly(1, 7) }),
+    player("RB", 2, 5, { weeklyPoints: weekly(22, 8), weeklyAvailability: weekly(1, 8) }),
+    player("WR", 2, 6, { weeklyPoints: weekly(21, 9), weeklyAvailability: weekly(1, 9) }),
+  ]);
+  const first = helpers.buildDecisionLadder({
+    round: 1, seat: 6, picks: [], board, availablePlayers: board, minimum: 5,
+    config: mockConfig, replacementBySlot,
+  });
+  assert.equal(first.targets[0].weeklyPoints.length, 17);
+  const second = helpers.buildDecisionLadder({
+    round: 2,
+    seat: 6,
+    picks: [first.targets[0]],
+    board,
+    availablePlayers: board.filter((candidate) => candidate.yahooId !== first.targets[0].yahooId),
+    minimum: 5,
+    config: mockConfig,
+    replacementBySlot,
+  });
+  assert.equal(second.decision.utilityModel, "WEEKLY_OPTIMAL_LINEUP_W1_17");
+});
+
+test("grouped weekly scoring matches the ungrouped exact lineup reference", () => {
+  const weekly = (points, byeIndex = null) => Array.from({ length: 17 }, (_, index) => index === byeIndex ? 0 : points);
+  const config = {
+    ...testConfig,
+    rounds: 5,
+    rosterSlots: ["QB", "RB", "W/R/T", "BN", "BN"],
+    positionLimits: { QB: 6, RB: 6, WR: 6, TE: 6 },
+  };
+  const picks = helpers.validateBoard([
+    player("RB", 1, 1, { weeklyPoints: weekly(25, 4), weeklyAvailability: weekly(1, 4) }),
+  ]);
+  const pool = helpers.validateBoard([
+    player("QB", 1, 2, { weeklyPoints: weekly(28, 5), weeklyAvailability: weekly(1, 5) }),
+    player("QB", 2, 3, { weeklyPoints: weekly(23, 4), weeklyAvailability: weekly(1, 4) }),
+    player("RB", 2, 4, { weeklyPoints: weekly(22, 6), weeklyAvailability: weekly(1, 6) }),
+    player("WR", 1, 5, { weeklyPoints: weekly(21, 5), weeklyAvailability: weekly(1, 5) }),
+    player("WR", 2, 6, { weeklyPoints: weekly(20, 7), weeklyAvailability: weekly(1, 7) }),
+    player("TE", 1, 7, { weeklyPoints: weekly(19, 6), weeklyAvailability: weekly(1, 6) }),
+  ]);
+  const scored = helpers.scoreCandidates({ round: 2, seat: 6, picks, pool, config, replacementBySlot });
+  const baseUtility = helpers.optimalRosterUtility(picks, config, replacementBySlot);
+  const reference = pool.map((candidate) => ({
+    player: candidate,
+    marginalUtility: helpers.optimalRosterUtility([...picks, candidate], config, replacementBySlot) - baseUtility,
+    pAvailableNext: helpers.survivalProbability(candidate, scored.window.nextPick, 0),
+  }));
+  const nextCandidates = reference.slice().sort((left, right) =>
+    right.marginalUtility - left.marginalUtility || left.player.rank - right.player.rank
+  ).slice(0, 6);
+  for (const entry of reference) {
+    const alternatives = nextCandidates
+      .filter((candidate) => candidate !== entry)
+      .map((candidate) => ({
+        ...candidate,
+        marginalAfterEntry: helpers.optimalRosterUtility([...picks, entry.player, candidate.player], config, replacementBySlot) -
+          helpers.optimalRosterUtility([...picks, entry.player], config, replacementBySlot),
+      }))
+      .sort((left, right) => right.marginalAfterEntry - left.marginalAfterEntry || left.player.rank - right.player.rank);
+    let noneBetter = 1;
+    let expectedNextUtility = 0;
+    for (const candidate of alternatives) {
+      expectedNextUtility += noneBetter * candidate.pAvailableNext * candidate.marginalAfterEntry;
+      noneBetter *= 1 - candidate.pAvailableNext;
+    }
+    const actual = scored.ranked.find((candidate) => candidate.player.yahooId === entry.player.yahooId);
+    assert.ok(Math.abs(actual.marginalUtility - entry.marginalUtility) < 1e-9);
+    assert.ok(Math.abs(actual.expectedNextUtility - expectedNextUtility) < 1e-9);
+    assert.ok(Math.abs(actual.decisionScore - (entry.marginalUtility + expectedNextUtility)) < 1e-9);
+  }
+});
+
+test("uses the held-out survival packet when its gate is enabled", () => {
+  const candidate = helpers.validateBoard([player("QB", 1, 20, { adpLow: 45, adpHigh: 55 })])[0];
+  const survivalCalibration = {
+    calibration: { enabled: true, positionLayerEnabled: true },
+    model: {
+      minimumPositionSamples: 2,
+      global: { sampleCount: 3, scale: 5, values: [{ residual: -10, weight: 1 }, { residual: 0, weight: 1 }, { residual: 10, weight: 1 }] },
+      positions: { QB: { sampleCount: 3, scale: 5, values: [{ residual: -10, weight: 1 }, { residual: 0, weight: 1 }, { residual: 10, weight: 1 }] } },
+    },
+  };
+  assert.equal(helpers.survivalProbability(candidate, 50, 0, survivalCalibration), 0.6);
+  const pool = [candidate, ...boardForConfig(mockConfig).slice(0, 8)];
+  const result = helpers.scoreCandidates({ round: 3, seat: 6, picks: [], pool, config: mockConfig, replacementBySlot, survivalCalibration });
+  assert.equal(result.ranked.find((entry) => entry.player.yahooId === candidate.yahooId).survivalStatus, "HELD_OUT_CALIBRATED_POSITION_RESIDUAL");
+});
+
 test("position runs change acquisition probability, never football projection or marginal utility", () => {
   const candidate = helpers.validateBoard([player("WR", 1, 20, { projection: 250, adpLow: 30, adpHigh: 50 })])[0];
   const calm = helpers.survivalProbability(candidate, 45, 0);

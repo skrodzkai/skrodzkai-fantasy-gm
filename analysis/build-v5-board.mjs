@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 
 import { buildDraftWatchlist, compileInjuryBoard } from "./injury-monitor.mjs";
 import { buildPlayerBoard } from "./player-intelligence.mjs";
+import { buildWeeklyProjectionProfile, expectedGamesFromInjury } from "./weekly-roster-utility.mjs";
 
 export const LEAGUE_REPLACEMENT_RANKS = Object.freeze({
   QB: 12,
@@ -108,6 +109,8 @@ export function assembleV5Board({
   asOf,
   baselineObservedAt,
   sleeperObservedAt,
+  externalInjuryReports = [],
+  survivalCalibration = null,
   replacementRoster = { teamCount: 12, rosterSlots: LEAGUE_STARTER_SLOTS },
 }) {
   const offenseObservedAt = requireObservedAt(offenseSnapshot, "offenseSnapshot");
@@ -182,6 +185,7 @@ export function assembleV5Board({
     sourceId: "yahoo-season-projection",
     updatedAt: offenseObservedAt,
     weight: 1,
+    projectionGames: 17,
     rows: yahooRows
       .filter((row) => offenseIds.has(String(row.yahooId)))
       .filter((row) => hasFiniteProjection(row.yahooProjectedPoints))
@@ -191,6 +195,7 @@ export function assembleV5Board({
     sourceId: "yahoo-specialist-season-projection",
     updatedAt: specialistObservedAt,
     weight: 1,
+    projectionGames: 17,
     rows: yahooRows
       .filter((row) => !offenseIds.has(String(row.yahooId)) && specialistIds.has(String(row.yahooId)))
       .filter((row) => hasFiniteProjection(row.yahooProjectedPoints))
@@ -200,6 +205,7 @@ export function assembleV5Board({
     sourceId: "league-scored-history-market-baseline",
     updatedAt: baselineObservedAt,
     weight: 1,
+    projectionGames: 17,
     rows: yahooRows
       .map((row) => ({ row, baseline: baselineForYahooRow(row) }))
       .filter(({ baseline }) => hasFiniteProjection(baseline?.projection))
@@ -216,7 +222,7 @@ export function assembleV5Board({
     replacementRoster,
   });
 
-  const reports = [];
+  const reports = Array.from(externalInjuryReports ?? []);
   for (const yahoo of yahooRows) {
     const yahooObservedAt = offenseIds.has(String(yahoo.yahooId))
       ? offenseObservedAt
@@ -244,7 +250,12 @@ export function assembleV5Board({
       });
     }
   }
-  const injuryBoard = compileInjuryBoard({ reports, asOf, maxAgeHours: 96 });
+  const injuryBoard = compileInjuryBoard({
+    reports,
+    asOf,
+    maxAgeHours: 96,
+    expectedPlayerIds: yahooRows.map((player) => String(player.yahooId)),
+  });
   const injuryByPlayer = new Map(injuryBoard.players.map((player) => [player.playerId, player]));
 
   const combined = projectionBoard.players.map((player) => {
@@ -258,10 +269,29 @@ export function assembleV5Board({
     };
     const dualRole = player.eligible.some((position) => ["QB", "RB", "WR", "TE"].includes(position)) &&
       player.eligible.some((position) => ["DL", "LB", "DB", "CB", "S", "D"].includes(position));
-    const executable = player.executable && injury.executable;
+    const expectedGamesThroughWeek17 = expectedGamesFromInjury(injury);
+    const projectionGames = Number(player.expectedGames);
+    const hasOutcomeRate = Number.isFinite(projectionGames) && projectionGames > 0;
+    const weeklyProfile = Number.isFinite(Number(player.perGamePoints)) && expectedGamesThroughWeek17 != null
+      ? buildWeeklyProjectionProfile({
+          perGamePoints: Number(player.perGamePoints),
+          byeWeek: player.bye,
+          expectedGamesThroughWeek17,
+          unavailableWeeks: injury.unavailableWeeks,
+          perGameOutcomeLow: hasOutcomeRate && hasFiniteProjection(player.outcomeLow) ? Number(player.outcomeLow) / projectionGames : null,
+          perGameOutcomeHigh: hasOutcomeRate && hasFiniteProjection(player.outcomeHigh) ? Number(player.outcomeHigh) / projectionGames : null,
+        })
+      : null;
+    const executable = player.executable && injury.executable && weeklyProfile != null;
     return {
       ...player,
       injury,
+      expectedGamesThroughWeek17,
+      weeklyPoints: weeklyProfile?.weeklyPoints ?? null,
+      weeklyAvailability: weeklyProfile?.availabilityProbability ?? null,
+      weeklyOutcomeLow: weeklyProfile?.weeklyOutcomeLow ?? null,
+      weeklyOutcomeHigh: weeklyProfile?.weeklyOutcomeHigh ?? null,
+      weeklyUncertaintyStatus: weeklyProfile?.uncertaintyStatus ?? "WEEKLY_PROFILE_WITHHELD",
       executable,
       blockReason: executable ? null : [player.blockReason, injury.blockReason].filter(Boolean).join("; "),
       automaticEligible: executable && !dualRole,
@@ -312,6 +342,14 @@ export function assembleV5Board({
       yahooEligibilityObservedAt: eligibilityObservedAt,
     },
     injuryWatchlist: buildDraftWatchlist(injuryBoard),
+    injuryCoverage: injuryBoard.coverage,
+    projectionModel: {
+      sourceNormalization: "equal-weight per-game before explicit availability",
+      fantasyWeeks: "1-17",
+      weeklyBonuses: "weekly events; never season-thresholded",
+      outcomeIntervals: "calibrated inputs only; source disagreement remains diagnostic",
+    },
+    survivalCalibration,
     eligibilityEvidence: specialistSnapshot.eligibilityEvidence ?? {},
     players: combined,
     boards: { unified: combined, offense, specialists },
@@ -329,12 +367,14 @@ async function main() {
   for (const key of required) {
     if (!args[key]) throw new Error(`missing --${key}=...`);
   }
-  const [baselineRows, offenseSnapshot, specialistSnapshot, sleeperPlayers, eligibilitySnapshot] = await Promise.all([
+  const [baselineRows, offenseSnapshot, specialistSnapshot, sleeperPlayers, eligibilitySnapshot, externalInjuryReports, survivalCalibration] = await Promise.all([
     readFile(args.baseline, "utf8").then(JSON.parse),
     readFile(args.offense, "utf8").then(JSON.parse),
     readFile(args.specialists, "utf8").then(JSON.parse),
     readFile(args.sleeper, "utf8").then(JSON.parse),
     args.eligibility ? readFile(args.eligibility, "utf8").then(JSON.parse) : null,
+    args.injuries ? readFile(args.injuries, "utf8").then(JSON.parse) : [],
+    args.survival ? readFile(args.survival, "utf8").then(JSON.parse) : null,
   ]);
   const board = assembleV5Board({
     baselineRows,
@@ -345,10 +385,12 @@ async function main() {
     asOf: args["as-of"],
     baselineObservedAt: args["baseline-observed-at"],
     sleeperObservedAt: args["sleeper-observed-at"],
+    externalInjuryReports,
+    survivalCalibration,
   });
   await writeFile(args.output, `${JSON.stringify(board, null, 2)}\n`, "utf8");
   process.stdout.write(
-    `${JSON.stringify({ output: args.output, players: board.players.length, executable: board.players.filter((player) => player.executable).length })}\n`,
+    `${JSON.stringify({ output: args.output, players: board.players.length, executable: board.players.filter((player) => player.automaticEligible).length })}\n`,
   );
 }
 

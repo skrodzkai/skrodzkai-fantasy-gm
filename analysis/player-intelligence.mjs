@@ -34,6 +34,7 @@ const IDP_SCORING = Object.freeze({
 });
 
 const REQUIRED_PLAYER_FIELDS = ["playerId", "name", "position"];
+const DEFAULT_PROJECTION_GAMES = 17;
 
 function finite(value, fallback = 0) {
   return Number.isFinite(Number(value)) ? Number(value) : fallback;
@@ -92,6 +93,11 @@ export function scoreOffenseStatLine(stats, scoring = OFFENSE_SCORING) {
     finite(stats.offensiveFumbleReturnTouchdowns) *
       scoring.offensiveFumbleReturnTouchdowns
   );
+}
+
+export function scoreWeeklyOffenseStatLines(weeks, scoring = OFFENSE_SCORING) {
+  if (!Array.isArray(weeks)) throw new Error("weeks must be an array");
+  return weeks.reduce((sum, stats) => sum + scoreOffenseStatLine(stats ?? {}, scoring), 0);
 }
 
 export function scoreIdpStatLine(stats, scoring = IDP_SCORING) {
@@ -225,11 +231,33 @@ function projectionPoints(row) {
     return Number(row.leaguePoints);
   }
   const stats = row?.stats;
+  if (Array.isArray(row?.weeklyStats)) return scoreWeeklyOffenseStatLines(row.weeklyStats);
   if (!stats || typeof stats !== "object") return null;
   const hasScoredStat = Object.keys(OFFENSE_SCORING).some(
     (key) => stats[key] !== null && stats[key] !== undefined && stats[key] !== "" && Number.isFinite(Number(stats[key])),
   );
   return hasScoredStat ? scoreOffenseStatLine(stats) : null;
+}
+
+function hasFinite(value) {
+  return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
+}
+
+function projectionPerGame(row, source) {
+  if (hasFinite(row?.perGamePoints)) return Number(row.perGamePoints);
+  const seasonPoints = projectionPoints(row);
+  if (!Number.isFinite(seasonPoints)) return null;
+  const games = hasFinite(row?.projectionGames)
+    ? Number(row.projectionGames)
+    : hasFinite(row?.expectedGames)
+      ? Number(row.expectedGames)
+      : hasFinite(source?.projectionGames)
+        ? Number(source.projectionGames)
+        : DEFAULT_PROJECTION_GAMES;
+  if (!(games > 0 && games <= DEFAULT_PROJECTION_GAMES)) {
+    throw new Error(`projection games must be between 1 and ${DEFAULT_PROJECTION_GAMES}`);
+  }
+  return seasonPoints / games;
 }
 
 export function deriveReplacementRanks({
@@ -309,24 +337,45 @@ export function buildPlayerBoard({
     for (const row of rows) {
       const playerId = String(row.playerId ?? "");
       if (!playerById.has(playerId)) continue;
-      const points = projectionPoints(row);
-      if (!Number.isFinite(points)) continue;
+      const perGamePoints = projectionPerGame(row, source);
+      if (!Number.isFinite(perGamePoints)) continue;
       const evidence = evidenceByPlayer.get(playerId) ?? [];
-      evidence.push({ sourceId, points, weight, updatedAt: source.updatedAt });
+      evidence.push({ sourceId, perGamePoints, weight, updatedAt: source.updatedAt });
       evidenceByPlayer.set(playerId, evidence);
     }
   }
 
   const board = players.map((player) => {
     const evidence = evidenceByPlayer.get(String(player.playerId)) ?? [];
-    const points = evidence.map((row) => row.points);
-    const consensus = evidence.length ? weightedMean(evidence) : null;
+    const expectedGames = hasFinite(player.expectedGames)
+      ? Number(player.expectedGames)
+      : DEFAULT_PROJECTION_GAMES;
+    if (!(expectedGames >= 0 && expectedGames <= DEFAULT_PROJECTION_GAMES)) {
+      throw new Error(`player ${player.playerId} expectedGames must be between 0 and ${DEFAULT_PROJECTION_GAMES}`);
+    }
+    const normalizedEvidence = evidence.map((row) => ({
+      ...row,
+      points: row.perGamePoints * expectedGames,
+    }));
+    const points = normalizedEvidence.map((row) => row.points);
+    const perGamePoints = evidence.length
+      ? weightedMean(evidence.map((row) => ({ ...row, points: row.perGamePoints })))
+      : null;
+    const consensus = perGamePoints == null ? null : perGamePoints * expectedGames;
+    const calibratedOutcome = player.outcomeCalibrated === true &&
+      hasFinite(player.outcomeLow) && hasFinite(player.outcomeHigh) &&
+      Number(player.outcomeLow) <= Number(player.outcomeHigh);
     return {
       ...player,
       consensusPoints: consensus,
+      perGamePoints,
+      expectedGames,
       sourceSpreadLow: quantile(points, 0.25),
       sourceSpreadHigh: quantile(points, 0.75),
-      uncertaintyStatus: "SOURCE_DISAGREEMENT_ONLY",
+      sourceDisagreementStatus: evidence.length >= 2 ? "AVAILABLE_DIAGNOSTIC_ONLY" : "INSUFFICIENT_SOURCES",
+      outcomeLow: calibratedOutcome ? Number(player.outcomeLow) : null,
+      outcomeHigh: calibratedOutcome ? Number(player.outcomeHigh) : null,
+      uncertaintyStatus: calibratedOutcome ? "CALIBRATED_OUTCOME_INTERVAL" : "OUTCOME_INTERVAL_UNAVAILABLE",
       sourceCount: evidence.length,
       sourceIds: evidence.map((row) => row.sourceId).sort(),
       executable: evidence.length >= minimumFreshSources,

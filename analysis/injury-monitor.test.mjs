@@ -142,3 +142,39 @@ test("a suspension needs a reported return to avoid automatic exclusion", () => 
   assert.equal(datedReturn.players[0].draftAction, "REVIEW");
   assert.deepEqual(datedReturn.players[0].reportedReturns, ["Week 3"]);
 });
+
+test("receipts complete-player injury coverage and fails closed on unchecked players", () => {
+  const board = compileInjuryBoard({
+    asOf: "2026-08-23T12:00:00Z",
+    expectedPlayerIds: ["p1", "p2"],
+    reports: [report({ playerId: "p1", sourceId: "yahoo-p1", status: "CLEAR" })],
+  });
+  assert.equal(board.coverage.expectedPlayers, 2);
+  assert.equal(board.coverage.checkedPlayers, 1);
+  assert.equal(board.coverage.complete, false);
+  assert.deepEqual(board.coverage.uncheckedPlayerIds, ["p2"]);
+  assert.equal(board.players.find((player) => player.playerId === "p2").executable, false);
+});
+
+test("prices games only from explicit consistent injury evidence", () => {
+  const board = compileInjuryBoard({
+    asOf: "2026-08-23T12:00:00Z",
+    reports: [
+      report({ playerId: "p1", sourceId: "club", sourceKind: "team_official", status: "QUESTIONABLE", expectedGamesThroughWeek17: 12, unavailableWeeks: [1, 2] }),
+      report({ playerId: "p1", sourceId: "yahoo", status: "QUESTIONABLE", expectedGamesThroughWeek17: 12 }),
+    ],
+  });
+  assert.equal(board.players[0].expectedGamesThroughWeek17, 12);
+  assert.deepEqual(board.players[0].unavailableWeeks, [1, 2]);
+  assert.equal(board.players[0].availabilityStatus, "EXPLICIT");
+
+  const conflict = compileInjuryBoard({
+    asOf: "2026-08-23T12:00:00Z",
+    reports: [
+      report({ playerId: "p1", sourceId: "club", sourceKind: "team_official", status: "QUESTIONABLE", expectedGamesThroughWeek17: 6 }),
+      report({ playerId: "p1", sourceId: "yahoo", status: "QUESTIONABLE", expectedGamesThroughWeek17: 12 }),
+    ],
+  });
+  assert.equal(conflict.players[0].conflict, true);
+  assert.equal(conflict.players[0].expectedGamesThroughWeek17, null);
+});

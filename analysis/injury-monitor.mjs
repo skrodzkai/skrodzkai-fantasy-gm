@@ -44,7 +44,19 @@ function parseTimestamp(value, label) {
   return timestamp;
 }
 
-export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36 }) {
+function finite(value) {
+  return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
+}
+
+function normalizeUnavailableWeeks(value, sourceId) {
+  const weeks = [...new Set(Array.from(value ?? [], Number))].sort((left, right) => left - right);
+  if (weeks.some((week) => !Number.isInteger(week) || week < 1 || week > 17)) {
+    throw new Error(`report ${sourceId} unavailableWeeks must contain weeks 1 through 17`);
+  }
+  return weeks;
+}
+
+export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36, expectedPlayerIds = [] }) {
   const now = parseTimestamp(asOf, "asOf");
   if (!Array.isArray(reports)) throw new Error("reports must be an array");
   const grouped = new Map();
@@ -70,8 +82,16 @@ export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36 }) {
       bodyPart: report.bodyPart ? String(report.bodyPart) : null,
       practice: report.practice ? String(report.practice) : null,
       reportedReturn: report.reportedReturn ? String(report.reportedReturn) : null,
+      expectedGamesThroughWeek17: finite(report.expectedGamesThroughWeek17)
+        ? Number(report.expectedGamesThroughWeek17)
+        : null,
+      unavailableWeeks: normalizeUnavailableWeeks(report.unavailableWeeks, sourceId),
       note: report.note ? String(report.note) : null,
     };
+    if (normalized.expectedGamesThroughWeek17 != null &&
+        (normalized.expectedGamesThroughWeek17 < 0 || normalized.expectedGamesThroughWeek17 > 16)) {
+      throw new Error(`report ${sourceId} expectedGamesThroughWeek17 must be between 0 and 16`);
+    }
     const playerReports = grouped.get(playerId) ?? [];
     playerReports.push(normalized);
     grouped.set(playerId, playerReports);
@@ -87,8 +107,13 @@ export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36 }) {
     const primary = ordered[0] ?? null;
     const freshStatuses = [...new Set(freshReports.map((report) => report.status))];
     const severityValues = freshStatuses.map((status) => STATUS_PRIORITY[status]);
-    const conflict =
+    const statusConflict =
       severityValues.length > 1 && Math.max(...severityValues) - Math.min(...severityValues) >= 2;
+    const gamesValues = freshReports
+      .map((report) => report.expectedGamesThroughWeek17)
+      .filter((value) => value != null);
+    const availabilityConflict = gamesValues.length > 1 && Math.max(...gamesValues) - Math.min(...gamesValues) > 1;
+    const conflict = statusConflict || availabilityConflict;
     const worstStatus = freshStatuses.sort(
       (left, right) => STATUS_PRIORITY[right] - STATUS_PRIORITY[left],
     )[0] ?? "UNKNOWN";
@@ -128,11 +153,73 @@ export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36 }) {
       freshestAt: ordered[0]?.observedAt ?? null,
       bodyParts: [...new Set(freshReports.map((report) => report.bodyPart).filter(Boolean))],
       reportedReturns: [...new Set(freshReports.map((report) => report.reportedReturn).filter(Boolean))],
+      expectedGamesThroughWeek17: conflict
+        ? null
+        : ordered.find((report) => report.expectedGamesThroughWeek17 != null)?.expectedGamesThroughWeek17 ?? null,
+      unavailableWeeks: conflict
+        ? []
+        : ordered.find((report) => report.unavailableWeeks.length)?.unavailableWeeks ?? [],
+      availabilityStatus: conflict
+        ? "CONFLICT"
+        : ordered.some((report) => report.expectedGamesThroughWeek17 != null || report.unavailableWeeks.length)
+          ? "EXPLICIT"
+          : "UNSPECIFIED",
       evidence: playerReports.sort((left, right) => Date.parse(right.observedAt) - Date.parse(left.observedAt)),
     };
   });
 
-  return Object.freeze({ asOf, maxAgeHours, players });
+  const expectedIds = [...new Set(Array.from(expectedPlayerIds ?? [], String).filter(Boolean))];
+  const present = new Set(players.map((player) => player.playerId));
+  for (const playerId of expectedIds) {
+    if (present.has(playerId)) continue;
+    players.push({
+      playerId,
+      status: "UNKNOWN",
+      draftAction: "REVIEW",
+      executable: false,
+      blockReason: "no injury evidence",
+      conflict: false,
+      primarySourceId: null,
+      freshestAt: null,
+      bodyParts: [],
+      reportedReturns: [],
+      expectedGamesThroughWeek17: null,
+      unavailableWeeks: [],
+      availabilityStatus: "UNSPECIFIED",
+      evidence: [],
+    });
+  }
+
+  const expectedSet = new Set(expectedIds);
+  const freshChecked = new Set(players
+    .filter((player) => player.evidence.some((report) => report.fresh))
+    .map((player) => player.playerId)
+    .filter((playerId) => expectedSet.size === 0 || expectedSet.has(playerId)));
+  const sourceKinds = Object.keys(SOURCE_PRIORITY);
+  const bySourceKind = Object.fromEntries(sourceKinds.map((sourceKind) => {
+    const checked = new Set();
+    for (const player of players) {
+      if (player.evidence.some((report) => report.fresh && report.sourceKind === sourceKind)) checked.add(player.playerId);
+    }
+    return [sourceKind, {
+      checkedPlayers: expectedSet.size ? [...checked].filter((playerId) => expectedSet.has(playerId)).length : checked.size,
+      freshReports: players.reduce((sum, player) => sum + player.evidence.filter((report) => report.fresh && report.sourceKind === sourceKind).length, 0),
+    }];
+  }));
+  const uncheckedPlayerIds = expectedIds.filter((playerId) => !freshChecked.has(playerId));
+
+  return Object.freeze({
+    asOf,
+    maxAgeHours,
+    coverage: {
+      expectedPlayers: expectedIds.length,
+      checkedPlayers: freshChecked.size,
+      complete: expectedIds.length === 0 || uncheckedPlayerIds.length === 0,
+      uncheckedPlayerIds,
+      bySourceKind,
+    },
+    players,
+  });
 }
 
 export function buildDraftWatchlist(injuryBoard) {
@@ -147,6 +234,8 @@ export function buildDraftWatchlist(injuryBoard) {
       blockReason: player.blockReason,
       freshestAt: player.freshestAt,
       primarySourceId: player.primarySourceId,
+      expectedGamesThroughWeek17: player.expectedGamesThroughWeek17,
+      unavailableWeeks: player.unavailableWeeks,
     }));
 }
 

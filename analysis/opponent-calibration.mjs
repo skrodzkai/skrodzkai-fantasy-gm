@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -87,15 +88,15 @@ function normalize(counts, total) {
 
 export function trainPositionModel(rows, options = {}) {
   const decay = options.decay ?? 0.85;
+  const shrinkage = options.shrinkage ?? 16;
   const maxSeason = options.maxSeason ?? Math.max(...rows.map((row) => row.season));
   const room = new Map();
-  const global = { total: 0, counts: emptyCounts() };
+  const managers = new Map();
   for (const row of rows) {
     const phase = draftPhase(row.round);
     const weight = decay ** Math.max(0, maxSeason - row.season);
     addCount(room, phase, row.position, weight);
-    global.total += weight;
-    global.counts[row.position] += weight;
+    addCount(managers, `${row.managerId}|${phase}`, row.position, weight);
   }
   const roomProbabilities = Object.fromEntries(
     ["opening", "core", "bench", "specialists"].map((phase) => {
@@ -103,13 +104,19 @@ export function trainPositionModel(rows, options = {}) {
       return [phase, normalize(entry.counts, entry.total)];
     }),
   );
-  return { decay, maxSeason, room, roomProbabilities, globalProbabilities: normalize(global.counts, global.total) };
+  return { decay, shrinkage, maxSeason, room, managers, roomProbabilities };
 }
 
 export function predictPosition(model, managerId, round) {
-  void managerId;
   const phase = draftPhase(round);
-  return model.roomProbabilities[phase];
+  const room = model.roomProbabilities[phase];
+  const manager = model.managers.get(`${managerId}|${phase}`);
+  if (!manager || !(manager.total > 0)) return room;
+  const denominator = manager.total + model.shrinkage;
+  return Object.fromEntries(POSITIONS.map((position) => [
+    position,
+    (manager.counts[position] + model.shrinkage * room[position]) / denominator,
+  ]));
 }
 
 function eventLoss(probabilities, observed) {
@@ -132,7 +139,7 @@ export function evaluateHeldOut(rows, heldOutSeason, options = {}) {
   if (!training.length || !test.length) throw new Error(`insufficient_history_for_${heldOutSeason}`);
   const model = trainPositionModel(training, { ...options, maxSeason: heldOutSeason - 1 });
   const events = test.map((row) => {
-    const baseline = eventLoss(model.globalProbabilities, row.position);
+    const baseline = eventLoss(model.roomProbabilities[draftPhase(row.round)], row.position);
     const calibrated = eventLoss(predictPosition(model, row.managerId, row.round), row.position);
     return { managerId: row.managerId, baseline, calibrated, improvement: baseline.brier - calibrated.brier };
   });
@@ -182,16 +189,24 @@ export function clusteredImprovementInterval(events, samples = 5000) {
 export function selectParameters(rows, options = {}) {
   const validationSeasons = options.validationSeasons ?? [2023, 2024];
   const decays = options.decays ?? [0.65, 0.75, 0.85, 0.95, 1];
+  const shrinkages = options.shrinkages ?? [4, 8, 16, 32, 64];
   const candidates = [];
   for (const decay of decays) {
-    const evaluations = validationSeasons.map((season) => evaluateHeldOut(rows, season, { ...options, decay }));
-    candidates.push({
-      decay,
-      brier: evaluations.reduce((sum, evaluation) => sum + evaluation.calibrated.brier, 0) / evaluations.length,
-    });
+    for (const shrinkage of shrinkages) {
+      const evaluations = validationSeasons.map((season) => evaluateHeldOut(rows, season, { ...options, decay, shrinkage }));
+      candidates.push({
+        decay,
+        shrinkage,
+        brier: evaluations.reduce((sum, evaluation) => sum + evaluation.calibrated.brier, 0) / evaluations.length,
+      });
+    }
   }
-  candidates.sort((left, right) => left.brier - right.brier || right.decay - left.decay);
+  candidates.sort((left, right) => left.brier - right.brier || right.shrinkage - left.shrinkage || right.decay - left.decay);
   return candidates[0];
+}
+
+function profileId() {
+  return `owner-${randomBytes(5).toString("hex")}`;
 }
 
 export function buildCalibration(rows, options = {}) {
@@ -207,10 +222,21 @@ export function buildCalibration(rows, options = {}) {
     ...parameters,
     maxSeason: Math.max(...opponentRows.map((row) => row.season)),
   });
+  const managerIds = Array.from(new Set(opponentRows.map((row) => row.managerId))).sort();
+  const profiles = {};
+  const managerMap = {};
+  for (const managerId of managerIds) {
+    const id = profileId();
+    managerMap[managerId] = id;
+    profiles[id] = Object.fromEntries(["opening", "core", "bench", "specialists"].map((phase) => {
+      const sampleRound = { opening: 2, core: 6, bench: 12, specialists: 17 }[phase];
+      return [phase, predictPosition(model, managerId, sampleRound)];
+    }));
+  }
   return {
     calibration: {
       enabled,
-      reason: enabled ? "room_phase_model_cleared_held_out_gate" : "room_phase_model_failed_held_out_gate",
+      reason: enabled ? "manager_position_model_cleared_held_out_gate" : "manager_position_model_failed_held_out_gate",
       validationSeasons: options.validationSeasons ?? [2023, 2024],
       testSeason: options.testSeason ?? 2025,
       parameters,
@@ -223,17 +249,17 @@ export function buildCalibration(rows, options = {}) {
       excludedRows,
     },
     room: model.roomProbabilities,
-    profiles: {},
-    managerMap: {},
-    managerLayer: "REMOVED_FAILED_HELD_OUT_GATE",
+    profiles: enabled ? profiles : {},
+    managerMap: enabled ? managerMap : {},
+    managerLayer: enabled ? "ENABLED_LIMITED_TIEBREAK" : "DISABLED_FAILED_HELD_OUT_GATE",
   };
 }
 
 function parseArgs(argv) {
   const args = {};
   for (let index = 0; index < argv.length; index += 2) args[argv[index]?.replace(/^--/, "")] = argv[index + 1];
-  if (!args.input || !args.output || !args["exclude-manager"]) {
-    throw new Error("usage: node analysis/opponent-calibration.mjs --input history.csv --output calibration.json --exclude-manager owner-id");
+  if (!args.input || !args.output || !args.mapping || !args["exclude-manager"]) {
+    throw new Error("usage: node analysis/opponent-calibration.mjs --input history.csv --output calibration.json --mapping private-map.json --exclude-manager owner-id");
   }
   return args;
 }
@@ -248,6 +274,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const result = buildCalibration(rows, {
     excludeManagerIds,
   });
-  writeFileSync(args.output, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
+  const sanitized = { ...result, managerMap: undefined };
+  writeFileSync(args.output, `${JSON.stringify(sanitized, null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(args.mapping, `${JSON.stringify({ managerMap: result.managerMap }, null, 2)}\n`, { mode: 0o600 });
   process.stdout.write(`${JSON.stringify(result.calibration)}\n`);
 }

@@ -24,22 +24,23 @@ test("finds exact opponent windows for endpoint and middle seats", () => {
   assert.deepEqual(turnsBeforeNextPick({ round: 19, ourSeat: 6, rounds: 19 }), []);
 });
 
-test("uses only the held-out-cleared room phase and no manager predictor", () => {
+test("uses a held-out-cleared manager profile and receipts room fallbacks", () => {
   const probabilities = { QB: 0.1, RB: 0.5, WR: 0.4, TE: 0, K: 0, DEF: 0, LB: 0, DB: 0, DL: 0 };
   const calibration = {
     room: { opening: probabilities },
+    profiles: { "owner-a": { opening: { ...probabilities, QB: 0.5, RB: 0.1 } } },
   };
   const result = estimatePositionPressure({
     turns: [
-      { overall: 2, round: 1, seat: 2 },
+      { overall: 2, round: 1, seat: 2, managerId: "alpha" },
       { overall: 3, round: 1, seat: 3 },
     ],
     calibration,
+    managerMap: { alpha: "owner-a" },
   });
-  assert.equal(result.coverage.managerProfiles, 0);
-  assert.equal(result.coverage.roomPhaseTurns, 2);
-  assert.equal(result.positions.RB.expectedPicks, 1);
-  assert.equal(result.positions.RB.probabilityAtLeastOne, 0.75);
-  assert.equal(result.turns[0].managerId, undefined);
-  assert.equal(result.turns[0].profileId, undefined);
+  assert.equal(result.coverage.profileTurns, 1);
+  assert.equal(result.coverage.roomFallbackTurns, 1);
+  assert.equal(result.positions.RB.expectedPicks, 0.6);
+  assert.equal(result.positions.RB.probabilityAtLeastOne, 0.55);
+  assert.equal(result.turns[0].profileId, "owner-a");
 });

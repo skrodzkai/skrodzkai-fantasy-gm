@@ -17,6 +17,7 @@ function loadRuntime(boardSource, runnerSource) {
   return {
     board: [...new Map(source.map((player) => [String(player.yahooId), player])).values()],
     replacementBySlot: boardData.replacementBySlot,
+    survivalCalibration: boardData.survivalCalibration ?? null,
     runner: context.SKRODZKaiYahooMockRunner,
   };
 }
@@ -60,7 +61,7 @@ function pressureFromRecentPicks(recentPicks) {
   return Object.fromEntries(Object.entries(counts).map(([position, count]) => [position, Math.min(2, Math.max(-2, (count - 1) / 2))]));
 }
 
-function simulateOne({ board, helpers, config, replacementBySlot, seat, seed }) {
+function simulateOne({ board, helpers, config, replacementBySlot, survivalCalibration, seat, seed }) {
   const validated = helpers.validateBoard(board);
   const unavailableSpecialists = thinnedSpecialistIds(validated, seed);
   const picks = [];
@@ -96,6 +97,7 @@ function simulateOne({ board, helpers, config, replacementBySlot, seat, seed }) 
         minimum: 5,
         config,
         replacementBySlot,
+        survivalCalibration,
         runPressureByPosition: pressureFromRecentPicks(opponentPicks.slice(-12)),
       });
     } catch (error) {
@@ -107,6 +109,7 @@ function simulateOne({ board, helpers, config, replacementBySlot, seat, seed }) 
     picks.push({
       ...selected,
       round,
+      utilityModel: decision.decision.utilityModel,
       recomputeMs: decision.decision.recomputeMs,
       fallbackUsed: decision.decision.fallbackUsed,
       pAvailableNext: decision.decision.positionLeaders[0]?.pAvailableNext ?? null,
@@ -157,12 +160,12 @@ function openingDistribution(simulations) {
 }
 
 export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, seeds = [2026, 2027, 2028, 2029, 2030] }) {
-  const { board, replacementBySlot, runner } = loadRuntime(boardSource, runnerSource);
+  const { board, replacementBySlot, survivalCalibration, runner } = loadRuntime(boardSource, runnerSource);
   const config = runner.configs.real_league_19_idp;
   const helpers = runner._test;
   if (!replacementBySlot || !Object.keys(replacementBySlot).length) throw new Error("extension board is missing joint replacement baselines");
   const simulations = Array.from({ length: 12 }, (_, index) => index + 1)
-    .flatMap((seat) => seeds.map((seed) => simulateOne({ board, helpers, config, replacementBySlot, seat, seed })));
+    .flatMap((seat) => seeds.map((seed) => simulateOne({ board, helpers, config, replacementBySlot, survivalCalibration, seat, seed })));
   const reference = simulations[0];
   const identityChaos = reconcileSettingsAndYahoo({
     settings: { leagueKey: "18599", teamKey: "12", seat: reference.seat, requireReadOnly: true },
@@ -178,6 +181,7 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     minimum: 5,
     config,
     replacementBySlot,
+    survivalCalibration,
   });
   const recomputeValues = simulations.flatMap((simulation) => simulation.picks.map((pick) => pick.recomputeMs));
   const latency = {
@@ -191,6 +195,7 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
   const policyChecks = {
     allPositionFilterEveryRound: helpers.filterLabelForRound(1, [], config, 1) === "All Positions" && helpers.filterLabelForRound(config.rounds, [], config, 12) === "All Positions",
     noRoundDependentPositionGate: JSON.stringify(allowedFirst) === JSON.stringify(allowedLast),
+    weeklyUtilityEveryRound: simulations.every((simulation) => simulation.picks.every((pick) => pick.utilityModel === "WEEKLY_OPTIMAL_LINEUP_W1_17")),
     jointReplacementBaselinesPresent: Object.keys(replacementBySlot).length >= 10,
     dualRoleNeverAutoSelected: simulations.every((simulation) => simulation.picks.every((pick) => String(pick.yahooId) !== "41787")),
     realLeagueExecutionDisabled: config.qualification === "unverified-real-room",
@@ -204,9 +209,14 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     incompleteRoster: { pass: helpers.validateCompletedRoster(reference.picks.slice(0, -1), config) === false },
   };
   const validRosters = simulations.filter((simulation) => simulation.validRoster).length;
-  const accepted = simulations.length === 60 && validRosters === simulations.length &&
-    latency.recomputeP95Ms < latency.recomputeBudgetMs &&
-    Object.values(policyChecks).every(Boolean) && Object.values(chaos).every((scenario) => scenario.pass);
+  const acceptanceGates = {
+    simulationCount: simulations.length === 60,
+    allRostersValid: validRosters === simulations.length,
+    latencyWithinBudget: latency.recomputeP95Ms < latency.recomputeBudgetMs,
+    policyChecks: Object.values(policyChecks).every(Boolean),
+    chaosChecks: Object.values(chaos).every((scenario) => scenario.pass),
+  };
+  const accepted = Object.values(acceptanceGates).every(Boolean);
   return {
     schemaVersion: 2,
     generatedAt,
@@ -217,6 +227,7 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     seeds,
     validRosters,
     latency,
+    acceptanceGates,
     policyChecks,
     lateRoundDistribution: lateRoundDistribution(simulations),
     openingDistribution: openingDistribution(simulations),
@@ -243,7 +254,7 @@ async function main() {
   const [boardSource, runnerSource] = await Promise.all([readFile(args.board, "utf8"), readFile(args.runner, "utf8")]);
   const report = buildRehearsalReport({ boardSource, runnerSource, generatedAt: args["generated-at"] });
   await writeFile(args.output, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
-  process.stdout.write(`${JSON.stringify({ output: args.output, accepted: report.accepted, simulations: report.simulations, validRosters: report.validRosters, recomputeP95Ms: report.latency.recomputeP95Ms, fallbackCount: report.latency.fallbackCount, chaosPass: Object.values(report.rehearsals.chaos).every((scenario) => scenario.pass) })}\n`);
+  process.stdout.write(`${JSON.stringify({ output: args.output, accepted: report.accepted, acceptanceGates: report.acceptanceGates, simulations: report.simulations, validRosters: report.validRosters, recomputeP95Ms: report.latency.recomputeP95Ms, fallbackCount: report.latency.fallbackCount, chaosPass: Object.values(report.rehearsals.chaos).every((scenario) => scenario.pass) })}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

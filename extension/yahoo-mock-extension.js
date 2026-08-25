@@ -1244,6 +1244,7 @@
       filterDeadlineMs: 5000,
       selectionHoldMs: 1200,
       replacementBySlot: boardData.replacementBySlot,
+      survivalCalibration: boardData.survivalCalibration,
       board,
       readManualOverride: () => readJson(environment.sessionStorage, MANUAL_STAGE_KEY, null),
       consumeManualOverride: (outcome) => {

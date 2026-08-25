@@ -6,6 +6,7 @@ import {
   deriveJointReplacementLevels,
   deriveReplacementRanks,
   scoreOffenseStatLine,
+  scoreWeeklyOffenseStatLines,
   scoreIdpStatLine,
 } from "./player-intelligence.mjs";
 
@@ -33,6 +34,14 @@ test("counts every weekly 100-yard event instead of awarding one season bonus", 
     }),
     201,
   );
+});
+
+test("scores weekly projection rows so each threshold event is preserved", () => {
+  assert.equal(scoreWeeklyOffenseStatLines([
+    { rushingYards: 101 },
+    { rushingYards: 99 },
+    { receivingYards: 120 },
+  ]), 36);
 });
 
 test("scores every observed IDP category with the league's exact values", () => {
@@ -125,6 +134,37 @@ test("builds an uncertainty-aware VORP board from fresh independent inputs", () 
   assert.equal(board.players[0].replacementPoints, 305);
   assert.equal(board.players[0].vorp, 85);
   assert.equal(board.players[0].executable, true);
+});
+
+test("normalizes source game assumptions before combining projections", () => {
+  const board = buildPlayerBoard({
+    asOf: "2026-08-22T12:00:00Z",
+    players: [{ playerId: "q1", name: "Quarterback One", position: "QB", expectedGames: 14 }],
+    replacementRanks: { QB: 1 },
+    sources: [
+      { sourceId: "full", updatedAt: "2026-08-22T10:00:00Z", rows: [{ playerId: "q1", leaguePoints: 340, projectionGames: 17 }] },
+      { sourceId: "short", updatedAt: "2026-08-22T10:00:00Z", rows: [{ playerId: "q1", leaguePoints: 280, projectionGames: 14 }] },
+    ],
+  });
+  assert.equal(board.players[0].perGamePoints, 20);
+  assert.equal(board.players[0].consensusPoints, 280);
+  assert.equal(board.players[0].sourceSpreadLow, 280);
+});
+
+test("keeps source spread separate from calibrated player outcomes", () => {
+  const board = buildPlayerBoard({
+    asOf: "2026-08-22T12:00:00Z",
+    players: [{ playerId: "r1", name: "Runner", position: "RB" }],
+    replacementRanks: { RB: 1 },
+    sources: [
+      { sourceId: "a", updatedAt: "2026-08-22T10:00:00Z", rows: [{ playerId: "r1", leaguePoints: 200 }] },
+      { sourceId: "b", updatedAt: "2026-08-22T10:00:00Z", rows: [{ playerId: "r1", leaguePoints: 240 }] },
+    ],
+  });
+  assert.equal(board.players[0].sourceDisagreementStatus, "AVAILABLE_DIAGNOSTIC_ONLY");
+  assert.equal(board.players[0].outcomeLow, null);
+  assert.equal(board.players[0].outcomeHigh, null);
+  assert.equal(board.players[0].uncertaintyStatus, "OUTCOME_INTERVAL_UNAVAILABLE");
 });
 
 test("stale or single-source projections cannot enter the executable ladder", () => {

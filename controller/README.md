@@ -47,7 +47,7 @@ The controller persists receipts in Yahoo-origin local storage under `skrodzkai-
 
 `yahoo-mock-runner.js` layers a roster-aware policy over the exact-row controller. It requires a programmatically observed 12-team room, expected seat, empty roster, exact qualified roster shape, joint replacement baselines, and five visible exact-Yahoo-ID fallbacks. The player pool retains Yahoo multi-position eligibility and league-scored projections; observed market ranges or Yahoo preseason rank affect only availability estimates, never football value.
 
-The runner waits for the controller's exact owned-turn signal before reading the live rows. Every round uses one unified BPA pool. It computes the maximum league-point gain over the jointly allocated replacement roster, estimates continuous next-turn survival from the observed ADP range or explicitly uncalibrated Yahoo-rank fallback, and evaluates the best one-turn alternatives. Position runs alter only the survival estimate. They cannot alter a projection, replacement level, or marginal utility.
+The runner waits for the controller's exact owned-turn signal before reading the live rows. Every round uses one unified BPA pool. It computes exact marginal Weeks 1–17 utility over the best legal weekly lineups, so byes, explicit missed games, QB2 insurance, and bench substitution value are priced without a round script. It then estimates continuous next-turn survival from the held-out league curve (or a visibly uncalibrated market fallback) and evaluates the best one-turn alternatives. Position runs alter only the survival estimate. They cannot alter a projection, replacement level, or marginal utility.
 
 There is no position-by-round script, RB/WR floor, specialist phase, QB/TE timing rule, or fixed material-edge constant. Exact roster feasibility and configured position maxima are the only gates. Missing-market players remain visible with labeled fallback evidence rather than disappearing from the board.
 
@@ -82,22 +82,31 @@ The extension permits public mocks and the exact retained test league only. The 
 The dependency-free scripts under `analysis/` keep model work outside the live
 click path:
 
-- `opponent-calibration.mjs` trains only a recency-weighted room-phase prior
-  and enables it only when an untouched season plus a manager-clustered
-  interval beat the global room baseline. Its CLI excludes Joe's history from
-  every stage. The failed manager-specific predictor is not emitted.
-- `opponent-window.mjs` converts the exact snake horizon into room-phase
-  position pressure. It accepts no owner mapping and emits no manager profile.
+- `opponent-calibration.mjs` trains recency-weighted room and manager-phase
+  tendencies and emits pseudonymous manager profiles only when an untouched
+  season plus a manager-clustered interval beats the room baseline. Its CLI
+  excludes Joe's history from every stage and keeps the owner map private.
+- `opponent-window.mjs` and `opponent-war-room.mjs` bind the announced snake
+  order to held-out-cleared position pressure. Manager tendencies are a close-
+  tier tiebreak only; the fallback is the room phase and no exact-player claim
+  is made.
+- `draft-survival-calibration.mjs` learns the empirical league draft residual
+  curve and gates the narrower position layer on held-out Brier improvement.
+  Missing point-in-time Yahoo/static-BPA history is reported, never rebuilt.
 - `draft-committee.mjs` creates compact, packet-hashed candidate ballots and
   accepts consensus only when both responses are valid, available, and inside
   the deadline. Otherwise the deterministic baseline order is unchanged.
 - `build-v5-board.mjs` and `export-extension-board.mjs` reconcile free Yahoo,
   league-scored history/market, injury, and eligibility evidence into the
   static executable board without a live network/model dependency. The board
-  receipts offense, specialist, and eligibility observation times separately.
+  normalizes sources per game, preserves weekly bonus events, and receipts
+  offense, specialist, health, and eligibility observation times separately.
 - `injury-monitor.mjs` keeps injuries, suspensions, holdouts, and role
-  uncertainty on a compact manual-review watchlist; a suspension without a
-  reported return is excluded.
+  uncertainty on a compact manual-review watchlist, receipts full-player
+  coverage, and changes expected games only from explicit consistent evidence.
+- `weekly-roster-utility.mjs` creates the 17-week availability and scoring
+  profiles used by the live optimizer while keeping source disagreement
+  separate from calibrated player outcome intervals.
 - `test-draft-acceptance.mjs` grades one exported TEST-league draft against the
   existing runner and roster contracts. It replays recorded choices and marks
   counterfactual scoring unavailable when the compact receipt did not preserve
