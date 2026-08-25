@@ -209,9 +209,14 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     incompleteRoster: { pass: helpers.validateCompletedRoster(reference.picks.slice(0, -1), config) === false },
   };
   const validRosters = simulations.filter((simulation) => simulation.validRoster).length;
-  const accepted = simulations.length === 60 && validRosters === simulations.length &&
-    latency.recomputeP95Ms < latency.recomputeBudgetMs &&
-    Object.values(policyChecks).every(Boolean) && Object.values(chaos).every((scenario) => scenario.pass);
+  const acceptanceGates = {
+    simulationCount: simulations.length === 60,
+    allRostersValid: validRosters === simulations.length,
+    latencyWithinBudget: latency.recomputeP95Ms < latency.recomputeBudgetMs,
+    policyChecks: Object.values(policyChecks).every(Boolean),
+    chaosChecks: Object.values(chaos).every((scenario) => scenario.pass),
+  };
+  const accepted = Object.values(acceptanceGates).every(Boolean);
   return {
     schemaVersion: 2,
     generatedAt,
@@ -222,6 +227,7 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     seeds,
     validRosters,
     latency,
+    acceptanceGates,
     policyChecks,
     lateRoundDistribution: lateRoundDistribution(simulations),
     openingDistribution: openingDistribution(simulations),
@@ -248,7 +254,7 @@ async function main() {
   const [boardSource, runnerSource] = await Promise.all([readFile(args.board, "utf8"), readFile(args.runner, "utf8")]);
   const report = buildRehearsalReport({ boardSource, runnerSource, generatedAt: args["generated-at"] });
   await writeFile(args.output, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
-  process.stdout.write(`${JSON.stringify({ output: args.output, accepted: report.accepted, simulations: report.simulations, validRosters: report.validRosters, recomputeP95Ms: report.latency.recomputeP95Ms, fallbackCount: report.latency.fallbackCount, chaosPass: Object.values(report.rehearsals.chaos).every((scenario) => scenario.pass) })}\n`);
+  process.stdout.write(`${JSON.stringify({ output: args.output, accepted: report.accepted, acceptanceGates: report.acceptanceGates, simulations: report.simulations, validRosters: report.validRosters, recomputeP95Ms: report.latency.recomputeP95Ms, fallbackCount: report.latency.fallbackCount, chaosPass: Object.values(report.rehearsals.chaos).every((scenario) => scenario.pass) })}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

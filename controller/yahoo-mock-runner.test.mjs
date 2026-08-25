@@ -191,6 +191,57 @@ test("a confirmed target preserves its weekly profile for the following round", 
   assert.equal(second.decision.utilityModel, "WEEKLY_OPTIMAL_LINEUP_W1_17");
 });
 
+test("grouped weekly scoring matches the ungrouped exact lineup reference", () => {
+  const weekly = (points, byeIndex = null) => Array.from({ length: 17 }, (_, index) => index === byeIndex ? 0 : points);
+  const config = {
+    ...testConfig,
+    rounds: 5,
+    rosterSlots: ["QB", "RB", "W/R/T", "BN", "BN"],
+    positionLimits: { QB: 6, RB: 6, WR: 6, TE: 6 },
+  };
+  const picks = helpers.validateBoard([
+    player("RB", 1, 1, { weeklyPoints: weekly(25, 4), weeklyAvailability: weekly(1, 4) }),
+  ]);
+  const pool = helpers.validateBoard([
+    player("QB", 1, 2, { weeklyPoints: weekly(28, 5), weeklyAvailability: weekly(1, 5) }),
+    player("QB", 2, 3, { weeklyPoints: weekly(23, 4), weeklyAvailability: weekly(1, 4) }),
+    player("RB", 2, 4, { weeklyPoints: weekly(22, 6), weeklyAvailability: weekly(1, 6) }),
+    player("WR", 1, 5, { weeklyPoints: weekly(21, 5), weeklyAvailability: weekly(1, 5) }),
+    player("WR", 2, 6, { weeklyPoints: weekly(20, 7), weeklyAvailability: weekly(1, 7) }),
+    player("TE", 1, 7, { weeklyPoints: weekly(19, 6), weeklyAvailability: weekly(1, 6) }),
+  ]);
+  const scored = helpers.scoreCandidates({ round: 2, seat: 6, picks, pool, config, replacementBySlot });
+  const baseUtility = helpers.optimalRosterUtility(picks, config, replacementBySlot);
+  const reference = pool.map((candidate) => ({
+    player: candidate,
+    marginalUtility: helpers.optimalRosterUtility([...picks, candidate], config, replacementBySlot) - baseUtility,
+    pAvailableNext: helpers.survivalProbability(candidate, scored.window.nextPick, 0),
+  }));
+  const nextCandidates = reference.slice().sort((left, right) =>
+    right.marginalUtility - left.marginalUtility || left.player.rank - right.player.rank
+  ).slice(0, 6);
+  for (const entry of reference) {
+    const alternatives = nextCandidates
+      .filter((candidate) => candidate !== entry)
+      .map((candidate) => ({
+        ...candidate,
+        marginalAfterEntry: helpers.optimalRosterUtility([...picks, entry.player, candidate.player], config, replacementBySlot) -
+          helpers.optimalRosterUtility([...picks, entry.player], config, replacementBySlot),
+      }))
+      .sort((left, right) => right.marginalAfterEntry - left.marginalAfterEntry || left.player.rank - right.player.rank);
+    let noneBetter = 1;
+    let expectedNextUtility = 0;
+    for (const candidate of alternatives) {
+      expectedNextUtility += noneBetter * candidate.pAvailableNext * candidate.marginalAfterEntry;
+      noneBetter *= 1 - candidate.pAvailableNext;
+    }
+    const actual = scored.ranked.find((candidate) => candidate.player.yahooId === entry.player.yahooId);
+    assert.ok(Math.abs(actual.marginalUtility - entry.marginalUtility) < 1e-9);
+    assert.ok(Math.abs(actual.expectedNextUtility - expectedNextUtility) < 1e-9);
+    assert.ok(Math.abs(actual.decisionScore - (entry.marginalUtility + expectedNextUtility)) < 1e-9);
+  }
+});
+
 test("uses the held-out survival packet when its gate is enabled", () => {
   const candidate = helpers.validateBoard([player("QB", 1, 20, { adpLow: 45, adpHigh: 55 })])[0];
   const survivalCalibration = {

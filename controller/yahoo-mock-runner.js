@@ -575,22 +575,34 @@
     const weeklyMode = pool.length > 0 && pool.every((player) => Array.isArray(player.weeklyPoints) && player.weeklyPoints.length === 17) &&
       Array.from(picks ?? []).every((player) => Array.isArray(player.weeklyPoints) && player.weeklyPoints.length === 17);
     const periods = weeklyMode ? Array.from({ length: 17 }, (_, index) => index) : [null];
-    const periodContexts = periods.map((period) => {
-      const valueForSlot = (player, slot) => {
-        const projection = Number(period == null ? player.projection : player.weeklyPoints[period]);
-        const baseline = baselineForSlot(slot, replacementBySlot) / (period == null ? 1 : 17);
+    const groupedPeriods = new Map();
+    for (const period of periods) {
+      const signature = period == null
+        ? "SEASON"
+        : JSON.stringify(Array.from(picks ?? [], (player) => player.weeklyPoints[period]));
+      if (!groupedPeriods.has(signature)) groupedPeriods.set(signature, []);
+      groupedPeriods.get(signature).push(period);
+    }
+    const periodContexts = [...groupedPeriods.values()].map((contextPeriods) => {
+      const representativePeriod = contextPeriods[0];
+      const valueForProjection = (projection, slot) => {
+        const baseline = baselineForSlot(slot, replacementBySlot) / (representativePeriod == null ? 1 : 17);
         return Number.isFinite(projection) ? Math.max(0, projection - baseline) : 0;
+      };
+      const valueForSlot = (player, slot) => {
+        const projection = Number(representativePeriod == null ? player.projection : player.weeklyPoints[representativePeriod]);
+        return valueForProjection(projection, slot);
       };
       const profile = assignmentExclusionProfile(picks, slots, valueForSlot);
       return {
-        period,
-        valueForSlot,
+        periods: contextPeriods,
+        valueForProjection,
         baseUtility: profile.baseUtility,
         utilityWithoutSlot: profile.utilityWithoutSlot,
         utilityWithoutPair: profile.utilityWithoutPair,
       };
     });
-    const baseUtility = periodContexts.reduce((sum, context) => sum + context.baseUtility, 0);
+    const baseUtility = periodContexts.reduce((sum, context) => sum + context.baseUtility * context.periods.length, 0);
     const baseFilled = maximumFilledStarterSlots(picks, config);
     const filledWithoutSlot = slots.map((_, excludedIndex) =>
       maximumAssignment(picks, slots.filter((__, index) => index !== excludedIndex), () => 1).count
@@ -613,16 +625,34 @@
       .map((player) => {
         const eligible = playerEligibility(player);
         const slotIndexes = slots.map((slot, index) => normalizedRosterSlotAccepts(eligible, slot) ? index : -1).filter((index) => index >= 0);
-        const periodSlotValues = periodContexts.map((context) =>
-          slotIndexes.map((slotIndex) => context.valueForSlot(player, slots[slotIndex]))
-        );
-        const withCandidate = periodContexts.reduce((total, context, contextIndex) => {
-          let periodUtility = context.baseUtility;
-          for (let eligibleIndex = 0; eligibleIndex < slotIndexes.length; eligibleIndex += 1) {
-            const slotIndex = slotIndexes[eligibleIndex];
-            periodUtility = Math.max(periodUtility, context.utilityWithoutSlot[slotIndex] + periodSlotValues[contextIndex][eligibleIndex]);
+        const contextValueGroups = periodContexts.map((context) => {
+          const byProjection = new Map();
+          for (const period of context.periods) {
+            const projection = Number(period == null ? player.projection : player.weeklyPoints[period]);
+            const key = String(projection);
+            let group = byProjection.get(key);
+            if (!group) {
+              group = {
+                projection,
+                count: 0,
+                slotValues: slotIndexes.map((slotIndex) => context.valueForProjection(projection, slots[slotIndex])),
+              };
+              byProjection.set(key, group);
+            }
+            group.count += 1;
           }
-          return total + periodUtility;
+          return { groups: [...byProjection.values()], byProjection };
+        });
+        const withCandidate = periodContexts.reduce((total, context, contextIndex) => {
+          for (const group of contextValueGroups[contextIndex].groups) {
+            let periodUtility = context.baseUtility;
+            for (let eligibleIndex = 0; eligibleIndex < slotIndexes.length; eligibleIndex += 1) {
+              const slotIndex = slotIndexes[eligibleIndex];
+              periodUtility = Math.max(periodUtility, context.utilityWithoutSlot[slotIndex] + group.slotValues[eligibleIndex]);
+            }
+            total += periodUtility * group.count;
+          }
+          return total;
         }, 0);
         const marginalUtility = Math.max(0, withCandidate - baseUtility);
         const pressure = Math.max(...playerEligibility(player).map((position) => Number(runPressureByPosition[position] ?? 0)));
@@ -631,7 +661,7 @@
           marginalUtility,
           utilityAfter: withCandidate,
           slotIndexes,
-          periodSlotValues,
+          contextValueGroups,
           pAvailableNext: survivalProbability(player, window.nextPick, pressure, survivalCalibration),
           survivalStatus: survivalCalibration?.calibration?.enabled
             ? survivalCalibration.calibration.positionLayerEnabled
@@ -670,21 +700,40 @@
     };
     const utilityWithPair = (leftEntry, rightEntry) => {
       return periodContexts.reduce((total, context, contextIndex) => {
-        let periodUtility = context.baseUtility;
-        for (let leftIndex = 0; leftIndex < leftEntry.slotIndexes.length; leftIndex += 1) {
-          const left = leftEntry.slotIndexes[leftIndex];
-          periodUtility = Math.max(periodUtility, context.utilityWithoutSlot[left] + leftEntry.periodSlotValues[contextIndex][leftIndex]);
+        const combinations = new Map();
+        for (const period of context.periods) {
+          const leftProjection = Number(period == null ? leftEntry.player.projection : leftEntry.player.weeklyPoints[period]);
+          const rightProjection = Number(period == null ? rightEntry.player.projection : rightEntry.player.weeklyPoints[period]);
+          const key = `${leftProjection}:${rightProjection}`;
+          let combination = combinations.get(key);
+          if (!combination) {
+            combination = {
+              count: 0,
+              leftValues: leftEntry.contextValueGroups[contextIndex].byProjection.get(String(leftProjection)).slotValues,
+              rightValues: rightEntry.contextValueGroups[contextIndex].byProjection.get(String(rightProjection)).slotValues,
+            };
+            combinations.set(key, combination);
+          }
+          combination.count += 1;
+        }
+        for (const combination of combinations.values()) {
+          let periodUtility = context.baseUtility;
+          for (let leftIndex = 0; leftIndex < leftEntry.slotIndexes.length; leftIndex += 1) {
+            const left = leftEntry.slotIndexes[leftIndex];
+            periodUtility = Math.max(periodUtility, context.utilityWithoutSlot[left] + combination.leftValues[leftIndex]);
+            for (let rightIndex = 0; rightIndex < rightEntry.slotIndexes.length; rightIndex += 1) {
+              const right = rightEntry.slotIndexes[rightIndex];
+              if (left === right) continue;
+              periodUtility = Math.max(periodUtility, context.utilityWithoutPair(left, right) + combination.leftValues[leftIndex] + combination.rightValues[rightIndex]);
+            }
+          }
           for (let rightIndex = 0; rightIndex < rightEntry.slotIndexes.length; rightIndex += 1) {
             const right = rightEntry.slotIndexes[rightIndex];
-            if (left === right) continue;
-            periodUtility = Math.max(periodUtility, context.utilityWithoutPair(left, right) + leftEntry.periodSlotValues[contextIndex][leftIndex] + rightEntry.periodSlotValues[contextIndex][rightIndex]);
+            periodUtility = Math.max(periodUtility, context.utilityWithoutSlot[right] + combination.rightValues[rightIndex]);
           }
+          total += periodUtility * combination.count;
         }
-        for (let rightIndex = 0; rightIndex < rightEntry.slotIndexes.length; rightIndex += 1) {
-          const right = rightEntry.slotIndexes[rightIndex];
-          periodUtility = Math.max(periodUtility, context.utilityWithoutSlot[right] + rightEntry.periodSlotValues[contextIndex][rightIndex]);
-        }
-        return total + periodUtility;
+        return total;
       }, 0);
     };
     const remainingAfterPair = config.rounds - Array.from(picks ?? []).length - 2;
