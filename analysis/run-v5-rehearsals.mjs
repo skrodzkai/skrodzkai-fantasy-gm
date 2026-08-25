@@ -17,6 +17,7 @@ function loadRuntime(boardSource, runnerSource) {
   return {
     board: [...new Map(source.map((player) => [String(player.yahooId), player])).values()],
     replacementBySlot: boardData.replacementBySlot,
+    survivalCalibration: boardData.survivalCalibration ?? null,
     runner: context.SKRODZKaiYahooMockRunner,
   };
 }
@@ -60,7 +61,7 @@ function pressureFromRecentPicks(recentPicks) {
   return Object.fromEntries(Object.entries(counts).map(([position, count]) => [position, Math.min(2, Math.max(-2, (count - 1) / 2))]));
 }
 
-function simulateOne({ board, helpers, config, replacementBySlot, seat, seed }) {
+function simulateOne({ board, helpers, config, replacementBySlot, survivalCalibration, seat, seed }) {
   const validated = helpers.validateBoard(board);
   const unavailableSpecialists = thinnedSpecialistIds(validated, seed);
   const picks = [];
@@ -96,6 +97,7 @@ function simulateOne({ board, helpers, config, replacementBySlot, seat, seed }) 
         minimum: 5,
         config,
         replacementBySlot,
+        survivalCalibration,
         runPressureByPosition: pressureFromRecentPicks(opponentPicks.slice(-12)),
       });
     } catch (error) {
@@ -157,12 +159,12 @@ function openingDistribution(simulations) {
 }
 
 export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, seeds = [2026, 2027, 2028, 2029, 2030] }) {
-  const { board, replacementBySlot, runner } = loadRuntime(boardSource, runnerSource);
+  const { board, replacementBySlot, survivalCalibration, runner } = loadRuntime(boardSource, runnerSource);
   const config = runner.configs.real_league_19_idp;
   const helpers = runner._test;
   if (!replacementBySlot || !Object.keys(replacementBySlot).length) throw new Error("extension board is missing joint replacement baselines");
   const simulations = Array.from({ length: 12 }, (_, index) => index + 1)
-    .flatMap((seat) => seeds.map((seed) => simulateOne({ board, helpers, config, replacementBySlot, seat, seed })));
+    .flatMap((seat) => seeds.map((seed) => simulateOne({ board, helpers, config, replacementBySlot, survivalCalibration, seat, seed })));
   const reference = simulations[0];
   const identityChaos = reconcileSettingsAndYahoo({
     settings: { leagueKey: "18599", teamKey: "12", seat: reference.seat, requireReadOnly: true },
@@ -178,6 +180,11 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     minimum: 5,
     config,
     replacementBySlot,
+    survivalCalibrationStatus: survivalCalibration?.calibration?.enabled
+      ? survivalCalibration.calibration.positionLayerEnabled
+        ? "HELD_OUT_CALIBRATED_POSITION_RESIDUAL"
+        : "HELD_OUT_CALIBRATED_ROOM_RESIDUAL"
+      : "UNCALIBRATED_MARKET_FALLBACK",
   });
   const recomputeValues = simulations.flatMap((simulation) => simulation.picks.map((pick) => pick.recomputeMs));
   const latency = {

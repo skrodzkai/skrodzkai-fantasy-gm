@@ -469,7 +469,7 @@ test("bundled board contains unique IDs and labeled market evidence or fallback"
   assert.equal(hunter.position, "WR");
   assert.equal(hunter.automaticEligible, false);
   assert.equal(hunter.manualEligible, true);
-  assert.match(board.source, /equal-weight Yahoo and league-scored prior-history/);
+  assert.match(board.source, /equal-weight per-game Yahoo and league-scored prior-history/);
   for (const player of offense) {
     assert.equal(Number.isFinite(player.vor), true);
     if (player.adpLow == null) {

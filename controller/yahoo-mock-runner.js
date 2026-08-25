@@ -1,7 +1,7 @@
 (function installYahooMockRunner(root) {
   "use strict";
 
-  const VERSION = "2.0.0";
+  const VERSION = "2.1.0";
   const GLOBAL_KEY = "__skrodzkaiYahooMockRunnerV1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-runner-receipts-v1";
   const OFFENSE = ["QB", "RB", "WR", "TE"];
@@ -19,6 +19,7 @@
   const TURN_TO_CLICK_BUDGET_MS = 2000;
   const NEXT_TURN_COMPARISON_POOL = 6;
   const NORMALIZED_VALUE_CACHE = new Map();
+  const SURVIVAL_BUCKET_CACHE = new WeakMap();
 
   const CONFIGS = Object.freeze({
     public_mock_15: Object.freeze({
@@ -196,6 +197,13 @@
         rank: Number(player.valueRank ?? player.rank ?? index + 1),
         yahooRank: player.yahooRank == null || player.yahooRank === "" ? null : Number(player.yahooRank),
         projection: player.projection == null || player.projection === "" ? null : Number(player.projection),
+        perGamePoints: player.perGamePoints == null || player.perGamePoints === "" ? null : Number(player.perGamePoints),
+        expectedGamesThroughWeek17: player.expectedGamesThroughWeek17 == null || player.expectedGamesThroughWeek17 === "" ? null : Number(player.expectedGamesThroughWeek17),
+        weeklyPoints: Array.isArray(player.weeklyPoints) ? player.weeklyPoints.map(Number) : null,
+        weeklyAvailability: Array.isArray(player.weeklyAvailability) ? player.weeklyAvailability.map(Number) : null,
+        outcomeLow: player.outcomeLow == null || player.outcomeLow === "" ? null : Number(player.outcomeLow),
+        outcomeHigh: player.outcomeHigh == null || player.outcomeHigh === "" ? null : Number(player.outcomeHigh),
+        uncertaintyStatus: String(player.uncertaintyStatus ?? "OUTCOME_INTERVAL_UNAVAILABLE"),
         replacementPoints: player.replacementPoints == null || player.replacementPoints === "" ? null : Number(player.replacementPoints),
         eligible: [...new Set(Array.from(player.eligible ?? [position], normalize).filter(Boolean))],
         automaticEligible: player.automaticEligible !== false,
@@ -209,6 +217,12 @@
       if (!Number.isFinite(copy.rank)) throw new Error(`board player ${index} has invalid rank`);
       if (!Number.isFinite(copy.projection) && (copy.automaticEligible || copy.manualEligible)) {
         throw new Error(`board player ${index} has invalid league projection`);
+      }
+      if (copy.weeklyPoints && (copy.weeklyPoints.length !== 17 || copy.weeklyPoints.some((value) => !Number.isFinite(value) || value < 0))) {
+        throw new Error(`board player ${index} has invalid weekly projection`);
+      }
+      if (copy.weeklyAvailability && (copy.weeklyAvailability.length !== 17 || copy.weeklyAvailability.some((value) => !Number.isFinite(value) || value < 0 || value > 1))) {
+        throw new Error(`board player ${index} has invalid weekly availability`);
       }
       if (!copy.eligible.length) throw new Error(`board player ${index} requires Yahoo eligibility`);
       const vor = Number(player.vor);
@@ -355,8 +369,104 @@
     return { count, value: -totalCost };
   }
 
+  function assignmentExclusionProfile(picks, slots, edgeValue) {
+    const players = Array.from(picks ?? []);
+    const parent = slots.map((_, index) => index);
+    const find = (index) => {
+      let root = index;
+      while (parent[root] !== root) root = parent[root];
+      while (parent[index] !== index) {
+        const next = parent[index];
+        parent[index] = root;
+        index = next;
+      }
+      return root;
+    };
+    const union = (left, right) => {
+      const leftRoot = find(left);
+      const rightRoot = find(right);
+      if (leftRoot !== rightRoot) parent[rightRoot] = leftRoot;
+    };
+    for (const player of players) {
+      const eligible = playerEligibility(player);
+      const accepted = slots.map((slot, index) => normalizedRosterSlotAccepts(eligible, slot) ? index : -1).filter((index) => index >= 0);
+      for (let index = 1; index < accepted.length; index += 1) union(accepted[0], accepted[index]);
+    }
+    const slotsByRoot = new Map();
+    for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) {
+      const root = find(slotIndex);
+      if (!slotsByRoot.has(root)) slotsByRoot.set(root, []);
+      slotsByRoot.get(root).push(slotIndex);
+    }
+    const components = [...slotsByRoot.values()].map((slotIndices) => {
+      const localIndex = new Map(slotIndices.map((slotIndex, index) => [slotIndex, index]));
+      const stateCount = 1 << slotIndices.length;
+      let values = new Float64Array(stateCount);
+      values.fill(Number.NEGATIVE_INFINITY);
+      values[0] = 0;
+      for (const player of players) {
+        const eligible = playerEligibility(player);
+        const edges = slotIndices.flatMap((slotIndex) => {
+          if (!normalizedRosterSlotAccepts(eligible, slots[slotIndex])) return [];
+          const value = Number(edgeValue(player, slots[slotIndex]));
+          return Number.isFinite(value) && value > 0 ? [[1 << localIndex.get(slotIndex), value]] : [];
+        });
+        if (!edges.length) continue;
+        const next = values.slice();
+        for (let mask = 0; mask < stateCount; mask += 1) {
+          const current = values[mask];
+          if (!Number.isFinite(current)) continue;
+          for (const [bit, value] of edges) {
+            if (mask & bit) continue;
+            const target = mask | bit;
+            next[target] = Math.max(next[target], current + value);
+          }
+        }
+        values = next;
+      }
+      const bestSubset = values.slice();
+      for (let slotIndex = 0; slotIndex < slotIndices.length; slotIndex += 1) {
+        const bit = 1 << slotIndex;
+        for (let mask = 0; mask < stateCount; mask += 1) {
+          if (mask & bit) bestSubset[mask] = Math.max(bestSubset[mask], bestSubset[mask ^ bit]);
+        }
+      }
+      const fullMask = stateCount - 1;
+      return { slotIndices, localIndex, bestSubset, fullMask, baseUtility: bestSubset[fullMask] };
+    });
+    const componentBySlot = new Map(components.flatMap((component) => component.slotIndices.map((slotIndex) => [slotIndex, component])));
+    const baseUtility = components.reduce((sum, component) => sum + component.baseUtility, 0);
+    const without = (slotIndices) => {
+      const excludedByComponent = new Map();
+      for (const slotIndex of slotIndices) {
+        const component = componentBySlot.get(slotIndex);
+        const localBit = 1 << component.localIndex.get(slotIndex);
+        excludedByComponent.set(component, (excludedByComponent.get(component) ?? 0) | localBit);
+      }
+      let value = baseUtility;
+      for (const [component, excluded] of excludedByComponent) {
+        value += component.bestSubset[component.fullMask ^ excluded] - component.baseUtility;
+      }
+      return value;
+    };
+    return {
+      baseUtility,
+      utilityWithoutSlot: slots.map((_, slotIndex) => without([slotIndex])),
+      utilityWithoutPair(left, right) {
+        return without([left, right]);
+      },
+    };
+  }
+
   function optimalRosterUtility(picks, config, replacementBySlot = {}) {
     const slots = starterSlots(config);
+    const weekly = Array.from(picks ?? []).length > 0 && Array.from(picks ?? []).every((player) => Array.isArray(player.weeklyPoints) && player.weeklyPoints.length === 17);
+    if (weekly) {
+      return Array.from({ length: 17 }, (_, weekIndex) => maximumAssignment(picks, slots, (player, slot) => {
+        const projection = Number(player.weeklyPoints[weekIndex]);
+        return Number.isFinite(projection) ? Math.max(0, projection - baselineForSlot(slot, replacementBySlot) / 17) : 0;
+      }).value).reduce((sum, value) => sum + value, 0);
+    }
     return maximumAssignment(picks, slots, (player, slot) => {
       const projection = Number(player.projection);
       return Number.isFinite(projection) ? Math.max(0, projection - baselineForSlot(slot, replacementBySlot)) : 0;
@@ -398,8 +508,38 @@
     return starters - filled <= picksRemaining;
   }
 
-  function survivalProbability(player, nextPick, runPressure = 0) {
+  function survivalProbability(player, nextPick, runPressure = 0, survivalCalibration = null) {
     if (!Number.isFinite(nextPick)) return 0;
+    const packet = survivalCalibration?.model ? survivalCalibration : null;
+    if (packet?.calibration?.enabled && packet.model?.global?.values?.length) {
+      const model = packet.model;
+      const positionBucket = model.positions?.[normalize(player.position)];
+      const bucket = packet.calibration.positionLayerEnabled === true && positionBucket?.sampleCount >= Number(model.minimumPositionSamples ?? 30)
+        ? positionBucket
+        : model.global;
+      const pressure = Math.max(-2, Math.min(2, Number(runPressure) || 0));
+      const threshold = Number(nextPick) - Number(player.marketMean ?? player.rank) + pressure * Number(bucket.scale ?? 3) * 0.25;
+      let index = SURVIVAL_BUCKET_CACHE.get(bucket);
+      if (!index) {
+        const residuals = Float64Array.from(bucket.values, (row) => Number(row.residual));
+        const suffixWeights = new Float64Array(bucket.values.length + 1);
+        for (let cursor = bucket.values.length - 1; cursor >= 0; cursor -= 1) {
+          suffixWeights[cursor] = suffixWeights[cursor + 1] + Number(bucket.values[cursor].weight);
+        }
+        index = { residuals, suffixWeights };
+        SURVIVAL_BUCKET_CACHE.set(bucket, index);
+      }
+      let low = 0;
+      let high = index.residuals.length;
+      while (low < high) {
+        const middle = (low + high) >> 1;
+        if (index.residuals[middle] < threshold) low = middle + 1;
+        else high = middle;
+      }
+      const survivedWeight = index.suffixWeights[low];
+      const totalWeight = index.suffixWeights[0];
+      return Math.max(0.01, Math.min(0.99, (survivedWeight + 1) / (totalWeight + 2)));
+    }
     const observedRange = Number.isFinite(player.adpEarliest) && Number.isFinite(player.adpLatest);
     const mean = observedRange ? (player.adpEarliest + player.adpLatest) / 2 : player.marketMean ?? player.rank;
     const spread = observedRange
@@ -417,6 +557,8 @@
       rank: player.rank,
       vor: player.vor,
       projection: player.projection,
+      expectedGamesThroughWeek17: player.expectedGamesThroughWeek17,
+      uncertaintyStatus: player.uncertaintyStatus,
       eligible: player.eligible,
       adpEarliest: player.adpEarliest,
       adpLatest: player.adpLatest,
@@ -426,18 +568,29 @@
     };
   }
 
-  function scoreCandidates({ round, seat, picks, pool, config, replacementBySlot, runPressureByPosition = {} }) {
+  function scoreCandidates({ round, seat, picks, pool, config, replacementBySlot, runPressureByPosition = {}, survivalCalibration = null }) {
     const startedAt = Date.now();
     const window = turnWindow(round, seat, config.teams, config.rounds);
     const slots = starterSlots(config);
-    const valueForSlot = (player, slot) => {
-      const projection = Number(player.projection);
-      return Number.isFinite(projection) ? Math.max(0, projection - baselineForSlot(slot, replacementBySlot)) : 0;
-    };
-    const baseUtility = maximumAssignment(picks, slots, valueForSlot).value;
-    const utilityWithoutSlot = slots.map((_, excludedIndex) =>
-      maximumAssignment(picks, slots.filter((__, index) => index !== excludedIndex), valueForSlot).value
-    );
+    const weeklyMode = pool.length > 0 && pool.every((player) => Array.isArray(player.weeklyPoints) && player.weeklyPoints.length === 17) &&
+      Array.from(picks ?? []).every((player) => Array.isArray(player.weeklyPoints) && player.weeklyPoints.length === 17);
+    const periods = weeklyMode ? Array.from({ length: 17 }, (_, index) => index) : [null];
+    const periodContexts = periods.map((period) => {
+      const valueForSlot = (player, slot) => {
+        const projection = Number(period == null ? player.projection : player.weeklyPoints[period]);
+        const baseline = baselineForSlot(slot, replacementBySlot) / (period == null ? 1 : 17);
+        return Number.isFinite(projection) ? Math.max(0, projection - baseline) : 0;
+      };
+      const profile = assignmentExclusionProfile(picks, slots, valueForSlot);
+      return {
+        period,
+        valueForSlot,
+        baseUtility: profile.baseUtility,
+        utilityWithoutSlot: profile.utilityWithoutSlot,
+        utilityWithoutPair: profile.utilityWithoutPair,
+      };
+    });
+    const baseUtility = periodContexts.reduce((sum, context) => sum + context.baseUtility, 0);
     const baseFilled = maximumFilledStarterSlots(picks, config);
     const filledWithoutSlot = slots.map((_, excludedIndex) =>
       maximumAssignment(picks, slots.filter((__, index) => index !== excludedIndex), () => 1).count
@@ -459,36 +612,45 @@
       .filter((player) => slots.length - assignmentWithOne(player, filledWithoutSlot, baseFilled) <= remainingAfterCandidate)
       .map((player) => {
         const eligible = playerEligibility(player);
-        let withCandidate = baseUtility;
-        for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) {
-          if (!normalizedRosterSlotAccepts(eligible, slots[slotIndex])) continue;
-          withCandidate = Math.max(withCandidate, utilityWithoutSlot[slotIndex] + valueForSlot(player, slots[slotIndex]));
-        }
+        const slotIndexes = slots.map((slot, index) => normalizedRosterSlotAccepts(eligible, slot) ? index : -1).filter((index) => index >= 0);
+        const periodSlotValues = periodContexts.map((context) =>
+          slotIndexes.map((slotIndex) => context.valueForSlot(player, slots[slotIndex]))
+        );
+        const withCandidate = periodContexts.reduce((total, context, contextIndex) => {
+          let periodUtility = context.baseUtility;
+          for (let eligibleIndex = 0; eligibleIndex < slotIndexes.length; eligibleIndex += 1) {
+            const slotIndex = slotIndexes[eligibleIndex];
+            periodUtility = Math.max(periodUtility, context.utilityWithoutSlot[slotIndex] + periodSlotValues[contextIndex][eligibleIndex]);
+          }
+          return total + periodUtility;
+        }, 0);
         const marginalUtility = Math.max(0, withCandidate - baseUtility);
         const pressure = Math.max(...playerEligibility(player).map((position) => Number(runPressureByPosition[position] ?? 0)));
         return {
           player,
           marginalUtility,
           utilityAfter: withCandidate,
-          pAvailableNext: survivalProbability(player, window.nextPick, pressure),
-          survivalStatus: player.marketStatus,
+          slotIndexes,
+          periodSlotValues,
+          pAvailableNext: survivalProbability(player, window.nextPick, pressure, survivalCalibration),
+          survivalStatus: survivalCalibration?.calibration?.enabled
+            ? survivalCalibration.calibration.positionLayerEnabled
+              ? "HELD_OUT_CALIBRATED_POSITION_RESIDUAL"
+              : "HELD_OUT_CALIBRATED_ROOM_RESIDUAL"
+            : player.marketStatus,
         };
       });
     const nextCandidates = entries
       .slice()
       .sort((left, right) => right.marginalUtility - left.marginalUtility || left.player.rank - right.player.rank)
       .slice(0, NEXT_TURN_COMPARISON_POOL);
-    const utilityWithoutPair = new Map();
     const filledWithoutPair = new Map();
-    if (Number.isFinite(window.nextPick)) {
+    if (Number.isFinite(window.nextPick) && round + 1 >= config.rounds) {
       for (let left = 0; left < slots.length; left += 1) {
         for (let right = left + 1; right < slots.length; right += 1) {
           const remainingSlots = slots.filter((_, index) => index !== left && index !== right);
           const key = `${left}:${right}`;
-          utilityWithoutPair.set(key, maximumAssignment(picks, remainingSlots, valueForSlot).value);
-          if (round + 1 >= config.rounds) {
-            filledWithoutPair.set(key, maximumAssignment(picks, remainingSlots, () => 1).count);
-          }
+          filledWithoutPair.set(key, maximumAssignment(picks, remainingSlots, () => 1).count);
         }
       }
     }
@@ -507,18 +669,23 @@
       return result;
     };
     const utilityWithPair = (leftEntry, rightEntry) => {
-      let result = Math.max(leftEntry.utilityAfter, rightEntry.utilityAfter);
-      const leftEligible = playerEligibility(leftEntry.player);
-      const rightEligible = playerEligibility(rightEntry.player);
-      for (let left = 0; left < slots.length; left += 1) {
-        if (!normalizedRosterSlotAccepts(leftEligible, slots[left])) continue;
-        for (let right = 0; right < slots.length; right += 1) {
-          if (left === right || !normalizedRosterSlotAccepts(rightEligible, slots[right])) continue;
-          const key = left < right ? `${left}:${right}` : `${right}:${left}`;
-          result = Math.max(result, utilityWithoutPair.get(key) + valueForSlot(leftEntry.player, slots[left]) + valueForSlot(rightEntry.player, slots[right]));
+      return periodContexts.reduce((total, context, contextIndex) => {
+        let periodUtility = context.baseUtility;
+        for (let leftIndex = 0; leftIndex < leftEntry.slotIndexes.length; leftIndex += 1) {
+          const left = leftEntry.slotIndexes[leftIndex];
+          periodUtility = Math.max(periodUtility, context.utilityWithoutSlot[left] + leftEntry.periodSlotValues[contextIndex][leftIndex]);
+          for (let rightIndex = 0; rightIndex < rightEntry.slotIndexes.length; rightIndex += 1) {
+            const right = rightEntry.slotIndexes[rightIndex];
+            if (left === right) continue;
+            periodUtility = Math.max(periodUtility, context.utilityWithoutPair(left, right) + leftEntry.periodSlotValues[contextIndex][leftIndex] + rightEntry.periodSlotValues[contextIndex][rightIndex]);
+          }
         }
-      }
-      return result;
+        for (let rightIndex = 0; rightIndex < rightEntry.slotIndexes.length; rightIndex += 1) {
+          const right = rightEntry.slotIndexes[rightIndex];
+          periodUtility = Math.max(periodUtility, context.utilityWithoutSlot[right] + rightEntry.periodSlotValues[contextIndex][rightIndex]);
+        }
+        return total + periodUtility;
+      }, 0);
     };
     const remainingAfterPair = config.rounds - Array.from(picks ?? []).length - 2;
     for (const entry of entries) {
@@ -550,7 +717,7 @@
       left.player.rank - right.player.rank
     );
     if (!ranked.length) throw new Error("no_legal_bpa_candidates");
-    return { window, ranked, recomputeMs: Date.now() - startedAt };
+    return { window, ranked, recomputeMs: Date.now() - startedAt, utilityModel: weeklyMode ? "WEEKLY_OPTIMAL_LINEUP_W1_17" : "SEASON_TOTAL_FALLBACK" };
   }
 
   function summarizeDecision(scored, selected, fallbackUsed = false) {
@@ -560,6 +727,7 @@
       nextPick: scored.window.nextPick,
       interveningOpponentPicks: scored.window.interveningOpponentPicks,
       policy: "JOINT_BPA_ONE_TURN_VONA",
+      utilityModel: scored.utilityModel,
       recomputeMs: scored.recomputeMs,
       fallbackUsed,
       latencyBudgetMs: DECISION_RECOMPUTE_BUDGET_MS,
@@ -590,6 +758,7 @@
     config = CONFIGS.public_mock_15,
     replacementBySlot = {},
     runPressureByPosition = {},
+    survivalCalibration = null,
     recomputeBudgetMs = DECISION_RECOMPUTE_BUDGET_MS,
   }) {
     const used = new Set(Array.from(picks ?? [], boardKey));
@@ -603,7 +772,7 @@
       throw new Error(`fewer_than_${minimum}_eligible_targets`);
     }
 
-    const scored = scoreCandidates({ round, seat, picks, pool, config, replacementBySlot, runPressureByPosition });
+    const scored = scoreCandidates({ round, seat, picks, pool, config, replacementBySlot, runPressureByPosition, survivalCalibration });
     const fallbackUsed = scored.recomputeMs > recomputeBudgetMs;
     const selected = (fallbackUsed
       ? scored.ranked.slice().sort((left, right) => left.player.rank - right.player.rank)
@@ -746,6 +915,7 @@
     const selectionHoldMs = Number(options.selectionHoldMs ?? 1200);
     const replacementBySlot = options.replacementBySlot ?? {};
     const runPressureByPosition = options.runPressureByPosition ?? {};
+    const survivalCalibration = options.survivalCalibration ?? null;
     const board = validateBoard(options.board);
     const readManualOverride = typeof options.readManualOverride === "function" ? options.readManualOverride : () => null;
     const consumeManualOverride = typeof options.consumeManualOverride === "function" ? options.consumeManualOverride : () => {};
@@ -856,6 +1026,7 @@
             config,
             replacementBySlot,
             runPressureByPosition,
+            survivalCalibration,
           });
           const { targets, manualOverride } = applyManualOverride({
             stage: readManualOverride(),
@@ -1084,8 +1255,13 @@
         observedRosterSlots,
         minimumFallbacks,
         replacementBySlot,
+        survivalCalibrationStatus: survivalCalibration?.calibration?.enabled
+          ? survivalCalibration.calibration.positionLayerEnabled
+            ? "HELD_OUT_CALIBRATED_POSITION_RESIDUAL"
+            : "HELD_OUT_CALIBRATED_ROOM_RESIDUAL"
+          : "UNCALIBRATED_MARKET_FALLBACK",
         selectionHoldMs,
-        strategy: "joint_marginal_roster_utility_plus_probability_weighted_one_turn_vona",
+        strategy: "weekly_optimal_lineup_utility_plus_probability_weighted_one_turn_vona",
       });
       monitorId = environment.setInterval(advance, pollMs);
       advance();
