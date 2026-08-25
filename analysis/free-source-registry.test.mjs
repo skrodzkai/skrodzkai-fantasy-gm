@@ -8,11 +8,15 @@ test("registry contains only zero-cost declared sources", () => {
   assert.ok(FREE_SOURCE_REGISTRY.every((source) => source.cost.toLowerCase().includes("free")));
 });
 
-test("source snapshots report freshness without silently substituting a fallback", () => {
+test("source snapshots require a provenance manifest and report freshness", () => {
+  const manifest = (sourceId, sourceFamily, sourceAsOf) => ({
+    sourceId, sourceFamily, sourceAsOf, retrievedAt: sourceAsOf, snapshotId: `${sourceId}-test`,
+    contentSha256: "a".repeat(64), gamesBasis: "test", projectionPeriod: "2026", licenseUseNote: "test",
+  });
   const result = validateSourceSnapshot(
     [
-      { sourceId: "yahoo", observedAt: "2026-08-22T10:00:00Z" },
-      { sourceId: "nflverse", observedAt: "2026-08-01T10:00:00Z" },
+      manifest("yahoo", "yahoo", "2026-08-22T10:00:00Z"),
+      manifest("nflverse", "nflverse", "2026-08-01T10:00:00Z"),
     ],
     "2026-08-22T12:00:00Z",
   );

@@ -16,7 +16,9 @@ function player(position, rank, overrides = {}) {
     marketAdpHigh: rank - 1,
     consensusPoints: 250 - rank,
     executable: true,
+    manualEligible: true,
     sourceCount: 2,
+    sourceFamilyCount: 2,
     sourceIds: ["yahoo-season-projection", "league-scored-history-market-baseline"],
     ...overrides,
   };
@@ -24,7 +26,7 @@ function player(position, rank, overrides = {}) {
 
 test("exports only executable offense while retaining explicitly labeled specialist uncertainty", () => {
   const offense = Array.from({ length: 101 }, (_, index) => player("RB", index + 1));
-  offense[0].executable = false;
+  offense[0].manualEligible = false;
   offense[1].marketAdpLow = null;
   offense.push(player("WR", 102));
   const board = extensionBoardFromV5({
@@ -32,8 +34,8 @@ test("exports only executable offense while retaining explicitly labeled special
     scoringModel: "test",
     replacementBySlot: { QB: 200, RB: 100, WR: 100, TE: 80, K: 70, DEF: 60, D: 50, DB: 45, LB: 48 },
     boards: { offense, specialists: {
-      K: Array.from({ length: 12 }, (_, index) => player("K", index + 1, { sourceCount: 1, sourceIds: ["yahoo-season-projection"] })),
-      DEF: Array.from({ length: 32 }, (_, index) => player("DEF", index + 1, { sourceCount: 1, sourceIds: ["yahoo-season-projection"] })),
+      K: Array.from({ length: 12 }, (_, index) => player("K", index + 1, { sourceCount: 1, sourceFamilyCount: 1, sourceIds: ["yahoo-season-projection"] })),
+      DEF: Array.from({ length: 32 }, (_, index) => player("DEF", index + 1, { sourceCount: 1, sourceFamilyCount: 1, sourceIds: ["yahoo-season-projection"] })),
       DL: [player("DL", 1)],
       LB: [player("LB", 1)],
       DB: [

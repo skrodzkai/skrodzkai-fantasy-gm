@@ -30,20 +30,18 @@ function compactOffense(player) {
     automaticEligible: player.automaticEligible !== false,
     manualEligible: player.manualEligible !== false,
     validationStatus: player.validationStatus ?? "EXECUTABLE",
-    confidence: player.sourceCount >= 2 ? "MULTI_SOURCE" : "WITHHELD",
+    confidence: player.sourceFamilyCount >= 2 ? "MULTI_SOURCE" : "WITHHELD",
     bye: player.bye ?? null,
   };
 }
 
 function compactSpecialist(player, positionOverride = null) {
   const sourceIds = new Set(player.sourceIds ?? []);
-  const confidence = player.sourceCount >= 2
+  const confidence = player.sourceFamilyCount >= 2
     ? "MULTI_SOURCE"
-    : sourceIds.has("yahoo-season-projection")
+    : sourceIds.has("yahoo-season-projection") || sourceIds.has("yahoo-specialist-season-projection")
       ? "YAHOO_ONLY"
-      : sourceIds.has("league-scored-history-market-baseline")
-        ? "HISTORY_ONLY"
-        : "ELIGIBILITY_ONLY";
+      : "ELIGIBILITY_ONLY";
   return {
     yahooId: String(player.yahooId),
     name: player.name,
@@ -77,15 +75,19 @@ function specialistHealthClear(player) {
   return player.injury == null || (player.injury.draftAction === "CLEAR" && player.injury.conflict !== true);
 }
 
+function specialistUsable(player) {
+  return specialistHealthClear(player) && finite(player.consensusPoints) && Number(player.consensusPoints) > 0;
+}
+
 export function extensionBoardFromV5(board) {
   const offense = (board?.boards?.offense ?? [])
-    .filter((player) => player.executable)
+    .filter((player) => player.manualEligible !== false)
     .filter((player) => finite(player.vorp))
     .map(compactOffense);
   const specialists = board?.boards?.specialists ?? {};
-  const kickers = (specialists.K ?? []).filter(specialistHealthClear).map((player) => compactSpecialist(player, "K"));
-  const defenses = (specialists.DEF ?? []).filter(specialistHealthClear).map((player) => compactSpecialist(player, "DEF"));
-  const idp = ["DL", "LB", "DB"].flatMap((bucket) => (specialists[bucket] ?? []).filter(specialistHealthClear).flatMap((player) => {
+  const kickers = (specialists.K ?? []).filter(specialistUsable).map((player) => compactSpecialist(player, "K"));
+  const defenses = (specialists.DEF ?? []).filter(specialistUsable).map((player) => compactSpecialist(player, "DEF"));
+  const idp = ["DL", "LB", "DB"].flatMap((bucket) => (specialists[bucket] ?? []).filter(specialistUsable).flatMap((player) => {
     const yahooPosition = String(player.yahooPosition ?? "").toUpperCase();
     const eligible = new Set(Array.from(player.eligible ?? [], (position) => String(position).toUpperCase()));
     let position = bucket;
@@ -121,7 +123,7 @@ export function extensionBoardFromV5(board) {
   const players = [...playerByYahooId.values()];
   return {
     generatedAt: board.generatedAt,
-    source: "free-source board: equal-weight per-game Yahoo and league-scored prior-history inputs; explicit availability; injuries cross-checked with Yahoo, Sleeper, and supplied official reports",
+    source: "free-source board: raw projections scored under exact league rules and equal-weighted per independent source family; market/history are timing context only; injuries use source-specific freshness",
     scoringModel: board.scoringModel,
     replacementBySlot: board.replacementBySlot ?? null,
     survivalCalibration: board.survivalCalibration ?? null,

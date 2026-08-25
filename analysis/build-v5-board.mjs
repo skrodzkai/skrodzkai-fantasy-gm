@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import { buildDraftWatchlist, compileInjuryBoard } from "./injury-monitor.mjs";
 import { buildPlayerBoard } from "./player-intelligence.mjs";
 import { buildWeeklyProjectionProfile, expectedGamesFromInjury } from "./weekly-roster-utility.mjs";
+import { FREE_SOURCE_REGISTRY, validateSourceSnapshot } from "./free-source-registry.mjs";
 
 export const LEAGUE_REPLACEMENT_RANKS = Object.freeze({
   QB: 12,
@@ -107,9 +108,9 @@ export function assembleV5Board({
   sleeperPlayers,
   eligibilitySnapshot = null,
   asOf,
-  baselineObservedAt,
   sleeperObservedAt,
   externalInjuryReports = [],
+  projectionSnapshots = [],
   survivalCalibration = null,
   replacementRoster = { teamCount: 12, rosterSlots: LEAGUE_STARTER_SLOTS },
 }) {
@@ -128,6 +129,7 @@ export function assembleV5Board({
       .filter((row) => row.name && row.team)
       .map((row) => [identityKey(row.name, row.team), { ...row, payload: parsePayload(row) }]),
   );
+  const playerIdByIdentity = new Map();
   const { rows: yahooRows, filterMembership } = flattenYahooRows(
     offenseSnapshot,
     specialistSnapshot,
@@ -141,6 +143,12 @@ export function assembleV5Board({
   const specialistIds = new Set(
     Object.values(specialistSnapshot.positions ?? {}).flat().map((player) => String(player.yahooId)),
   );
+  const offenseNames = new Set((offenseSnapshot.players ?? []).map((player) => String(player.name ?? "").toLowerCase()));
+  const splitDualRoleNames = new Set(
+    Object.values(specialistSnapshot.positions ?? {}).flat()
+      .map((player) => String(player.name ?? "").toLowerCase())
+      .filter((name) => offenseNames.has(name)),
+  );
 
   const baselineForYahooRow = (row) => baselineByYahooId.get(String(row.yahooId)) ??
     baselineByIdentity.get(identityKey(row.name, row.team));
@@ -149,7 +157,9 @@ export function assembleV5Board({
     const baseline = baselineForYahooRow(row);
     const observedEligibility = eligibilityByYahooId.get(String(row.yahooId));
     const yahooFilters = filterMembership.get(String(row.yahooId)) ?? [];
-    const position = normalizePosition(row.position || baseline?.position);
+    const splitHunter = String(row.name ?? "").toLowerCase() === "travis hunter";
+    const filterPosition = ["K", "DEF", "LB", "CB", "DB", "D"].find((candidate) => yahooFilters.includes(candidate));
+    const position = normalizePosition(row.position || baseline?.position || (splitHunter ? (offenseIds.has(String(row.yahooId)) ? "WR" : "CB") : filterPosition === "D" ? "DL" : filterPosition));
     const specialistPosition = baseline?.payload?.specialist_qualified
       ? normalizePosition(baseline.payload.specialist?.draft_position)
       : null;
@@ -159,13 +169,13 @@ export function assembleV5Board({
       position,
       specialistPosition,
     ].map(normalizePosition).filter(Boolean))];
-    return {
+    const player = {
       playerId: String(row.yahooId),
       yahooId: String(row.yahooId),
       gsisId: baseline?.gsis_id || null,
       sleeperId: baseline?.sleeper_id || null,
       name: baseline?.name || row.name,
-      team: baseline?.team || row.team,
+      team: baseline?.team || row.team || (splitHunter ? "JAX" : null),
       position,
       specialistPosition,
       yahooPosition: String(row.position ?? position).toUpperCase(),
@@ -179,10 +189,14 @@ export function assembleV5Board({
       marketAdpHigh: baseline?.adp_high ?? null,
       marketAdpSamples: baseline?.payload?.adp_samples ?? null,
     };
+    playerIdByIdentity.set(identityKey(player.name, player.team), player.playerId);
+    return player;
   });
 
   const yahooOffenseSource = {
     sourceId: "yahoo-season-projection",
+    family: "yahoo",
+    maxAgeHours: 6,
     updatedAt: offenseObservedAt,
     weight: 1,
     projectionGames: 17,
@@ -193,6 +207,8 @@ export function assembleV5Board({
   };
   const yahooSpecialistSource = {
     sourceId: "yahoo-specialist-season-projection",
+    family: "yahoo",
+    maxAgeHours: 6,
     updatedAt: specialistObservedAt,
     weight: 1,
     projectionGames: 17,
@@ -201,24 +217,29 @@ export function assembleV5Board({
       .filter((row) => hasFiniteProjection(row.yahooProjectedPoints))
       .map((row) => ({ playerId: String(row.yahooId), leaguePoints: row.yahooProjectedPoints })),
   };
-  const baselineSource = {
-    sourceId: "league-scored-history-market-baseline",
-    updatedAt: baselineObservedAt,
-    weight: 1,
-    projectionGames: 17,
-    rows: yahooRows
-      .map((row) => ({ row, baseline: baselineForYahooRow(row) }))
-      .filter(({ baseline }) => hasFiniteProjection(baseline?.projection))
-      .map(({ row, baseline }) => ({ playerId: String(row.yahooId), leaguePoints: baseline.projection })),
-  };
+  const registryById = new Map(FREE_SOURCE_REGISTRY.map((source) => [source.id, source]));
+  validateSourceSnapshot(projectionSnapshots.map((snapshot) => snapshot.manifest), asOf);
+  const externalProjectionSources = projectionSnapshots.map((snapshot) => {
+    const policy = registryById.get(snapshot.manifest.sourceId);
+    return {
+      sourceId: snapshot.manifest.sourceId,
+      family: policy.sourceFamily,
+      maxAgeHours: policy.maximumRefreshHours,
+      updatedAt: snapshot.manifest.sourceAsOf,
+      weight: 1,
+      rows: snapshot.rows
+        .filter((row) => ["QB", "RB", "WR", "TE"].includes(normalizePosition(row.position)))
+        .map((row) => ({ ...row, playerId: row.playerId ?? playerIdByIdentity.get(identityKey(row.name, row.team)) }))
+        .filter((row) => row.playerId),
+    };
+  });
 
   const projectionBoard = buildPlayerBoard({
     players,
-    sources: [yahooOffenseSource, yahooSpecialistSource, baselineSource],
+    sources: [yahooOffenseSource, yahooSpecialistSource, ...externalProjectionSources],
     replacementRanks: LEAGUE_REPLACEMENT_RANKS,
     asOf,
-    maxAgeHours: 96,
-    minimumFreshSources: 2,
+    evidencePolicy: (player) => ({ minimumFreshFamilies: ["QB", "RB", "WR", "TE"].includes(player.position) ? 2 : 1 }),
     replacementRoster,
   });
 
@@ -253,7 +274,7 @@ export function assembleV5Board({
   const injuryBoard = compileInjuryBoard({
     reports,
     asOf,
-    maxAgeHours: 96,
+    maxAgeHoursBySourceKind: { yahoo: 6, sleeper: 24, nfl_official: 24, team_official: 24 },
     expectedPlayerIds: yahooRows.map((player) => String(player.yahooId)),
   });
   const injuryByPlayer = new Map(injuryBoard.players.map((player) => [player.playerId, player]));
@@ -267,8 +288,9 @@ export function assembleV5Board({
       conflict: false,
       evidence: [],
     };
-    const dualRole = player.eligible.some((position) => ["QB", "RB", "WR", "TE"].includes(position)) &&
-      player.eligible.some((position) => ["DL", "LB", "DB", "CB", "S", "D"].includes(position));
+    const dualRole = splitDualRoleNames.has(String(player.name ?? "").toLowerCase()) ||
+      (player.eligible.some((position) => ["QB", "RB", "WR", "TE"].includes(position)) &&
+      player.eligible.some((position) => ["DL", "LB", "DB", "CB", "S", "D"].includes(position)));
     const expectedGamesThroughWeek17 = expectedGamesFromInjury(injury);
     const projectionGames = Number(player.expectedGames);
     const hasOutcomeRate = Number.isFinite(projectionGames) && projectionGames > 0;
@@ -282,7 +304,19 @@ export function assembleV5Board({
           perGameOutcomeHigh: hasOutcomeRate && hasFiniteProjection(player.outcomeHigh) ? Number(player.outcomeHigh) / projectionGames : null,
         })
       : null;
-    const executable = player.executable && injury.executable && weeklyProfile != null;
+    const projectionUsable = Number.isFinite(Number(player.consensusPoints)) && weeklyProfile != null;
+    const offensePosition = player.eligible.some((position) => ["QB", "RB", "WR", "TE"].includes(position));
+    const specialistPosition = player.eligible.some((position) => ["K", "DEF", "DL", "LB", "DB", "CB", "S", "D"].includes(position));
+    const validatedSpecialist = !offensePosition && specialistPosition && player.sourceFamilies.includes("yahoo");
+    const executable = projectionUsable && injury.executable && (player.executable || validatedSpecialist);
+    const manualEligible = projectionUsable && injury.executable;
+    const validationStatus = dualRole
+      ? "DUAL_ROLE_SCORING_UNVERIFIED"
+      : player.executable
+        ? "EXECUTABLE"
+        : validatedSpecialist
+          ? "UNVALIDATED_SPECIALIST_PROJECTION"
+          : "UNVALIDATED_SINGLE_SOURCE_PROJECTION";
     return {
       ...player,
       injury,
@@ -295,8 +329,8 @@ export function assembleV5Board({
       executable,
       blockReason: executable ? null : [player.blockReason, injury.blockReason].filter(Boolean).join("; "),
       automaticEligible: executable && !dualRole,
-      manualEligible: executable,
-      validationStatus: dualRole ? "DUAL_ROLE_SCORING_UNVERIFIED" : "EXECUTABLE",
+      manualEligible,
+      validationStatus,
       draftPhase: "UNIFIED",
     };
   });
@@ -334,7 +368,7 @@ export function assembleV5Board({
     replacementRanks: LEAGUE_REPLACEMENT_RANKS,
     replacementBySlot: projectionBoard.replacementBySlot,
     replacementRankBasis: "joint maximum-weight allocation of every 2 Minute Drillers starter slot",
-    specialistRankingBasis: { K: "Yahoo preseason rank", DEF: "Yahoo preseason rank", DL: "exact league-scored Yahoo plus prior-history baseline; uncalibrated", LB: "exact league-scored Yahoo plus prior-history baseline; uncalibrated", DB: "exact league-scored Yahoo plus prior-history baseline; uncalibrated" },
+    specialistRankingBasis: { K: "Yahoo preseason rank", DEF: "Yahoo preseason rank", DL: "Yahoo league projection; unvalidated specialist tier", LB: "Yahoo league projection; unvalidated specialist tier", DB: "Yahoo league projection; unvalidated specialist tier" },
     sources: projectionBoard.sourceReceipts,
     snapshotReceipts: {
       yahooOffenseObservedAt: offenseObservedAt,
@@ -344,7 +378,7 @@ export function assembleV5Board({
     injuryWatchlist: buildDraftWatchlist(injuryBoard),
     injuryCoverage: injuryBoard.coverage,
     projectionModel: {
-      sourceNormalization: "equal-weight per-game before explicit availability",
+      sourceNormalization: "equal weight per independent source family after local league scoring; market and history never count as projection evidence",
       fantasyWeeks: "1-17",
       weeklyBonuses: "weekly events; never season-thresholded",
       outcomeIntervals: "calibrated inputs only; source disagreement remains diagnostic",
@@ -363,11 +397,11 @@ async function main() {
       return [key.replace(/^--/, ""), value.join("=")];
     }),
   );
-  const required = ["baseline", "offense", "specialists", "sleeper", "output", "as-of", "baseline-observed-at", "sleeper-observed-at"];
+  const required = ["baseline", "offense", "specialists", "sleeper", "output", "as-of", "sleeper-observed-at"];
   for (const key of required) {
     if (!args[key]) throw new Error(`missing --${key}=...`);
   }
-  const [baselineRows, offenseSnapshot, specialistSnapshot, sleeperPlayers, eligibilitySnapshot, externalInjuryReports, survivalCalibration] = await Promise.all([
+  const [baselineRows, offenseSnapshot, specialistSnapshot, sleeperPlayers, eligibilitySnapshot, externalInjuryReports, survivalCalibration, projectionSnapshots] = await Promise.all([
     readFile(args.baseline, "utf8").then(JSON.parse),
     readFile(args.offense, "utf8").then(JSON.parse),
     readFile(args.specialists, "utf8").then(JSON.parse),
@@ -375,6 +409,7 @@ async function main() {
     args.eligibility ? readFile(args.eligibility, "utf8").then(JSON.parse) : null,
     args.injuries ? readFile(args.injuries, "utf8").then(JSON.parse) : [],
     args.survival ? readFile(args.survival, "utf8").then(JSON.parse) : null,
+    args.projections ? readFile(args.projections, "utf8").then(JSON.parse).then((value) => Array.isArray(value) ? value : [value]) : [],
   ]);
   const board = assembleV5Board({
     baselineRows,
@@ -383,10 +418,10 @@ async function main() {
     sleeperPlayers,
     eligibilitySnapshot,
     asOf: args["as-of"],
-    baselineObservedAt: args["baseline-observed-at"],
     sleeperObservedAt: args["sleeper-observed-at"],
     externalInjuryReports,
     survivalCalibration,
+    projectionSnapshots,
   });
   await writeFile(args.output, `${JSON.stringify(board, null, 2)}\n`, "utf8");
   process.stdout.write(

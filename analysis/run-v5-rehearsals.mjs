@@ -197,7 +197,7 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     noRoundDependentPositionGate: JSON.stringify(allowedFirst) === JSON.stringify(allowedLast),
     weeklyUtilityEveryRound: simulations.every((simulation) => simulation.picks.every((pick) => pick.utilityModel === "WEEKLY_OPTIMAL_LINEUP_W1_17")),
     jointReplacementBaselinesPresent: Object.keys(replacementBySlot).length >= 10,
-    dualRoleNeverAutoSelected: simulations.every((simulation) => simulation.picks.every((pick) => String(pick.yahooId) !== "41787")),
+    dualRoleNeverAutoSelected: simulations.every((simulation) => simulation.picks.every((pick) => pick.name !== "Travis Hunter" && !["41787", "99001", "99002"].includes(String(pick.yahooId)))),
     realLeagueExecutionDisabled: config.qualification === "unverified-real-room",
   };
   const chaos = {
