@@ -787,6 +787,13 @@
       team: availableById.get(player.yahooId).team,
       eligible: player.eligible,
       projection: player.projection,
+      perGamePoints: player.perGamePoints,
+      expectedGamesThroughWeek17: player.expectedGamesThroughWeek17,
+      weeklyPoints: player.weeklyPoints,
+      weeklyAvailability: player.weeklyAvailability,
+      outcomeLow: player.outcomeLow,
+      outcomeHigh: player.outcomeHigh,
+      uncertaintyStatus: player.uncertaintyStatus,
     }));
     const decision = summarizeDecision(scored, selected, fallbackUsed);
     decision.targetYahooIds = targets.map((target) => target.yahooId);
@@ -1195,6 +1202,13 @@
           team: confirmation.team,
           eligible: boardPlayer?.eligible ?? [positionForConfirmedPick(board, confirmation)],
           projection: boardPlayer?.projection ?? null,
+          perGamePoints: boardPlayer?.perGamePoints ?? null,
+          expectedGamesThroughWeek17: boardPlayer?.expectedGamesThroughWeek17 ?? null,
+          weeklyPoints: boardPlayer?.weeklyPoints ?? null,
+          weeklyAvailability: boardPlayer?.weeklyAvailability ?? null,
+          outcomeLow: boardPlayer?.outcomeLow ?? null,
+          outcomeHigh: boardPlayer?.outcomeHigh ?? null,
+          uncertaintyStatus: boardPlayer?.uncertaintyStatus ?? "OUTCOME_INTERVAL_UNAVAILABLE",
           turn: confirmation.turn,
           detectionToClickMs: clicks[0].detectionToClickMs,
           turnDetectionToClickMs,

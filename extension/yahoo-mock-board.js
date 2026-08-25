@@ -28,7 +28,7 @@
       "trainingRows": 2324,
       "holdoutRows": 168,
       "events": 504,
-      "publicAdp": {
+      "roomResidualBaseline": {
         "sampleCount": 504,
         "brier": 0.1941715112743919,
         "logLoss": 0.5722644475435292,
@@ -48,10 +48,12 @@
       "excludedManagers": 1,
       "excludedRows": 228,
       "comparisonCoverage": {
-        "publicAdp": true,
+        "publicMarketAdpInput": true,
+        "roomResidualBaseline": true,
+        "publicAdpSurvivalBenchmark": false,
         "yahooPreDraftRank": false,
         "staticBpa": false,
-        "unavailableReason": "historical point-in-time Yahoo and static-BPA ranks were not captured"
+        "unavailableReason": "a standalone public-ADP survival benchmark and historical point-in-time Yahoo/static-BPA ranks were not captured"
       }
     },
     "model": {

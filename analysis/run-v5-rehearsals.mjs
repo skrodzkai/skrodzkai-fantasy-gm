@@ -109,6 +109,7 @@ function simulateOne({ board, helpers, config, replacementBySlot, survivalCalibr
     picks.push({
       ...selected,
       round,
+      utilityModel: decision.decision.utilityModel,
       recomputeMs: decision.decision.recomputeMs,
       fallbackUsed: decision.decision.fallbackUsed,
       pAvailableNext: decision.decision.positionLeaders[0]?.pAvailableNext ?? null,
@@ -180,11 +181,7 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     minimum: 5,
     config,
     replacementBySlot,
-    survivalCalibrationStatus: survivalCalibration?.calibration?.enabled
-      ? survivalCalibration.calibration.positionLayerEnabled
-        ? "HELD_OUT_CALIBRATED_POSITION_RESIDUAL"
-        : "HELD_OUT_CALIBRATED_ROOM_RESIDUAL"
-      : "UNCALIBRATED_MARKET_FALLBACK",
+    survivalCalibration,
   });
   const recomputeValues = simulations.flatMap((simulation) => simulation.picks.map((pick) => pick.recomputeMs));
   const latency = {
@@ -198,6 +195,7 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
   const policyChecks = {
     allPositionFilterEveryRound: helpers.filterLabelForRound(1, [], config, 1) === "All Positions" && helpers.filterLabelForRound(config.rounds, [], config, 12) === "All Positions",
     noRoundDependentPositionGate: JSON.stringify(allowedFirst) === JSON.stringify(allowedLast),
+    weeklyUtilityEveryRound: simulations.every((simulation) => simulation.picks.every((pick) => pick.utilityModel === "WEEKLY_OPTIMAL_LINEUP_W1_17")),
     jointReplacementBaselinesPresent: Object.keys(replacementBySlot).length >= 10,
     dualRoleNeverAutoSelected: simulations.every((simulation) => simulation.picks.every((pick) => String(pick.yahooId) !== "41787")),
     realLeagueExecutionDisabled: config.qualification === "unverified-real-room",

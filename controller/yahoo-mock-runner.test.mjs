@@ -163,6 +163,34 @@ test("weekly utility gives bench and QB2 picks real bye-week value after starter
   assert.ok(result.ranked.find((entry) => entry.player.position === "RB").marginalUtility > 0);
 });
 
+test("a confirmed target preserves its weekly profile for the following round", () => {
+  const weekly = (points, byeIndex = null) => Array.from({ length: 17 }, (_, index) => index === byeIndex ? 0 : points);
+  const board = helpers.validateBoard([
+    player("QB", 1, 1, { weeklyPoints: weekly(30, 4), weeklyAvailability: weekly(1, 4) }),
+    player("RB", 1, 2, { weeklyPoints: weekly(25, 5), weeklyAvailability: weekly(1, 5) }),
+    player("WR", 1, 3, { weeklyPoints: weekly(24, 6), weeklyAvailability: weekly(1, 6) }),
+    player("TE", 1, 4, { weeklyPoints: weekly(20, 7), weeklyAvailability: weekly(1, 7) }),
+    player("RB", 2, 5, { weeklyPoints: weekly(22, 8), weeklyAvailability: weekly(1, 8) }),
+    player("WR", 2, 6, { weeklyPoints: weekly(21, 9), weeklyAvailability: weekly(1, 9) }),
+  ]);
+  const first = helpers.buildDecisionLadder({
+    round: 1, seat: 6, picks: [], board, availablePlayers: board, minimum: 5,
+    config: mockConfig, replacementBySlot,
+  });
+  assert.equal(first.targets[0].weeklyPoints.length, 17);
+  const second = helpers.buildDecisionLadder({
+    round: 2,
+    seat: 6,
+    picks: [first.targets[0]],
+    board,
+    availablePlayers: board.filter((candidate) => candidate.yahooId !== first.targets[0].yahooId),
+    minimum: 5,
+    config: mockConfig,
+    replacementBySlot,
+  });
+  assert.equal(second.decision.utilityModel, "WEEKLY_OPTIMAL_LINEUP_W1_17");
+});
+
 test("uses the held-out survival packet when its gate is enabled", () => {
   const candidate = helpers.validateBoard([player("QB", 1, 20, { adpLow: 45, adpHigh: 55 })])[0];
   const survivalCalibration = {

@@ -42,7 +42,9 @@ test("held-out gate reports missing Yahoo and static BPA evidence instead of inv
   }
   const result = evaluateSurvivalCalibration(rows, { holdoutSeason: 2025, minimumPositionSamples: 20, bootstrapSamples: 200 });
   assert.equal(result.calibration.events, 120);
-  assert.equal(result.calibration.comparisonCoverage.publicAdp, true);
+  assert.equal(result.calibration.comparisonCoverage.publicMarketAdpInput, true);
+  assert.equal(result.calibration.comparisonCoverage.roomResidualBaseline, true);
+  assert.equal(result.calibration.comparisonCoverage.publicAdpSurvivalBenchmark, false);
   assert.equal(result.calibration.comparisonCoverage.yahooPreDraftRank, false);
   assert.equal(result.calibration.comparisonCoverage.staticBpa, false);
   assert.match(result.calibration.comparisonCoverage.unavailableReason, /not captured/);

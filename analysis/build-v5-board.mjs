@@ -270,14 +270,16 @@ export function assembleV5Board({
     const dualRole = player.eligible.some((position) => ["QB", "RB", "WR", "TE"].includes(position)) &&
       player.eligible.some((position) => ["DL", "LB", "DB", "CB", "S", "D"].includes(position));
     const expectedGamesThroughWeek17 = expectedGamesFromInjury(injury);
+    const projectionGames = Number(player.expectedGames);
+    const hasOutcomeRate = Number.isFinite(projectionGames) && projectionGames > 0;
     const weeklyProfile = Number.isFinite(Number(player.perGamePoints)) && expectedGamesThroughWeek17 != null
       ? buildWeeklyProjectionProfile({
           perGamePoints: Number(player.perGamePoints),
           byeWeek: player.bye,
           expectedGamesThroughWeek17,
           unavailableWeeks: injury.unavailableWeeks,
-          perGameOutcomeLow: hasFiniteProjection(player.outcomeLow) ? Number(player.outcomeLow) / 17 : null,
-          perGameOutcomeHigh: hasFiniteProjection(player.outcomeHigh) ? Number(player.outcomeHigh) / 17 : null,
+          perGameOutcomeLow: hasOutcomeRate && hasFiniteProjection(player.outcomeLow) ? Number(player.outcomeLow) / projectionGames : null,
+          perGameOutcomeHigh: hasOutcomeRate && hasFiniteProjection(player.outcomeHigh) ? Number(player.outcomeHigh) / projectionGames : null,
         })
       : null;
     const executable = player.executable && injury.executable && weeklyProfile != null;

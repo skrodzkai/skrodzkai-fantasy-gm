@@ -100,7 +100,7 @@ function clusteredImprovementInterval(events, samples = 3000) {
   const groups = new Map();
   for (const event of events) {
     if (!groups.has(event.managerId)) groups.set(event.managerId, []);
-    groups.get(event.managerId).push((event.publicAdp - event.observed) ** 2 - (event.calibrated - event.observed) ** 2);
+    groups.get(event.managerId).push((event.roomResidualBaseline - event.observed) ** 2 - (event.calibrated - event.observed) ** 2);
   }
   const managers = [...groups.keys()];
   if (managers.length < 2) return [null, null];
@@ -138,13 +138,13 @@ export function evaluateSurvivalCalibration(rows, options = {}) {
       nextPick,
       observed: row.pick >= nextPick ? 1 : 0,
       calibrated: calibratedSurvivalProbability(model, { position: row.position, marketMean: row.marketAdp, nextPick }),
-      publicAdp: calibratedSurvivalProbability(model, { position: row.position, marketMean: row.marketAdp, nextPick, roomOnly: true }),
+      roomResidualBaseline: calibratedSurvivalProbability(model, { position: row.position, marketMean: row.marketAdp, nextPick, roomOnly: true }),
     };
   }));
   const calibrated = metrics(events, "calibrated");
-  const publicAdp = metrics(events, "publicAdp");
+  const roomResidualBaseline = metrics(events, "roomResidualBaseline");
   const interval = clusteredImprovementInterval(events, Number(options.bootstrapSamples ?? 3000));
-  const meanImprovement = publicAdp.brier - calibrated.brier;
+  const meanImprovement = roomResidualBaseline.brier - calibrated.brier;
   const positionLayerEnabled = meanImprovement > 0 && interval[0] != null && interval[0] > 0;
   return {
     calibration: {
@@ -157,17 +157,19 @@ export function evaluateSurvivalCalibration(rows, options = {}) {
       trainingRows: training.length,
       holdoutRows: holdout.length,
       events: events.length,
-      publicAdp,
+      roomResidualBaseline,
       calibrated,
       meanBrierImprovement: meanImprovement,
       clustered95Interval: interval,
       excludedManagers: new Set(rows.filter((row) => excluded.has(row.managerId)).map((row) => row.managerId)).size,
       excludedRows: rows.filter((row) => excluded.has(row.managerId)).length,
       comparisonCoverage: {
-        publicAdp: true,
+        publicMarketAdpInput: true,
+        roomResidualBaseline: true,
+        publicAdpSurvivalBenchmark: false,
         yahooPreDraftRank: holdout.some((row) => row.yahooRank != null),
         staticBpa: holdout.some((row) => row.staticBpaRank != null),
-        unavailableReason: "historical point-in-time Yahoo and static-BPA ranks were not captured",
+        unavailableReason: "a standalone public-ADP survival benchmark and historical point-in-time Yahoo/static-BPA ranks were not captured",
       },
     },
     model,
