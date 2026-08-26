@@ -18722,6 +18722,13 @@
       }
     }
   },
+  "injuryFreshnessPolicy": {
+    "default": 36,
+    "yahoo": 6,
+    "sleeper": 24,
+    "nfl_official": 24,
+    "team_official": 24
+  },
   "players": [
     {
       "yahooId": "40059",

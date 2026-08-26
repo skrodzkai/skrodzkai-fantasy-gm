@@ -64,7 +64,9 @@ export function buildV5ReadinessReport({
   const boardPlayers = playerBoard?.players ?? [];
   const boardPositions = countsBy(boardPlayers, "position");
   const executablePositions = countsBy(boardPlayers.filter((player) => player.executable), "position");
-  const hunter = boardPlayers.find((player) => ["41787", "99001", "99002"].includes(String(player.yahooId)));
+  const hunters = boardPlayers.filter((player) =>
+    ["41787", "99001", "99002"].includes(String(player.yahooId)),
+  );
   return {
     schemaVersion: 1,
     generatedAt,
@@ -92,7 +94,9 @@ export function buildV5ReadinessReport({
       executablePositions,
       sources: playerBoard?.sources ?? [],
       replacementRanks: playerBoard?.replacementRanks ?? {},
-      travisHunter: hunter ? {
+      injuryCoverage: playerBoard?.injuryCoverage ?? null,
+      injuryFreshnessPolicy: playerBoard?.injuryFreshnessPolicy ?? null,
+      travisHunter: hunters.map((hunter) => ({
         yahooId: hunter.yahooId,
         draftPosition: hunter.position,
         yahooDisplayedPosition: hunter.yahooPosition,
@@ -100,7 +104,7 @@ export function buildV5ReadinessReport({
         eligible: hunter.eligible,
         projection: hunter.consensusPoints,
         executable: hunter.executable,
-      } : null,
+      })),
     },
     guardrails: {
       kForecast: "UNVERIFIED; use current Yahoo rank and historical timing only",

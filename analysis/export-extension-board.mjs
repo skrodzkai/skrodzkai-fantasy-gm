@@ -128,6 +128,7 @@ export function extensionBoardFromV5(board) {
     replacementBySlot: board.replacementBySlot ?? null,
     survivalCalibration: board.survivalCalibration ?? null,
     injuryCoverage: board.injuryCoverage ?? null,
+    injuryFreshnessPolicy: board.injuryFreshnessPolicy ?? null,
     players,
     offense,
     kickers,
@@ -144,6 +145,7 @@ export function renderExtensionBoard(board) {
     replacementBySlot: board.replacementBySlot,
     survivalCalibration: board.survivalCalibration,
     injuryCoverage: board.injuryCoverage,
+    injuryFreshnessPolicy: board.injuryFreshnessPolicy,
     players: board.players,
     defenses: board.defenses,
   };

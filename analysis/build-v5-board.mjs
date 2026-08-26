@@ -382,6 +382,7 @@ export function assembleV5Board({
     },
     injuryWatchlist: buildDraftWatchlist(injuryBoard),
     injuryCoverage: injuryBoard.coverage,
+    injuryFreshnessPolicy: injuryBoard.freshnessPolicyHours,
     projectionModel: {
       sourceNormalization: "equal weight per independent source family after local league scoring; market and history never count as projection evidence",
       fantasyWeeks: "1-17",

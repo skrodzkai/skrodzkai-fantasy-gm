@@ -16,6 +16,8 @@ test("parses raw offense stats and ignores ESPN fantasy-point totals", () => {
   assert.equal(rows.length, 2);
   assert.equal(rows[0].name, "Josh Allen");
   assert.equal(rows[0].stats.passingCompletions, 340);
+  assert.equal(rows[0].stats.rushingHundredYardGames, 0);
+  assert.equal(rows[0].stats.receivingHundredYardGames, 0);
   assert.equal(rows[1].stats.receptions, 65);
   assert.equal(rows[1].stats.rushingHundredYardGames, 0);
   assert.equal(rows[1].stats.receivingHundredYardGames, 0);

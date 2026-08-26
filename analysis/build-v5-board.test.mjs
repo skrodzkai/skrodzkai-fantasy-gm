@@ -51,6 +51,13 @@ test("keeps history and market data out of projection evidence", () => {
   assert.equal(board.players[0].manualEligible, true);
   assert.equal(board.players[0].validationStatus, "UNVALIDATED_SINGLE_SOURCE_PROJECTION");
   assert.equal(board.boards.offense[0].draftBoardRank, 1);
+  assert.deepEqual(board.injuryFreshnessPolicy, {
+    default: 36,
+    yahoo: 6,
+    sleeper: 24,
+    nfl_official: 24,
+    team_official: 24,
+  });
 });
 
 test("validates offense only with two fresh independent projection families", () => {

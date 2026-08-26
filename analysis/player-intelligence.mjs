@@ -68,12 +68,8 @@ function weightedMean(rows) {
 export function scoreOffenseStatLine(stats, scoring = OFFENSE_SCORING) {
   const rushingYards = finite(stats.rushingYards);
   const receivingYards = finite(stats.receivingYards);
-  const rushingHundredYardGames = stats.rushingHundredYardGames == null
-    ? (rushingYards >= 100 ? 1 : 0)
-    : finite(stats.rushingHundredYardGames);
-  const receivingHundredYardGames = stats.receivingHundredYardGames == null
-    ? (receivingYards >= 100 ? 1 : 0)
-    : finite(stats.receivingHundredYardGames);
+  const rushingHundredYardGames = finite(stats.rushingHundredYardGames);
+  const receivingHundredYardGames = finite(stats.receivingHundredYardGames);
   return (
     finite(stats.passingCompletions) * scoring.passingCompletions +
     finite(stats.passingYards) * scoring.passingYards +

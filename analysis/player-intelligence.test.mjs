@@ -19,9 +19,14 @@ test("scores the league's QB premium and yardage bonuses exactly", () => {
       interceptions: 1,
       rushingYards: 100,
       rushingTouchdowns: 1,
+      rushingHundredYardGames: 1,
     }),
     48.5,
   );
+});
+
+test("does not invent a weekly 100-yard bonus from season totals", () => {
+  assert.equal(scoreOffenseStatLine({ rushingYards: 580 }), 58);
 });
 
 test("counts every weekly 100-yard event instead of awarding one season bonus", () => {
@@ -38,9 +43,9 @@ test("counts every weekly 100-yard event instead of awarding one season bonus", 
 
 test("scores weekly projection rows so each threshold event is preserved", () => {
   assert.equal(scoreWeeklyOffenseStatLines([
-    { rushingYards: 101 },
+    { rushingYards: 101, rushingHundredYardGames: 1 },
     { rushingYards: 99 },
-    { receivingYards: 120 },
+    { receivingYards: 120, receivingHundredYardGames: 1 },
   ]), 36);
 });
 

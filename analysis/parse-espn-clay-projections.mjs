@@ -45,6 +45,8 @@ export function parseEspnClayText(text) {
           rushingAttempts: number(values[9]),
           rushingYards: number(values[10]),
           rushingTouchdowns: number(values[11]),
+          rushingHundredYardGames: 0,
+          receivingHundredYardGames: 0,
         }
       : {
           rushingAttempts: number(values[3]),
