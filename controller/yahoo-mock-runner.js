@@ -206,9 +206,9 @@
         uncertaintyStatus: String(player.uncertaintyStatus ?? "OUTCOME_INTERVAL_UNAVAILABLE"),
         replacementPoints: player.replacementPoints == null || player.replacementPoints === "" ? null : Number(player.replacementPoints),
         eligible: [...new Set(Array.from(player.eligible ?? [position], normalize).filter(Boolean))],
-        automaticEligible: player.automaticEligible !== false,
-        manualEligible: player.manualEligible !== false,
-        validationStatus: String(player.validationStatus ?? "EXECUTABLE"),
+        automaticEligible: player.automaticEligible === true,
+        manualEligible: player.manualEligible === true,
+        validationStatus: String(player.validationStatus ?? "MISSING_VALIDATION_STATUS"),
       };
       if (!copy.yahooId) throw new Error(`board player ${index} requires a verified Yahoo ID`);
       if (!OFFENSE.includes(position) && !["K", "DEF", "D", "LB", "CB", "S"].includes(position)) {

@@ -112,6 +112,14 @@ test("preserves exact Yahoo multi-position eligibility without requiring market 
   assert.equal(hunter.marketStatus, "BOARD_RANK_FALLBACK_UNCALIBRATED");
 });
 
+test("missing board eligibility metadata fails closed", () => {
+  const candidate = player("RB", 99, 99, { automaticEligible: undefined, manualEligible: undefined, validationStatus: undefined });
+  const [validated] = helpers.validateBoard([candidate]);
+  assert.equal(validated.automaticEligible, false);
+  assert.equal(validated.manualEligible, false);
+  assert.equal(validated.validationStatus, "MISSING_VALIDATION_STATUS");
+});
+
 test("never converts a missing projection to zero and labels Yahoo-rank survival fallback", () => {
   assert.throws(() => helpers.validateBoard([player("WR", 1, 1, { projection:null })]), /invalid league projection/);
   const [withheld] = helpers.validateBoard([player("CB", 1, 1, {

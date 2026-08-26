@@ -68,12 +68,8 @@ function weightedMean(rows) {
 export function scoreOffenseStatLine(stats, scoring = OFFENSE_SCORING) {
   const rushingYards = finite(stats.rushingYards);
   const receivingYards = finite(stats.receivingYards);
-  const rushingHundredYardGames = stats.rushingHundredYardGames == null
-    ? (rushingYards >= 100 ? 1 : 0)
-    : finite(stats.rushingHundredYardGames);
-  const receivingHundredYardGames = stats.receivingHundredYardGames == null
-    ? (receivingYards >= 100 ? 1 : 0)
-    : finite(stats.receivingHundredYardGames);
+  const rushingHundredYardGames = finite(stats.rushingHundredYardGames);
+  const receivingHundredYardGames = finite(stats.receivingHundredYardGames);
   return (
     finite(stats.passingCompletions) * scoring.passingCompletions +
     finite(stats.passingYards) * scoring.passingYards +
@@ -295,6 +291,7 @@ export function buildPlayerBoard({
   asOf,
   maxAgeHours = 72,
   minimumFreshSources = 2,
+  evidencePolicy = null,
   replacementRoster = null,
 }) {
   const now = assertIsoDate(asOf, "asOf");
@@ -323,16 +320,32 @@ export function buildPlayerBoard({
 
   const evidenceByPlayer = new Map();
   const sourceReceipts = [];
+  const seenSourceIds = new Set();
   for (const source of sources) {
     const sourceId = String(source?.sourceId ?? "").trim();
     if (!sourceId) throw new Error("every source requires sourceId");
+    if (seenSourceIds.has(sourceId)) throw new Error(`duplicate sourceId ${sourceId}`);
+    seenSourceIds.add(sourceId);
+    const family = String(source?.family ?? sourceId).trim();
+    if (!family) throw new Error(`source ${sourceId} requires family`);
     const updatedAt = assertIsoDate(source.updatedAt, `source ${sourceId} updatedAt`);
     const ageHours = (now - updatedAt) / 3_600_000;
-    const fresh = ageHours >= 0 && ageHours <= maxAgeHours;
+    const sourceMaxAgeHours = finite(source.maxAgeHours, maxAgeHours);
+    if (!(sourceMaxAgeHours > 0)) throw new Error(`source ${sourceId} maxAgeHours must be positive`);
+    const fresh = ageHours >= 0 && ageHours <= sourceMaxAgeHours;
     const weight = finite(source.weight, 1);
     if (weight <= 0) throw new Error(`source ${sourceId} weight must be positive`);
     const rows = Array.isArray(source.rows) ? source.rows : [];
-    sourceReceipts.push({ sourceId, updatedAt: source.updatedAt, ageHours, fresh, rows: rows.length });
+    sourceReceipts.push({
+      sourceId,
+      family,
+      updatedAt: source.updatedAt,
+      ageHours,
+      maxAgeHours: sourceMaxAgeHours,
+      fresh,
+      inputRows: finite(source.inputRows, rows.length),
+      joinedRows: rows.length,
+    });
     if (!fresh) continue;
     for (const row of rows) {
       const playerId = String(row.playerId ?? "");
@@ -340,7 +353,7 @@ export function buildPlayerBoard({
       const perGamePoints = projectionPerGame(row, source);
       if (!Number.isFinite(perGamePoints)) continue;
       const evidence = evidenceByPlayer.get(playerId) ?? [];
-      evidence.push({ sourceId, perGamePoints, weight, updatedAt: source.updatedAt });
+      evidence.push({ sourceId, family, perGamePoints, weight, updatedAt: source.updatedAt });
       evidenceByPlayer.set(playerId, evidence);
     }
   }
@@ -353,18 +366,32 @@ export function buildPlayerBoard({
     if (!(expectedGames >= 0 && expectedGames <= DEFAULT_PROJECTION_GAMES)) {
       throw new Error(`player ${player.playerId} expectedGames must be between 0 and ${DEFAULT_PROJECTION_GAMES}`);
     }
-    const normalizedEvidence = evidence.map((row) => ({
+    const familyEvidence = [...Map.groupBy(evidence, (row) => row.family)].map(([family, rows]) => ({
+      family,
+      sourceIds: rows.map((row) => row.sourceId).sort(),
+      perGamePoints: weightedMean(rows.map((row) => ({ ...row, points: row.perGamePoints }))),
+      weight: 1,
+    }));
+    const normalizedEvidence = familyEvidence.map((row) => ({
       ...row,
       points: row.perGamePoints * expectedGames,
     }));
     const points = normalizedEvidence.map((row) => row.points);
-    const perGamePoints = evidence.length
-      ? weightedMean(evidence.map((row) => ({ ...row, points: row.perGamePoints })))
+    const perGamePoints = familyEvidence.length
+      ? weightedMean(familyEvidence.map((row) => ({ ...row, points: row.perGamePoints })))
       : null;
     const consensus = perGamePoints == null ? null : perGamePoints * expectedGames;
     const calibratedOutcome = player.outcomeCalibrated === true &&
       hasFinite(player.outcomeLow) && hasFinite(player.outcomeHigh) &&
       Number(player.outcomeLow) <= Number(player.outcomeHigh);
+    const policy = evidencePolicy
+      ? evidencePolicy(player)
+      : { minimumFreshFamilies: minimumFreshSources };
+    const minimumFreshFamilies = Number(policy?.minimumFreshFamilies ?? minimumFreshSources);
+    if (!Number.isInteger(minimumFreshFamilies) || minimumFreshFamilies < 1) {
+      throw new Error(`player ${player.playerId} minimumFreshFamilies must be a positive integer`);
+    }
+    const executable = familyEvidence.length >= minimumFreshFamilies;
     return {
       ...player,
       consensusPoints: consensus,
@@ -372,17 +399,25 @@ export function buildPlayerBoard({
       expectedGames,
       sourceSpreadLow: quantile(points, 0.25),
       sourceSpreadHigh: quantile(points, 0.75),
-      sourceDisagreementStatus: evidence.length >= 2 ? "AVAILABLE_DIAGNOSTIC_ONLY" : "INSUFFICIENT_SOURCES",
+      sourceDisagreementStatus: familyEvidence.length >= 2 ? "AVAILABLE_DIAGNOSTIC_ONLY" : "INSUFFICIENT_SOURCES",
       outcomeLow: calibratedOutcome ? Number(player.outcomeLow) : null,
       outcomeHigh: calibratedOutcome ? Number(player.outcomeHigh) : null,
       uncertaintyStatus: calibratedOutcome ? "CALIBRATED_OUTCOME_INTERVAL" : "OUTCOME_INTERVAL_UNAVAILABLE",
       sourceCount: evidence.length,
       sourceIds: evidence.map((row) => row.sourceId).sort(),
-      executable: evidence.length >= minimumFreshSources,
+      sourceFamilyCount: familyEvidence.length,
+      sourceFamilies: familyEvidence.map((row) => row.family).sort(),
+      requiredFreshFamilies: minimumFreshFamilies,
+      executable,
+      evidenceStatus: executable
+        ? "VALIDATED"
+        : familyEvidence.length === 1
+          ? "UNVALIDATED_SINGLE_SOURCE_PROJECTION"
+          : "NO_FRESH_PROJECTION",
       blockReason:
-        evidence.length >= minimumFreshSources
+        executable
           ? null
-          : `requires ${minimumFreshSources} fresh projection sources; found ${evidence.length}`,
+          : `requires ${minimumFreshFamilies} fresh projection families; found ${familyEvidence.length}`,
     };
   });
 

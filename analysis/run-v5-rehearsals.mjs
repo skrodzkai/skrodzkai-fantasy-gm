@@ -72,7 +72,7 @@ function simulateOne({ board, helpers, config, replacementBySlot, survivalCalibr
     const opponentPicksBeforeTurn = Math.max(0, currentPick - round);
     const requiredOpponentPicks = opponentPicksBeforeTurn - opponentPicks.length;
     const opponentPool = validated
-      .filter((player) => player.automaticEligible !== false)
+      .filter((player) => player.automaticEligible === true)
       .filter((player) => !picks.some((pick) => pick.yahooId === player.yahooId))
       .filter((player) => !draftedByOpponents.has(player.yahooId))
       .filter((player) => !unavailableSpecialists.has(player.yahooId))
@@ -197,7 +197,7 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     noRoundDependentPositionGate: JSON.stringify(allowedFirst) === JSON.stringify(allowedLast),
     weeklyUtilityEveryRound: simulations.every((simulation) => simulation.picks.every((pick) => pick.utilityModel === "WEEKLY_OPTIMAL_LINEUP_W1_17")),
     jointReplacementBaselinesPresent: Object.keys(replacementBySlot).length >= 10,
-    dualRoleNeverAutoSelected: simulations.every((simulation) => simulation.picks.every((pick) => String(pick.yahooId) !== "41787")),
+    dualRoleNeverAutoSelected: simulations.every((simulation) => simulation.picks.every((pick) => pick.name !== "Travis Hunter" && !["41787", "99001", "99002"].includes(String(pick.yahooId)))),
     realLeagueExecutionDisabled: config.qualification === "unverified-real-room",
   };
   const chaos = {

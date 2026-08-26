@@ -56,7 +56,7 @@ function normalizeUnavailableWeeks(value, sourceId) {
   return weeks;
 }
 
-export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36, expectedPlayerIds = [] }) {
+export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36, maxAgeHoursBySourceKind = {}, expectedPlayerIds = [] }) {
   const now = parseTimestamp(asOf, "asOf");
   if (!Array.isArray(reports)) throw new Error("reports must be an array");
   const grouped = new Map();
@@ -77,7 +77,7 @@ export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36, expectedPl
       sourcePriority: SOURCE_PRIORITY[sourceKind],
       observedAt: report.observedAt,
       ageHours,
-      fresh: ageHours >= 0 && ageHours <= maxAgeHours,
+      fresh: ageHours >= 0 && ageHours <= Number(maxAgeHoursBySourceKind[sourceKind] ?? maxAgeHours),
       status: normalizeStatus(report.status),
       bodyPart: report.bodyPart ? String(report.bodyPart) : null,
       practice: report.practice ? String(report.practice) : null,
@@ -210,7 +210,7 @@ export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36, expectedPl
 
   return Object.freeze({
     asOf,
-    maxAgeHours,
+    freshnessPolicyHours: { default: maxAgeHours, ...maxAgeHoursBySourceKind },
     coverage: {
       expectedPlayers: expectedIds.length,
       checkedPlayers: freshChecked.size,

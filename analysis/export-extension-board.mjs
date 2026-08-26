@@ -27,23 +27,21 @@ function compactOffense(player) {
     uncertaintyStatus: player.uncertaintyStatus ?? "OUTCOME_INTERVAL_UNAVAILABLE",
     replacementPoints: finite(player.replacementPoints) ? Number(player.replacementPoints) : null,
     eligible: Array.from(player.eligible ?? [player.position]),
-    automaticEligible: player.automaticEligible !== false,
-    manualEligible: player.manualEligible !== false,
-    validationStatus: player.validationStatus ?? "EXECUTABLE",
-    confidence: player.sourceCount >= 2 ? "MULTI_SOURCE" : "WITHHELD",
+    automaticEligible: player.automaticEligible === true,
+    manualEligible: player.manualEligible === true,
+    validationStatus: player.validationStatus ?? "MISSING_VALIDATION_STATUS",
+    confidence: player.sourceFamilyCount >= 2 ? "MULTI_SOURCE" : "WITHHELD",
     bye: player.bye ?? null,
   };
 }
 
 function compactSpecialist(player, positionOverride = null) {
   const sourceIds = new Set(player.sourceIds ?? []);
-  const confidence = player.sourceCount >= 2
+  const confidence = player.sourceFamilyCount >= 2
     ? "MULTI_SOURCE"
-    : sourceIds.has("yahoo-season-projection")
+    : sourceIds.has("yahoo-season-projection") || sourceIds.has("yahoo-specialist-season-projection")
       ? "YAHOO_ONLY"
-      : sourceIds.has("league-scored-history-market-baseline")
-        ? "HISTORY_ONLY"
-        : "ELIGIBILITY_ONLY";
+      : "ELIGIBILITY_ONLY";
   return {
     yahooId: String(player.yahooId),
     name: player.name,
@@ -65,9 +63,9 @@ function compactSpecialist(player, positionOverride = null) {
     replacementPoints: finite(player.replacementPoints) ? Number(player.replacementPoints) : null,
     vor: finite(player.vorp) ? Number(player.vorp) : null,
     eligible: Array.from(player.eligible ?? [positionOverride ?? player.position]),
-    automaticEligible: player.automaticEligible !== false,
-    manualEligible: player.manualEligible !== false,
-    validationStatus: player.validationStatus ?? "EXECUTABLE",
+    automaticEligible: player.automaticEligible === true,
+    manualEligible: player.manualEligible === true,
+    validationStatus: player.validationStatus ?? "MISSING_VALIDATION_STATUS",
     confidence,
     bye: player.bye ?? null,
   };
@@ -77,15 +75,19 @@ function specialistHealthClear(player) {
   return player.injury == null || (player.injury.draftAction === "CLEAR" && player.injury.conflict !== true);
 }
 
+function specialistUsable(player) {
+  return specialistHealthClear(player) && finite(player.consensusPoints) && Number(player.consensusPoints) > 0;
+}
+
 export function extensionBoardFromV5(board) {
   const offense = (board?.boards?.offense ?? [])
-    .filter((player) => player.executable)
+    .filter((player) => player.manualEligible !== false)
     .filter((player) => finite(player.vorp))
     .map(compactOffense);
   const specialists = board?.boards?.specialists ?? {};
-  const kickers = (specialists.K ?? []).filter(specialistHealthClear).map((player) => compactSpecialist(player, "K"));
-  const defenses = (specialists.DEF ?? []).filter(specialistHealthClear).map((player) => compactSpecialist(player, "DEF"));
-  const idp = ["DL", "LB", "DB"].flatMap((bucket) => (specialists[bucket] ?? []).filter(specialistHealthClear).flatMap((player) => {
+  const kickers = (specialists.K ?? []).filter(specialistUsable).map((player) => compactSpecialist(player, "K"));
+  const defenses = (specialists.DEF ?? []).filter(specialistUsable).map((player) => compactSpecialist(player, "DEF"));
+  const idp = ["DL", "LB", "DB"].flatMap((bucket) => (specialists[bucket] ?? []).filter(specialistUsable).flatMap((player) => {
     const yahooPosition = String(player.yahooPosition ?? "").toUpperCase();
     const eligible = new Set(Array.from(player.eligible ?? [], (position) => String(position).toUpperCase()));
     let position = bucket;
@@ -121,11 +123,12 @@ export function extensionBoardFromV5(board) {
   const players = [...playerByYahooId.values()];
   return {
     generatedAt: board.generatedAt,
-    source: "free-source board: equal-weight per-game Yahoo and league-scored prior-history inputs; explicit availability; injuries cross-checked with Yahoo, Sleeper, and supplied official reports",
+    source: "free-source board: raw projections scored under exact league rules and equal-weighted per independent source family; market/history are timing context only; injuries use source-specific freshness",
     scoringModel: board.scoringModel,
     replacementBySlot: board.replacementBySlot ?? null,
     survivalCalibration: board.survivalCalibration ?? null,
     injuryCoverage: board.injuryCoverage ?? null,
+    injuryFreshnessPolicy: board.injuryFreshnessPolicy ?? null,
     players,
     offense,
     kickers,
@@ -142,6 +145,7 @@ export function renderExtensionBoard(board) {
     replacementBySlot: board.replacementBySlot,
     survivalCalibration: board.survivalCalibration,
     injuryCoverage: board.injuryCoverage,
+    injuryFreshnessPolicy: board.injuryFreshnessPolicy,
     players: board.players,
     defenses: board.defenses,
   };
