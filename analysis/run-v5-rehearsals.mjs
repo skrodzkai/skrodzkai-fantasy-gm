@@ -72,7 +72,7 @@ function simulateOne({ board, helpers, config, replacementBySlot, survivalCalibr
     const opponentPicksBeforeTurn = Math.max(0, currentPick - round);
     const requiredOpponentPicks = opponentPicksBeforeTurn - opponentPicks.length;
     const opponentPool = validated
-      .filter((player) => player.automaticEligible !== false)
+      .filter((player) => player.automaticEligible === true)
       .filter((player) => !picks.some((pick) => pick.yahooId === player.yahooId))
       .filter((player) => !draftedByOpponents.has(player.yahooId))
       .filter((player) => !unavailableSpecialists.has(player.yahooId))

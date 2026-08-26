@@ -340,7 +340,16 @@ export function buildPlayerBoard({
     const weight = finite(source.weight, 1);
     if (weight <= 0) throw new Error(`source ${sourceId} weight must be positive`);
     const rows = Array.isArray(source.rows) ? source.rows : [];
-    sourceReceipts.push({ sourceId, family, updatedAt: source.updatedAt, ageHours, maxAgeHours: sourceMaxAgeHours, fresh, rows: rows.length });
+    sourceReceipts.push({
+      sourceId,
+      family,
+      updatedAt: source.updatedAt,
+      ageHours,
+      maxAgeHours: sourceMaxAgeHours,
+      fresh,
+      inputRows: finite(source.inputRows, rows.length),
+      joinedRows: rows.length,
+    });
     if (!fresh) continue;
     for (const row of rows) {
       const playerId = String(row.playerId ?? "");
@@ -404,7 +413,11 @@ export function buildPlayerBoard({
       sourceFamilies: familyEvidence.map((row) => row.family).sort(),
       requiredFreshFamilies: minimumFreshFamilies,
       executable,
-      evidenceStatus: executable ? "VALIDATED" : "UNVALIDATED_SINGLE_SOURCE_PROJECTION",
+      evidenceStatus: executable
+        ? "VALIDATED"
+        : familyEvidence.length === 1
+          ? "UNVALIDATED_SINGLE_SOURCE_PROJECTION"
+          : "NO_FRESH_PROJECTION",
       blockReason:
         executable
           ? null

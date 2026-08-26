@@ -17,7 +17,15 @@ test("parses raw offense stats and ignores ESPN fantasy-point totals", () => {
   assert.equal(rows[0].name, "Josh Allen");
   assert.equal(rows[0].stats.passingCompletions, 340);
   assert.equal(rows[1].stats.receptions, 65);
+  assert.equal(rows[1].stats.rushingHundredYardGames, 0);
+  assert.equal(rows[1].stats.receivingHundredYardGames, 0);
   assert.notEqual(scoreOffenseStatLine(rows[0].stats), 369);
+});
+
+test("keeps suffix names by matching only valid NFL team codes", () => {
+  const rows = parseEspnClayText(`${TEXT}\nKenneth Walker III KC 11 274 17 277 1239 9 60 48 376 2 67% 11%`);
+  assert.equal(rows.at(-1).name, "Kenneth Walker III");
+  assert.equal(rows.at(-1).team, "KC");
 });
 
 test("emits the strict free-source manifest", () => {

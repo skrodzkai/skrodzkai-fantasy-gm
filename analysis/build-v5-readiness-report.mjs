@@ -64,7 +64,7 @@ export function buildV5ReadinessReport({
   const boardPlayers = playerBoard?.players ?? [];
   const boardPositions = countsBy(boardPlayers, "position");
   const executablePositions = countsBy(boardPlayers.filter((player) => player.executable), "position");
-  const hunter = boardPlayers.find((player) => String(player.yahooId) === "41787");
+  const hunter = boardPlayers.find((player) => ["41787", "99001", "99002"].includes(String(player.yahooId)));
   return {
     schemaVersion: 1,
     generatedAt,

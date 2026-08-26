@@ -59,3 +59,21 @@ test("exports only executable offense while retaining explicitly labeled special
   assert.deepEqual(board.idp.slice(-2).map((entry) => entry.position), ["CB", "CB"]);
   assert.match(renderExtensionBoard(board), /SKRODZKaiYahooMockBoard/);
 });
+
+test("missing eligibility fields export fail closed", () => {
+  const source = player("RB", 1, { automaticEligible: undefined, manualEligible: undefined, validationStatus: undefined });
+  const compact = extensionBoardFromV5({
+    generatedAt: "2026-08-22T00:00:00Z",
+    boards: {
+      offense: Array.from({ length: 100 }, (_, index) => player("RB", index + 1, index ? {} : source)),
+      specialists: {
+        K: Array.from({ length: 12 }, (_, index) => player("K", index + 1)),
+        DEF: Array.from({ length: 32 }, (_, index) => player("DEF", index + 1)),
+      },
+    },
+  });
+  const exported = compact.offense.find((entry) => entry.yahooId === source.yahooId);
+  assert.equal(exported.automaticEligible, false);
+  assert.equal(exported.manualEligible, false);
+  assert.equal(exported.validationStatus, "MISSING_VALIDATION_STATUS");
+});

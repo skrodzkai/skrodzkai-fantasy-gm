@@ -5,8 +5,10 @@ export function snakePicks({ teams, seat, rounds }) {
   });
 }
 
-export function replayCapturedDraft({ uiMap, postmortem, clockSeconds = 30 }) {
+export function replayCapturedDraft({ uiMap, postmortem, decisionBudgetSeconds }) {
+  if (!(Number(decisionBudgetSeconds) > 0)) throw new Error("decisionBudgetSeconds must be positive");
   const expected = snakePicks({ teams: 12, seat: 3, rounds: 19 });
+  const capturedClockSeconds = Number(postmortem.match(/(\d+)-second clock/)?.[1]);
   const safePath = uiMap?.location?.pathname === "/draftclient/f1/18599/12";
   const capturedAllPicks = expected.every((pick) => new RegExp(`\\|\\s*\\d+\\s*\\|\\s*${pick}\\s*\\|`).test(postmortem));
   const genericDRegression = postmortem.includes("generic `D` selection must precede every LB/CB/S selection");
@@ -20,11 +22,15 @@ export function replayCapturedDraft({ uiMap, postmortem, clockSeconds = 30 }) {
     nearAutodraftFailClosed: nearAutodraftReceipt,
     liveAutomationGapPreserved: noCleanAutomationClaim,
     sanitizedCapture: sanitized,
-    thirtySecondDecisionBudget: clockSeconds === 30,
+    capturedClockReceipted: capturedClockSeconds === 75,
+    decisionBudgetFitsCapturedClock: decisionBudgetSeconds <= capturedClockSeconds,
   };
   return {
     schemaVersion: 1,
-    clockSeconds,
+    evidenceClass: "POSTMORTEM_CONTRACT_TEXT",
+    capturedClockSeconds,
+    decisionBudgetSeconds,
+    latencyMeasured: false,
     ownedOverallPicks: expected,
     status: Object.values(gates).every(Boolean) ? "PASS" : "FAIL",
     gates,

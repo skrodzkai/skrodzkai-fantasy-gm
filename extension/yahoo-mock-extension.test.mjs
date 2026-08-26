@@ -465,11 +465,13 @@ test("bundled board contains unique IDs and labeled market evidence or fallback"
   const ids = [...offense, ...kickers].map((player) => String(player.yahooId));
   assert.equal(new Set(ids).size, ids.length);
   assert.equal(new Set(board.players.map((player) => String(player.yahooId))).size, board.players.length);
-  const hunter = board.players.find((player) => String(player.yahooId) === "41787");
-  assert.equal(hunter.position, "WR");
-  assert.equal(hunter.automaticEligible, false);
-  assert.equal(hunter.manualEligible, true);
-  assert.match(board.source, /equal-weight per-game Yahoo and league-scored prior-history/);
+  const hunters = board.players.filter((player) => ["41787", "99001", "99002"].includes(String(player.yahooId)));
+  assert.equal(hunters.map((player) => String(player.yahooId)).sort().join(","), "99001,99002");
+  assert.ok(hunters.every((player) => player.automaticEligible === false));
+  assert.ok(hunters.every((player) => player.manualEligible === true));
+  assert.ok(hunters.every((player) => player.validationStatus === "DUAL_ROLE_SCORING_UNVERIFIED"));
+  assert.match(board.source, /raw projections scored under exact league rules/);
+  assert.equal(offense.filter((player) => player.automaticEligible).length, 0);
   for (const player of offense) {
     assert.equal(Number.isFinite(player.vor), true);
     if (player.adpLow == null) {
@@ -479,8 +481,9 @@ test("bundled board contains unique IDs and labeled market evidence or fallback"
       assert.equal(Number.isFinite(player.adpLow), true);
       assert.equal(Number.isFinite(player.adpHigh), true);
     }
-    assert.equal(player.confidence, "MULTI_SOURCE");
+    assert.equal(player.confidence, "WITHHELD");
   }
+  assert.ok([...kickers, ...idp].some((player) => player.validationStatus === "UNVALIDATED_SPECIALIST_PROJECTION"));
 });
 
 test("extension contains no network or remote-model execution path", () => {

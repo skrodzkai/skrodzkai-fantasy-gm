@@ -227,6 +227,7 @@ export function assembleV5Board({
       maxAgeHours: policy.maximumRefreshHours,
       updatedAt: snapshot.manifest.sourceAsOf,
       weight: 1,
+      inputRows: snapshot.rows.length,
       rows: snapshot.rows
         .filter((row) => ["QB", "RB", "WR", "TE"].includes(normalizePosition(row.position)))
         .map((row) => ({ ...row, playerId: row.playerId ?? playerIdByIdentity.get(identityKey(row.name, row.team)) }))
@@ -288,7 +289,9 @@ export function assembleV5Board({
       conflict: false,
       evidence: [],
     };
-    const dualRole = splitDualRoleNames.has(String(player.name ?? "").toLowerCase()) ||
+    const dualRole = ["41787", "99001", "99002"].includes(String(player.yahooId)) ||
+      String(player.name ?? "").toLowerCase() === "travis hunter" ||
+      splitDualRoleNames.has(String(player.name ?? "").toLowerCase()) ||
       (player.eligible.some((position) => ["QB", "RB", "WR", "TE"].includes(position)) &&
       player.eligible.some((position) => ["DL", "LB", "DB", "CB", "S", "D"].includes(position)));
     const expectedGamesThroughWeek17 = expectedGamesFromInjury(injury);
@@ -312,11 +315,13 @@ export function assembleV5Board({
     const manualEligible = projectionUsable && injury.executable;
     const validationStatus = dualRole
       ? "DUAL_ROLE_SCORING_UNVERIFIED"
-      : player.executable
-        ? "EXECUTABLE"
-        : validatedSpecialist
+      : validatedSpecialist
           ? "UNVALIDATED_SPECIALIST_PROJECTION"
-          : "UNVALIDATED_SINGLE_SOURCE_PROJECTION";
+          : player.executable
+            ? "EXECUTABLE"
+            : player.sourceFamilyCount === 1
+              ? "UNVALIDATED_SINGLE_SOURCE_PROJECTION"
+              : "NO_FRESH_PROJECTION";
     return {
       ...player,
       injury,

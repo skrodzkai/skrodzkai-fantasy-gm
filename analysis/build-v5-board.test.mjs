@@ -85,6 +85,8 @@ test("K and DEF use current Yahoo preseason rank rather than projection order", 
   });
   assert.deepEqual(board.boards.specialists.K.map((player) => player.yahooId), ["10", "11"]);
   assert.equal(board.specialistRankingBasis.K, "Yahoo preseason rank");
+  assert.ok(board.boards.specialists.K.every((player) => player.validationStatus === "UNVALIDATED_SPECIALIST_PROJECTION"));
+  assert.ok(board.boards.specialists.K.every((player) => player.automaticEligible === true));
 });
 
 test("Yahoo injury markers block automatic use even when projection evidence is complete", () => {
@@ -173,6 +175,30 @@ test("split Yahoo Travis Hunter identities remain manual-only", () => {
   assert.deepEqual(hunters.map((player) => player.yahooId).sort(), ["99001", "99002"]);
   assert.ok(hunters.every((player) => player.automaticEligible === false));
   assert.ok(hunters.every((player) => player.validationStatus === "DUAL_ROLE_SCORING_UNVERIFIED"));
+});
+
+test("a lone current Travis Hunter identity remains manual-only with two fresh families", () => {
+  const board = fixture({
+    baselineRows: [],
+    offenseSnapshot: {
+      observedAt: "2026-08-22T10:00:00Z",
+      players: [{ yahooId: "99001", name: "Travis Hunter", team: "JAX", position: "WR", yahooProjectedPoints: 90 }],
+    },
+    projectionSnapshots: [{
+      manifest: {
+        snapshotId: "espn-clay-hunter", sourceId: "espn-mike-clay", sourceFamily: "espn-clay",
+        sourceAsOf: "2026-08-22T11:00:00Z", retrievedAt: "2026-08-22T11:10:00Z",
+        contentSha256: "b".repeat(64), gamesBasis: "17", projectionPeriod: "2026", licenseUseNote: "test",
+      },
+      rows: [{ name: "Travis Hunter", team: "JAX", position: "WR", projectionGames: 17, stats: { receptions: 50, receivingYards: 700, receivingTouchdowns: 5, receivingHundredYardGames: 0, rushingHundredYardGames: 0 } }],
+    }],
+    specialistSnapshot: { observedAt: "2026-08-22T10:01:00Z", positions: {}, eligibilityEvidence: {} },
+    sleeperPlayers: {},
+  });
+  assert.equal(board.players[0].sourceFamilyCount, 2);
+  assert.equal(board.players[0].automaticEligible, false);
+  assert.equal(board.players[0].manualEligible, true);
+  assert.equal(board.players[0].validationStatus, "DUAL_ROLE_SCORING_UNVERIFIED");
 });
 
 test("league-specific eligibility adds unprojected CB fallbacks without inventing points", () => {

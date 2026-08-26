@@ -3,6 +3,11 @@ import { readFile, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 const TEAM = Object.freeze({ BLT: "BAL", HST: "HOU", CLV: "CLE", ARZ: "ARI" });
+const NFL_TEAM_CODES = new Set([
+  "ARI", "ARZ", "ATL", "BAL", "BLT", "BUF", "CAR", "CHI", "CIN", "CLE", "CLV", "DAL", "DEN", "DET",
+  "GB", "HOU", "HST", "IND", "JAX", "KC", "LAC", "LAR", "LV", "MIA", "MIN", "NE", "NO", "NYG", "NYJ",
+  "PHI", "PIT", "SEA", "SF", "TB", "TEN", "WAS",
+]);
 const SECTION = Object.freeze({
   "Quarterback Projections": "QB",
   "Running Back Projections": "RB",
@@ -22,10 +27,10 @@ export function parseEspnClayText(text) {
     if (heading) position = heading[1];
     if (!position || /Team\s+Pos Rk/.test(rawLine)) continue;
     const columns = rawLine.trim().split(/\s+/);
-    const teamIndex = columns.findIndex((value, index) => /^[A-Z]{2,3}$/.test(value) && index > 0);
+    const teamIndex = columns.findIndex((value, index) => NFL_TEAM_CODES.has(value) && index > 0);
     if (teamIndex < 1) continue;
     const values = columns.slice(teamIndex + 1);
-    const required = position === "QB" ? 12 : 12;
+    const required = 12;
     if (values.length < required || values.slice(0, 10).some((value) => !/^-?\d+(?:\.\d+)?$/.test(value.replaceAll(",", "")))) continue;
     const name = columns.slice(0, teamIndex).join(" ");
     const team = TEAM[columns[teamIndex]] ?? columns[teamIndex];
@@ -49,6 +54,8 @@ export function parseEspnClayText(text) {
           receptions: number(values[7]),
           receivingYards: number(values[8]),
           receivingTouchdowns: number(values[9]),
+          rushingHundredYardGames: 0,
+          receivingHundredYardGames: 0,
         };
     rows.push({ name, team, position, projectionGames: games, stats });
   }

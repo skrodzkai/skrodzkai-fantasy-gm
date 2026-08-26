@@ -210,7 +210,7 @@ export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36, maxAgeHour
 
   return Object.freeze({
     asOf,
-    maxAgeHours,
+    freshnessPolicyHours: { default: maxAgeHours, ...maxAgeHoursBySourceKind },
     coverage: {
       expectedPlayers: expectedIds.length,
       checkedPlayers: freshChecked.size,
