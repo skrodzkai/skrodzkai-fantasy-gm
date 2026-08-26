@@ -32,6 +32,7 @@ test("exports only executable offense while retaining explicitly labeled special
   const board = extensionBoardFromV5({
     generatedAt: "2026-08-22T00:00:00Z",
     scoringModel: "test",
+    injuryFreshnessPolicy: { default: 36, yahoo: 6 },
     replacementBySlot: { QB: 200, RB: 100, WR: 100, TE: 80, K: 70, DEF: 60, D: 50, DB: 45, LB: 48 },
     boards: { offense, specialists: {
       K: Array.from({ length: 12 }, (_, index) => player("K", index + 1, { sourceCount: 1, sourceFamilyCount: 1, sourceIds: ["yahoo-season-projection"] })),
@@ -56,6 +57,7 @@ test("exports only executable offense while retaining explicitly labeled special
   assert.equal(board.players.length > board.offense.length, true);
   assert.equal(board.players.find((entry) => entry.yahooId === "WR-102").position, "WR");
   assert.equal(board.replacementBySlot.D, 50);
+  assert.deepEqual(board.injuryFreshnessPolicy, { default: 36, yahoo: 6 });
   assert.deepEqual(board.idp.slice(-2).map((entry) => entry.position), ["CB", "CB"]);
   assert.match(renderExtensionBoard(board), /SKRODZKaiYahooMockBoard/);
 });

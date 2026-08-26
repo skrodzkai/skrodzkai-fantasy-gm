@@ -104,6 +104,8 @@ export function buildV5ReadinessReport({
         eligible: hunter.eligible,
         projection: hunter.consensusPoints,
         executable: hunter.executable,
+        automaticEligible: hunter.automaticEligible === true,
+        validationStatus: hunter.validationStatus ?? "MISSING_VALIDATION_STATUS",
       })),
     },
     guardrails: {

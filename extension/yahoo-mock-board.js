@@ -19518,7 +19518,7 @@
       ],
       "automaticEligible": false,
       "manualEligible": true,
-      "validationStatus": "DUAL_ROLE_SCORING_UNVERIFIED",
+      "validationStatus": "UNVALIDATED_SINGLE_SOURCE_PROJECTION",
       "confidence": "WITHHELD",
       "bye": 6
     },
@@ -47918,9 +47918,9 @@
       "eligible": [
         "LB"
       ],
-      "automaticEligible": false,
+      "automaticEligible": true,
       "manualEligible": true,
-      "validationStatus": "DUAL_ROLE_SCORING_UNVERIFIED",
+      "validationStatus": "UNVALIDATED_SPECIALIST_PROJECTION",
       "confidence": "YAHOO_ONLY",
       "bye": 11
     },

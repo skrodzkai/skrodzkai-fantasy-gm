@@ -184,6 +184,30 @@ test("split Yahoo Travis Hunter identities remain manual-only", () => {
   assert.ok(hunters.every((player) => player.validationStatus === "DUAL_ROLE_SCORING_UNVERIFIED"));
 });
 
+test("same-name players on different teams do not collide as dual-role identities", () => {
+  const board = fixture({
+    baselineRows: [
+      { yahoo_id: "32692", name: "Justin Jefferson", team: "MIN", position: "WR", projection: 300, payload_json: JSON.stringify({ eligible: ["WR"] }) },
+      { yahoo_id: "42774", name: "Justin Jefferson", team: "CLE", position: "LB", projection: 100, payload_json: JSON.stringify({ eligible: ["LB", "D"] }) },
+    ],
+    offenseSnapshot: {
+      observedAt: "2026-08-22T10:00:00Z",
+      players: [{ yahooId: "32692", name: "Justin Jefferson", team: "MIN", position: "WR", yahooProjectedPoints: 300 }],
+    },
+    specialistSnapshot: {
+      observedAt: "2026-08-22T10:01:00Z",
+      positions: { LB: [{ yahooId: "42774", name: "Justin Jefferson", team: "CLE", position: "LB", yahooProjectedPoints: 100 }] },
+      eligibilityEvidence: {},
+    },
+    sleeperPlayers: {},
+  });
+  const receiver = board.players.find((player) => player.yahooId === "32692");
+  const linebacker = board.players.find((player) => player.yahooId === "42774");
+  assert.equal(receiver.validationStatus, "UNVALIDATED_SINGLE_SOURCE_PROJECTION");
+  assert.equal(linebacker.validationStatus, "UNVALIDATED_SPECIALIST_PROJECTION");
+  assert.equal(linebacker.automaticEligible, true);
+});
+
 test("a lone current Travis Hunter identity remains manual-only with two fresh families", () => {
   const board = fixture({
     baselineRows: [],

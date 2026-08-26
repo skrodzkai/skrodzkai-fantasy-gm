@@ -143,11 +143,11 @@ export function assembleV5Board({
   const specialistIds = new Set(
     Object.values(specialistSnapshot.positions ?? {}).flat().map((player) => String(player.yahooId)),
   );
-  const offenseNames = new Set((offenseSnapshot.players ?? []).map((player) => String(player.name ?? "").toLowerCase()));
-  const splitDualRoleNames = new Set(
+  const offenseIdentities = new Set((offenseSnapshot.players ?? []).map((player) => identityKey(player.name, player.team)));
+  const splitDualRoleIdentities = new Set(
     Object.values(specialistSnapshot.positions ?? {}).flat()
-      .map((player) => String(player.name ?? "").toLowerCase())
-      .filter((name) => offenseNames.has(name)),
+      .map((player) => identityKey(player.name, player.team))
+      .filter((identity) => offenseIdentities.has(identity)),
   );
 
   const baselineForYahooRow = (row) => baselineByYahooId.get(String(row.yahooId)) ??
@@ -291,7 +291,7 @@ export function assembleV5Board({
     };
     const dualRole = ["41787", "99001", "99002"].includes(String(player.yahooId)) ||
       String(player.name ?? "").toLowerCase() === "travis hunter" ||
-      splitDualRoleNames.has(String(player.name ?? "").toLowerCase()) ||
+      splitDualRoleIdentities.has(identityKey(player.name, player.team)) ||
       (player.eligible.some((position) => ["QB", "RB", "WR", "TE"].includes(position)) &&
       player.eligible.some((position) => ["DL", "LB", "DB", "CB", "S", "D"].includes(position)));
     const expectedGamesThroughWeek17 = expectedGamesFromInjury(injury);
