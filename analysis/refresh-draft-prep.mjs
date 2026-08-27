@@ -5,7 +5,7 @@ import { join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { assembleV5Board } from "./build-v5-board.mjs";
+import { assembleV5Board, SCORING_SCHEMA_HASH } from "./build-v5-board.mjs";
 import { buildV5ReadinessReport } from "./build-v5-readiness-report.mjs";
 import { buildSnakeSeatPackets } from "./build-snake-seat-packets.mjs";
 import { extensionBoardFromV5, renderExtensionBoard } from "./export-extension-board.mjs";
@@ -21,6 +21,9 @@ export const SLEEPER_PLAYERS_URL = "https://api.sleeper.app/v1/players/nfl";
 const USER_AGENT = "SKRODZKai-Fantasy-GM/1.0 (personal draft research; one request per source per run)";
 const POSITION_MINIMUMS = Object.freeze({ QB: 24, RB: 60, WR: 80, TE: 40 });
 const TEAM_ALIASES = Object.freeze({ JAC: "JAX", WSH: "WAS", LA: "LAR" });
+const YAHOO_LEAGUE_ID = "420010";
+const SCORING_MODEL = "2-minute-drillers-2026";
+const GENERATED_AT_MAX_SKEW_MINUTES = 15;
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -63,8 +66,9 @@ function uniqueIdentityMap(rows, dropSuffix = false) {
   return { values, ambiguous };
 }
 
-export function joinEspnRowsToYahoo({ rows, sleeperPlayers, baselineRows }) {
+export function joinEspnRowsToYahoo({ rows, sleeperPlayers, baselineRows, yahooRows = [] }) {
   const identities = [
+    ...yahooRows.map((row) => ({ yahooId: row.yahooId, name: row.name, team: row.team })),
     ...(baselineRows ?? []).map((row) => ({ yahooId: row.yahoo_id, name: row.name, team: row.team })),
     ...Object.values(sleeperPlayers ?? {}).map((row) => ({ yahooId: row.yahoo_id, name: row.full_name, team: row.team })),
   ];
@@ -96,6 +100,19 @@ function requireFreshIso(value, label) {
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed)) throw new Error(`${label} must be a dated value`);
   return new Date(parsed).toISOString();
+}
+
+function buildClockReceipt(generatedAt, nowValue) {
+  const wallClockDate = new Date(nowValue ?? Date.now());
+  if (!Number.isFinite(wallClockDate.getTime())) throw new Error("wall clock must be a dated value");
+  const wallClockAt = wallClockDate.toISOString();
+  const generatedAtSkewMinutes = (Date.parse(generatedAt) - Date.parse(wallClockAt)) / 60_000;
+  return {
+    wallClockAt,
+    generatedAtSkewMinutes,
+    maximumAbsoluteSkewMinutes: GENERATED_AT_MAX_SKEW_MINUTES,
+    fresh: Math.abs(generatedAtSkewMinutes) <= GENERATED_AT_MAX_SKEW_MINUTES,
+  };
 }
 
 async function fetchBytes(fetchImpl, url, expectedType) {
@@ -154,6 +171,14 @@ export async function loadOrFetchSleeper({ fetchImpl = fetch, cachePath = null, 
   };
 }
 
+export async function writeSleeperCache(cachePath, snapshot) {
+  if (!cachePath) return false;
+  const stagingPath = `${cachePath}.tmp-${randomUUID()}`;
+  await writeFile(stagingPath, `${JSON.stringify(snapshot, null, 2)}\n`, { mode: 0o600 });
+  await rename(stagingPath, cachePath);
+  return true;
+}
+
 export async function extractPdfLayout({ pdfPath, textPath }) {
   const version = await execFile("pdftotext", ["-v"]);
   await execFile("pdftotext", ["-layout", pdfPath, textPath]);
@@ -195,6 +220,19 @@ function observedHealth(receipt, asOf, maximumAgeHours) {
   };
 }
 
+function yahooSourceHealth(receipt, asOf, label) {
+  const value = receipt.value ?? {};
+  if (String(value.leagueId ?? "") !== YAHOO_LEAGUE_ID) throw new Error(`${label} must declare Yahoo league ${YAHOO_LEAGUE_ID}`);
+  if (value.scoringModel !== SCORING_MODEL) throw new Error(`${label} must declare scoring model ${SCORING_MODEL}`);
+  if (value.scoringSchemaHash !== SCORING_SCHEMA_HASH) throw new Error(`${label} scoring schema hash does not match the current league model`);
+  return {
+    ...observedHealth(receipt, asOf, 6),
+    leagueId: YAHOO_LEAGUE_ID,
+    scoringModel: SCORING_MODEL,
+    scoringSchemaHash: SCORING_SCHEMA_HASH,
+  };
+}
+
 function boardMovers(currentBoard, priorBoard) {
   if (!priorBoard) return { movers: null, reason: "no-prior" };
   const previous = new Map((priorBoard.players ?? []).map((player) => [String(player.yahooId ?? player.playerId), Number(player.overallRank)]));
@@ -219,7 +257,7 @@ function countsByPosition(players) {
   return counts;
 }
 
-function buildHealth({ generatedAt, yahoo, espnHealth, sleeperHealth, sleeperReused, board, priorBoard, rehearsal, packets, identityReceipt, failure = null }) {
+function buildHealth({ generatedAt, clock, yahoo, espnHealth, sleeperHealth, sleeperReused, board, priorBoard, rehearsal, packets, identityReceipt, failure = null }) {
   const automatic = (board?.players ?? []).filter((player) => player.automaticEligible === true);
   const byeKnown = (board?.players ?? []).filter((player) => player.bye !== null && player.bye !== undefined).length;
   const reasons = [
@@ -228,6 +266,7 @@ function buildHealth({ generatedAt, yahoo, espnHealth, sleeperHealth, sleeperReu
     ...(sleeperHealth && !sleeperHealth.fresh ? ["stale_sleeper_identity_injury_map"] : []),
     ...(rehearsal && rehearsal.accepted !== true ? ["rehearsal_not_accepted"] : []),
     ...(packets && packets.packets?.length !== 12 ? ["twelve_seat_packets_missing"] : []),
+    ...(clock && !clock.fresh ? ["generated_at_wall_clock_skew"] : []),
     ...(failure ? [String(failure)] : []),
   ];
   return {
@@ -236,6 +275,7 @@ function buildHealth({ generatedAt, yahoo, espnHealth, sleeperHealth, sleeperReu
     status: reasons.length ? "FAIL" : "PASS",
     posture: "preparation-only; no Yahoo action or real-league execution authority",
     reasons,
+    clock: clock ?? null,
     sources: { yahoo, espn: espnHealth ?? null, sleeper: sleeperHealth ? { ...sleeperHealth, reusedSameDayCache: sleeperReused } : null },
     identity: identityReceipt ?? null,
     injuries: board?.injuryCoverage ?? null,
@@ -263,8 +303,21 @@ async function ensureOutputParent(outputParent, allowedOutputRoot) {
   return parent;
 }
 
+export async function publishSuccessfulRun({ staging, finalPath, board, extensionSource, readiness, rehearsal, packets, health }) {
+  await Promise.all([
+    writeFile(join(staging, "player-board-v11.json"), `${JSON.stringify(board, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(staging, "yahoo-mock-board-v11.js"), extensionSource, { mode: 0o600 }),
+    writeFile(join(staging, "draft-readiness-v11.json"), `${JSON.stringify(readiness, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(staging, "rehearsal-30s-v11.json"), `${JSON.stringify(rehearsal, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(staging, "snake-seat-packets-v11.json"), `${JSON.stringify(packets, null, 2)}\n`, { mode: 0o600 }),
+  ]);
+  await writeFile(join(staging, "nightly-health.json"), `${JSON.stringify(health, null, 2)}\n`, { mode: 0o600 });
+  await rename(staging, finalPath);
+}
+
 export async function refreshDraftPrep(options) {
   const generatedAt = requireFreshIso(options.generatedAt, "generatedAt");
+  const clock = buildClockReceipt(generatedAt, options.now);
   const outputParent = await ensureOutputParent(options.outputParent, options.allowedOutputRoot ?? "/Volumes/TradingFloor");
   const finalPath = join(outputParent, finalDirectoryName(generatedAt));
   try {
@@ -276,6 +329,7 @@ export async function refreshDraftPrep(options) {
   const staging = await mkdtemp(join(outputParent, `.draft-prep-v11-${randomUUID()}-`));
   let health;
   try {
+    if (!clock.fresh) throw new Error(`generatedAt differs from wall clock by ${clock.generatedAtSkewMinutes.toFixed(2)} minutes`);
     const [baseline, yahooOffense, yahooSpecialists, yahooEligibility, historyText, opponentCalibration, priorBoard, externalInjuries, survivalCalibration, runnerSource] = await Promise.all([
       readJsonReceipt(options.baselinePath),
       readJsonReceipt(options.yahooOffensePath),
@@ -289,15 +343,15 @@ export async function refreshDraftPrep(options) {
       readFile(options.runnerPath, "utf8"),
     ]);
     const yahoo = {
-      offense: observedHealth(yahooOffense, generatedAt, 6),
-      specialists: observedHealth(yahooSpecialists, generatedAt, 6),
-      eligibility: observedHealth(yahooEligibility, generatedAt, 6),
+      offense: yahooSourceHealth(yahooOffense, clock.wallClockAt, "Yahoo offense snapshot"),
+      specialists: yahooSourceHealth(yahooSpecialists, clock.wallClockAt, "Yahoo specialist snapshot"),
+      eligibility: yahooSourceHealth(yahooEligibility, clock.wallClockAt, "Yahoo eligibility snapshot"),
     };
     if (Object.values(yahoo).some((receipt) => !receipt.fresh)) throw new Error("caller-supplied Yahoo snapshots are stale or missing observedAt");
 
     const sourceDirectory = join(staging, "source-snapshots");
     await mkdir(sourceDirectory);
-    const espnPdf = await fetchEspnClayPdf({ fetchImpl: options.fetchImpl, retrievedAt: generatedAt });
+    const espnPdf = await fetchEspnClayPdf({ fetchImpl: options.fetchImpl, retrievedAt: clock.wallClockAt });
     const pdfPath = join(sourceDirectory, "espn-clay-2026.pdf");
     const textPath = join(sourceDirectory, "espn-clay-2026.txt");
     await writeFile(pdfPath, espnPdf.bytes, { mode: 0o600 });
@@ -305,11 +359,11 @@ export async function refreshDraftPrep(options) {
     const espnSnapshot = makeEspnClaySnapshot({ ...espnPdf, text: extraction.text, pdfBytes: espnPdf.bytes, extraction: extraction.receipt });
     validateEspnCoverage(espnSnapshot);
 
-    const sleeper = await loadOrFetchSleeper({ fetchImpl: options.fetchImpl, cachePath: options.sleeperCachePath, retrievedAt: generatedAt });
-    const joined = joinEspnRowsToYahoo({ rows: espnSnapshot.rows, sleeperPlayers: sleeper.snapshot.players, baselineRows: baseline.value });
+    const sleeper = await loadOrFetchSleeper({ fetchImpl: options.fetchImpl, cachePath: options.sleeperCachePath, retrievedAt: clock.wallClockAt });
+    const joined = joinEspnRowsToYahoo({ rows: espnSnapshot.rows, sleeperPlayers: sleeper.snapshot.players, baselineRows: baseline.value, yahooRows: yahooOffense.value.players ?? [] });
     espnSnapshot.rows = joined.rows;
     espnSnapshot.identityReceipt = joined.receipt;
-    const [espnHealth, sleeperHealth] = validateSourceSnapshot([espnSnapshot.manifest, sleeper.snapshot.manifest], generatedAt);
+    const [espnHealth, sleeperHealth] = validateSourceSnapshot([espnSnapshot.manifest, sleeper.snapshot.manifest], clock.wallClockAt);
     if (!espnHealth.fresh || !sleeperHealth.fresh) throw new Error("public source freshness gate failed");
 
     await Promise.all([
@@ -327,39 +381,37 @@ export async function refreshDraftPrep(options) {
       externalInjuryReports: externalInjuries,
       projectionSnapshots: [espnSnapshot],
       survivalCalibration,
-      asOf: generatedAt,
+      asOf: clock.wallClockAt,
     });
-    const boardPath = join(staging, "player-board-v11.json");
     const extensionBoard = extensionBoardFromV5(board);
     const extensionSource = renderExtensionBoard(extensionBoard);
     const readiness = buildV5ReadinessReport({
       historyRows: parseHistory(historyText),
       playerBoard: board,
       opponentCalibration,
-      generatedAt,
+      generatedAt: clock.wallClockAt,
       excludedManagerIds: ["joe"],
     });
-    const rehearsal = buildRehearsalReport({ boardSource: extensionSource, runnerSource, generatedAt });
-    const packets = buildSnakeSeatPackets({ rehearsal, board, opponentCalibration, generatedAt });
-    health = buildHealth({ generatedAt, yahoo, espnHealth, sleeperHealth, sleeperReused: sleeper.reused, board, priorBoard, rehearsal, packets, identityReceipt: joined.receipt });
+    const rehearsal = buildRehearsalReport({ boardSource: extensionSource, runnerSource, generatedAt: clock.wallClockAt });
+    const packets = buildSnakeSeatPackets({ rehearsal, board, opponentCalibration, generatedAt: clock.wallClockAt });
+    health = buildHealth({ generatedAt: clock.wallClockAt, clock, yahoo, espnHealth, sleeperHealth, sleeperReused: sleeper.reused, board, priorBoard, rehearsal, packets, identityReceipt: joined.receipt });
     if (health.status !== "PASS") throw new Error(health.reasons.join("; "));
+    if (!sleeper.reused) await writeSleeperCache(options.sleeperCachePath, sleeper.snapshot);
 
-    await Promise.all([
-      writeFile(boardPath, `${JSON.stringify(board, null, 2)}\n`, { mode: 0o600 }),
-      writeFile(join(staging, "yahoo-mock-board-v11.js"), extensionSource, { mode: 0o600 }),
-      writeFile(join(staging, "draft-readiness-v11.json"), `${JSON.stringify(readiness, null, 2)}\n`, { mode: 0o600 }),
-      writeFile(join(staging, "rehearsal-30s-v11.json"), `${JSON.stringify(rehearsal, null, 2)}\n`, { mode: 0o600 }),
-      writeFile(join(staging, "snake-seat-packets-v11.json"), `${JSON.stringify(packets, null, 2)}\n`, { mode: 0o600 }),
-    ]);
-    await writeFile(join(staging, "nightly-health.json"), `${JSON.stringify(health, null, 2)}\n`, { mode: 0o600 });
-    await rename(staging, finalPath);
+    await publishSuccessfulRun({ staging, finalPath, board, extensionSource, readiness, rehearsal, packets, health });
     return { finalPath, health };
   } catch (error) {
     await rm(staging, { recursive: true, force: true });
     const failedStaging = await mkdtemp(join(outputParent, `.draft-prep-v11-failed-${randomUUID()}-`));
-    health = buildHealth({ generatedAt, failure: String(error?.message ?? error) });
+    health = buildHealth({ generatedAt, clock, failure: String(error?.message ?? error) });
     await writeFile(join(failedStaging, "nightly-health.json"), `${JSON.stringify(health, null, 2)}\n`, { mode: 0o600 });
-    await rename(failedStaging, finalPath);
+    try {
+      await rename(failedStaging, finalPath);
+    } catch (publishError) {
+      const failure = new Error(`draft prep refresh failed: ${health.reasons.join("; ")}; health receipt remains at ${failedStaging}; publish failed: ${String(publishError?.message ?? publishError)}`, { cause: error });
+      failure.finalPath = failedStaging;
+      throw failure;
+    }
     const failure = new Error(`draft prep refresh failed: ${health.reasons.join("; ")}`);
     failure.finalPath = finalPath;
     throw failure;

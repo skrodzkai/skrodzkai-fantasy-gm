@@ -252,7 +252,7 @@ export function assembleV5Board({
       rows: snapshot.rows
         .filter((row) => ["QB", "RB", "WR", "TE"].includes(normalizePosition(row.position)))
         .filter((row) => !hasFiniteProjection(row.projectionGames) || Number(row.projectionGames) > 0)
-        .map((row) => ({ ...row, playerId: row.playerId ?? playerIdByIdentity.get(identityKey(row.name, row.team)) }))
+        .map((row) => ({ ...row, playerId: row.playerId ?? null }))
         .filter((row) => row.playerId),
     };
   });

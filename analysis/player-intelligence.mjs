@@ -383,18 +383,6 @@ export function buildPlayerBoard({
       weight: 1,
       omittedScoringCategories: [...new Set(rows.flatMap((row) => row.omittedScoringCategories))].sort(),
     }));
-    const normalizedEvidence = familyEvidence.map((row) => ({
-      ...row,
-      points: row.perGamePoints * expectedGames,
-    }));
-    const points = normalizedEvidence.map((row) => row.points);
-    const perGamePoints = familyEvidence.length
-      ? weightedMean(familyEvidence.map((row) => ({ ...row, points: row.perGamePoints })))
-      : null;
-    const consensus = perGamePoints == null ? null : perGamePoints * expectedGames;
-    const calibratedOutcome = player.outcomeCalibrated === true &&
-      hasFinite(player.outcomeLow) && hasFinite(player.outcomeHigh) &&
-      Number(player.outcomeLow) <= Number(player.outcomeHigh);
     const policy = evidencePolicy
       ? evidencePolicy(player)
       : { minimumFreshFamilies: minimumFreshSources };
@@ -405,6 +393,25 @@ export function buildPlayerBoard({
     const requiredFamilies = [...new Set((policy?.requiredFamilies ?? []).map(String))].sort();
     const presentFamilies = new Set(familyEvidence.map((row) => row.family));
     const missingRequiredFamilies = requiredFamilies.filter((family) => !presentFamilies.has(family));
+    const completeRequiredEvidence = familyEvidence.filter((row) => requiredFamilies.includes(row.family) && row.omittedScoringCategories.length === 0);
+    const scoringEvidence = familyEvidence.some((row) => row.omittedScoringCategories.length > 0) && completeRequiredEvidence.length
+      ? completeRequiredEvidence
+      : familyEvidence;
+    const projectionBlendPolicy = scoringEvidence === familyEvidence
+      ? "equal-family-mean"
+      : "required-family-full-schema; incomplete families are diagnostic only";
+    const normalizedEvidence = familyEvidence.map((row) => ({
+      ...row,
+      points: row.perGamePoints * expectedGames,
+    }));
+    const points = normalizedEvidence.map((row) => row.points);
+    const perGamePoints = scoringEvidence.length
+      ? weightedMean(scoringEvidence.map((row) => ({ ...row, points: row.perGamePoints })))
+      : null;
+    const consensus = perGamePoints == null ? null : perGamePoints * expectedGames;
+    const calibratedOutcome = player.outcomeCalibrated === true &&
+      hasFinite(player.outcomeLow) && hasFinite(player.outcomeHigh) &&
+      Number(player.outcomeLow) <= Number(player.outcomeHigh);
     const executable = familyEvidence.length >= minimumFreshFamilies && missingRequiredFamilies.length === 0;
     const omittedScoringCategories = [...new Set(familyEvidence.flatMap((row) => row.omittedScoringCategories))].sort();
     return {
@@ -425,6 +432,7 @@ export function buildPlayerBoard({
       sourceFamilyPerGamePoints: Object.fromEntries(
         familyEvidence.map((row) => [row.family, row.perGamePoints]),
       ),
+      projectionBlendPolicy,
       requiredFreshFamilies: minimumFreshFamilies,
       requiredSourceFamilies: requiredFamilies,
       missingRequiredSourceFamilies: missingRequiredFamilies,

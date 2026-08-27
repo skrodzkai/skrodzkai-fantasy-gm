@@ -299,6 +299,61 @@ test("unified BPA plus one-turn alternatives returns five legal exact-ID targets
   assert.equal(decision.decision.positionLeaders.every((entry) => Number.isFinite(entry.marginalUtility)), true);
 });
 
+test("requires five targets through round 18 but accepts the legal final-pick ladder", () => {
+  const picks = helpers.validateBoard([
+    ...Array.from({ length: 2 }, (_, index) => player("QB", index + 20, index + 1)),
+    ...Array.from({ length: 6 }, (_, index) => player("WR", index + 20, index + 3)),
+    ...Array.from({ length: 4 }, (_, index) => player("RB", index + 20, index + 9)),
+    player("TE", 20, 13),
+    player("DEF", 20, 14),
+    player("D", 20, 15),
+    player("LB", 20, 16),
+    player("CB", 20, 17),
+    player("S", 20, 18),
+  ]);
+  const candidates = helpers.validateBoard(Array.from({ length: 4 }, (_, index) => player("K", index + 30, index + 30)));
+
+  assert.throws(() => helpers.buildDecisionLadder({
+    round: 18,
+    seat: 1,
+    picks: picks.slice(0, 17),
+    board: candidates,
+    availablePlayers: candidates,
+    minimum: 5,
+    config: testConfig,
+    replacementBySlot,
+  }), /fewer_than_5_eligible_targets/);
+
+  const final = helpers.buildDecisionLadder({
+    round: 19,
+    seat: 1,
+    picks,
+    board: candidates,
+    availablePlayers: candidates,
+    minimum: 5,
+    config: testConfig,
+    replacementBySlot,
+  });
+  assert.equal(final.targets.length, 4);
+
+  const override = helpers.applyManualOverride({
+    stage: { roomId: "test", seat: 1, expectedRound: 19, targets: [{ yahooId: candidates[3].yahooId }] },
+    roomId: "test",
+    seat: 1,
+    round: 19,
+    board: candidates,
+    availablePlayers: candidates,
+    baselineTargets: final.targets,
+    allowed: ["K"],
+    minimum: 5,
+    picks,
+    config: testConfig,
+  });
+  assert.equal(override.targets.length, 4);
+  assert.equal(override.targets[0].yahooId, candidates[3].yahooId);
+  assert.equal(override.manualOverride.status, "applied");
+});
+
 test("recompute budget breach falls back to the static verified board order", () => {
   const board = boardForConfig(mockConfig);
   const result = helpers.buildDecisionLadder({

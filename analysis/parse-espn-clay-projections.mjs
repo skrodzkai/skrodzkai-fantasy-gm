@@ -2,8 +2,6 @@ import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
-import { OFFENSE_SCORING } from "./player-intelligence.mjs";
-
 const TEAM = Object.freeze({ BLT: "BAL", HST: "HOU", CLV: "CLE", ARZ: "ARI" });
 const NFL_TEAM_CODES = new Set([
   "ARI", "ARZ", "ATL", "BAL", "BLT", "BUF", "CAR", "CHI", "CIN", "CLE", "CLV", "DAL", "DEN", "DET",
@@ -16,6 +14,12 @@ const SECTION = Object.freeze({
   "Wide Receiver Projections": "WR",
   "Tight End Projections": "TE",
 });
+const APPLICABLE_SCORING = Object.freeze({
+  QB: ["passingCompletions", "passingYards", "passingTouchdowns", "interceptions", "rushingYards", "rushingTouchdowns", "rushingHundredYardGames", "twoPointConversions", "fumblesLost", "returnYards", "returnTouchdowns", "offensiveFumbleReturnTouchdowns"],
+  RB: ["rushingYards", "rushingTouchdowns", "rushingHundredYardGames", "receptions", "receivingYards", "receivingTouchdowns", "receivingHundredYardGames", "twoPointConversions", "fumblesLost", "returnYards", "returnTouchdowns", "offensiveFumbleReturnTouchdowns"],
+  WR: ["rushingYards", "rushingTouchdowns", "rushingHundredYardGames", "receptions", "receivingYards", "receivingTouchdowns", "receivingHundredYardGames", "twoPointConversions", "fumblesLost", "returnYards", "returnTouchdowns", "offensiveFumbleReturnTouchdowns"],
+  TE: ["rushingYards", "rushingTouchdowns", "rushingHundredYardGames", "receptions", "receivingYards", "receivingTouchdowns", "receivingHundredYardGames", "twoPointConversions", "fumblesLost", "returnYards", "returnTouchdowns", "offensiveFumbleReturnTouchdowns"],
+});
 
 function number(value) {
   return Number(String(value).replaceAll(",", ""));
@@ -25,11 +29,31 @@ function isNumber(value) {
   return /^-?\d+(?:\.\d+)?$/.test(String(value ?? "").replaceAll(",", ""));
 }
 
+function validStatRelations(position, stats) {
+  if (Object.values(stats).some((value) => !Number.isFinite(value) || value < 0)) return false;
+  if (position === "QB") {
+    return stats.passingCompletions <= stats.passingAttempts &&
+      stats.passingTouchdowns <= stats.passingCompletions &&
+      stats.rushingTouchdowns <= stats.rushingAttempts &&
+      stats.passingYards <= stats.passingAttempts * 100 &&
+      stats.rushingYards <= stats.rushingAttempts * 100;
+  }
+  return stats.receptions <= stats.targets &&
+    stats.receivingTouchdowns <= stats.receptions &&
+    stats.rushingTouchdowns <= stats.rushingAttempts &&
+    stats.rushingYards <= stats.rushingAttempts * 100 &&
+    stats.receivingYards <= stats.targets * 100;
+}
+
+function omittedScoringCategories(position, stats) {
+  return APPLICABLE_SCORING[position].filter((field) => !(field in stats));
+}
+
 export function parseEspnClayTextWithCoverage(text) {
   let position = null;
   const rows = [];
   const sections = new Set();
-  const rejected = { invalidNumericRow: 0, zeroProjectedGames: 0 };
+  const rejected = { invalidNumericRow: 0, invalidStatRelation: 0, zeroProjectedGames: 0 };
   for (const rawLine of String(text).split(/\r?\n/)) {
     const heading = Object.entries(SECTION).find(([label]) => rawLine.includes(label));
     if (heading) {
@@ -75,13 +99,17 @@ export function parseEspnClayTextWithCoverage(text) {
           receivingYards: number(values[8]),
           receivingTouchdowns: number(values[9]),
         };
+    if (!validStatRelations(position, stats)) {
+      rejected.invalidStatRelation += 1;
+      continue;
+    }
     rows.push({
       name,
       team,
       position,
       projectionGames: games,
       stats,
-      omittedScoringCategories: Object.keys(OFFENSE_SCORING).filter((field) => !(field in stats)),
+      omittedScoringCategories: omittedScoringCategories(position, stats),
     });
   }
   return {
@@ -92,7 +120,7 @@ export function parseEspnClayTextWithCoverage(text) {
       rejected,
       scoringCategoriesByPosition: Object.fromEntries(Object.values(SECTION).map((value) => {
         const parsed = [...new Set(rows.filter((row) => row.position === value).flatMap((row) => Object.keys(row.stats)))].sort();
-        return [value, { parsed, omitted: Object.keys(OFFENSE_SCORING).filter((field) => !parsed.includes(field)) }];
+        return [value, { parsed, omitted: APPLICABLE_SCORING[value].filter((field) => !parsed.includes(field)) }];
       })),
     },
   };

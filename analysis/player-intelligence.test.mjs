@@ -232,12 +232,16 @@ test("projection omission receipts propagate without fabricated numeric values",
     asOf: "2026-08-22T12:00:00Z",
     players: [{ playerId: "r1", name: "Runner", position: "RB" }],
     replacementRanks: { RB: 1 },
+    evidencePolicy: () => ({ minimumFreshFamilies: 2, requiredFamilies: ["yahoo"] }),
     sources: [
       { sourceId: "yahoo", family: "yahoo", updatedAt: "2026-08-22T11:00:00Z", rows: [{ playerId: "r1", leaguePoints: 200 }] },
       { sourceId: "espn", family: "espn-clay", updatedAt: "2026-08-22T11:00:00Z", rows: [{ playerId: "r1", stats: { rushingYards: 1_000 }, omittedScoringCategories: ["rushingHundredYardGames"] }] },
     ],
   });
   assert.deepEqual(board.players[0].omittedScoringCategories, ["rushingHundredYardGames"]);
+  assert.equal(board.players[0].consensusPoints, 200);
+  assert.match(board.players[0].projectionBlendPolicy, /required-family-full-schema/);
+  assert.equal(board.players[0].sourceFamilyPerGamePoints["espn-clay"], 100 / 17);
   assert.equal(board.players[0].executable, true);
 });
 

@@ -4,12 +4,13 @@ import test from "node:test";
 import { makeEspnClaySnapshot, parseEspnClayText, parseEspnClayTextWithCoverage } from "./parse-espn-clay-projections.mjs";
 import { scoreOffenseStatLine } from "./player-intelligence.mjs";
 
-const TEXT = `Quarterback Projections
-Quarterback Team Pos Rk FF Pt G P Att Comp P Yds P TD INT Sk Carry Ru Yds Ru TD
-Josh Allen BUF 1 369 17 509 340 3946 26 12 36 116 580 12
-Running Back Projections (1/3)
-Running Back Team Pos Rk FF Pt G Carry Ru Yds Ru TD Targ Rec Re Yd Re TD Car% Targ%
-Ashton Jeanty LV 6 281 17 279 1128 7 87 65 496 2 67% 16%`;
+// Exact excerpt shape from `pdftotext -layout` on ESPN's 2026-08-26 Mike Clay PDF.
+const TEXT = `                     Quarterback Projections
+    Quarterback        Team    Pos Rk FF Pt   G    P Att   Comp   P Yds   P TD   INT   Sk   Carry Ru Yds Ru TD
+       Josh Allen       BUF       1    369    17   509      340   3946     26     12   36    116   580    12
+          Running Back Projections (1/3)
+      Running Back       Team    Pos Rk FF Pt   G    Carry   Ru Yds Ru TD Targ   Rec   Re Yd Re TD   Car%   Targ%
+     Ashton Jeanty         LV       6    281    17    279     1128    7    87     65    496    2     67%     16%`;
 
 test("parses raw offense stats and ignores ESPN fantasy-point totals", () => {
   const rows = parseEspnClayText(TEXT);
@@ -21,6 +22,7 @@ test("parses raw offense stats and ignores ESPN fantasy-point totals", () => {
   assert.equal(rows[1].stats.receptions, 65);
   assert.equal("receivingHundredYardGames" in rows[1].stats, false);
   assert.ok(rows[1].omittedScoringCategories.includes("fumblesLost"));
+  assert.equal(rows[1].omittedScoringCategories.includes("passingYards"), false);
   assert.notEqual(scoreOffenseStatLine(rows[0].stats), 369);
 });
 
@@ -29,6 +31,12 @@ test("receipts invalid numeric rows and filters zero-game projections", () => {
   assert.equal(parsed.coverage.rejected.zeroProjectedGames, 1);
   assert.equal(parsed.coverage.rejected.invalidNumericRow, 1);
   assert.deepEqual(parsed.coverage.sections, ["QB", "RB"]);
+});
+
+test("rejects numeric rows whose stat relationships cannot be true", () => {
+  const parsed = parseEspnClayTextWithCoverage(`${TEXT}\nImpossible Back LV 7 280 17 1 1000 7 10 20 496 2 67% 16%`);
+  assert.equal(parsed.coverage.rejected.invalidStatRelation, 1);
+  assert.equal(parsed.rows.some((row) => row.name === "Impossible Back"), false);
 });
 
 test("keeps suffix names by matching only valid NFL team codes", () => {

@@ -124,7 +124,7 @@ export function buildSnakeSeatPackets({ rehearsal, board, opponentCalibration, g
             pressureBasis: "room-phase fallback; manager-specific pressure disabled until Yahoo seat binding",
             positionRunPressure: normalizedPressure(pressure),
             exactSuggestions: exactSuggestions
-              ? { topThree: exactSuggestions.slice(0, 3), fallbacks: exactSuggestions.slice(3, 8), source: "five-seed simulation consensus" }
+              ? { topThree: exactSuggestions.slice(0, 3), fallbacks: exactSuggestions.slice(3, 8), source: `${simulations.length}-seed simulation consensus` }
               : null,
             positionContingency: positionContingency(simulations, round),
             instruction: round <= EARLY_EXACT_TURNS

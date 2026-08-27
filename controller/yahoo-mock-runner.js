@@ -810,6 +810,7 @@
     survivalCalibration = null,
     recomputeBudgetMs = DECISION_RECOMPUTE_BUDGET_MS,
   }) {
+    const requiredMinimum = round === config.rounds ? 1 : minimum;
     const used = new Set(Array.from(picks ?? [], boardKey));
     const availableById = new Map(
       Array.from(availablePlayers ?? [], (player) => [String(player.yahooId), player]),
@@ -817,8 +818,8 @@
     let pool = board
       .filter((player) => !used.has(boardKey(player)))
       .filter((player) => availableById.has(player.yahooId));
-    if (pool.length < minimum) {
-      throw new Error(`fewer_than_${minimum}_eligible_targets`);
+    if (pool.length < requiredMinimum) {
+      throw new Error(`fewer_than_${requiredMinimum}_eligible_targets`);
     }
 
     const scored = scoreCandidates({ round, seat, picks, pool, config, replacementBySlot, runPressureByPosition, survivalCalibration });
@@ -827,7 +828,7 @@
       ? scored.ranked.slice().sort((left, right) => left.player.rank - right.player.rank)
       : scored.ranked
     ).slice(0, minimum);
-    if (selected.length < minimum) throw new Error(`fewer_than_${minimum}_legal_bpa_targets`);
+    if (selected.length < requiredMinimum) throw new Error(`fewer_than_${requiredMinimum}_legal_bpa_targets`);
 
     const targets = selected.map(({ player }) => ({
       yahooId: player.yahooId,
@@ -862,6 +863,7 @@
     picks = [],
     config = CONFIGS.public_mock_15,
   }) {
+    const requiredMinimum = round === config.rounds ? 1 : minimum;
     const baseline = Array.from(baselineTargets ?? []);
     const untouched = (status = "none", reason = null) => ({
       targets: baseline,
@@ -896,7 +898,7 @@
       projection: boardPlayer.projection,
     };
     const targets = [pinned, ...baseline.filter((target) => String(target.yahooId) !== chosenId)];
-    if (targets.length < minimum) throw new Error(`fewer_than_${minimum}_targets_after_manual_pin`);
+    if (targets.length < requiredMinimum) throw new Error(`fewer_than_${requiredMinimum}_targets_after_manual_pin`);
     return {
       targets,
       manualOverride: {

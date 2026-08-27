@@ -33,6 +33,7 @@ function compactOffense(player) {
     confidence: player.sourceFamilyCount >= 2 ? "MULTI_SOURCE" : "WITHHELD",
     bye: player.bye ?? null,
     omittedScoringCategories: Array.from(player.omittedScoringCategories ?? []),
+    projectionBlendPolicy: player.projectionBlendPolicy ?? "unspecified",
   };
 }
 
@@ -70,6 +71,7 @@ function compactSpecialist(player, positionOverride = null) {
     confidence,
     bye: player.bye ?? null,
     omittedScoringCategories: Array.from(player.omittedScoringCategories ?? []),
+    projectionBlendPolicy: player.projectionBlendPolicy ?? "unspecified",
   };
 }
 
