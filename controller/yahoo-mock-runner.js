@@ -1301,9 +1301,9 @@
         const turnDetectionToClickMs = (activeTurnMetrics?.controllerStartedAt - activeTurnMetrics?.detectedAt) + clicks[0].detectionToClickMs;
         const pick = {
           yahooId: confirmation.yahooId,
-          name: confirmation.name,
+          name: boardPlayer?.name ?? confirmation.name,
           position: positionForConfirmedPick(board, confirmation),
-          team: confirmation.team,
+          team: boardPlayer?.team ?? confirmation.team,
           eligible: boardPlayer?.eligible ?? [positionForConfirmedPick(board, confirmation)],
           projection: boardPlayer?.projection ?? null,
           perGamePoints: boardPlayer?.perGamePoints ?? null,

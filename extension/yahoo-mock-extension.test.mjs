@@ -62,6 +62,14 @@ function healthyBoard(now = 1_000) {
   };
 }
 
+function memoryLocalStorage() {
+  const values = new Map();
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+  };
+}
+
 test("qualifies only the exact 12-team public mock waiting-room shape", () => {
   const fixture = waitingFixture();
   const snapshot = helpers.parseWaitingRoom(fixture.document, fixture.location);
@@ -117,12 +125,33 @@ test("board health is a single fail-closed arm gate with visible freshness and c
   const now = Date.parse("2026-08-27T18:00:00Z");
   const board = healthyBoard(now);
   assert.equal(helpers.boardHealthGate(board, now), null);
+  const futureBoard = { ...board, generatedAt:new Date(now + 15 * 60 * 1_000 + 1).toISOString() };
+  assert.equal(helpers.boardHealthGate(futureBoard, now), "draft_board_timestamp_in_future");
   assert.equal(helpers.boardHealthGate({ ...board, generatedAt:"2026-08-26T17:59:59Z" }, now), "draft_board_stale_over_24h");
   assert.equal(helpers.boardHealthGate({ ...board, injuryCoverage:{ complete:false } }, now), "draft_board_injury_coverage_incomplete");
   assert.equal(helpers.boardHealthGate({ ...board, byeCoverage:{ complete:false, playersWithBye:871, playersTotal:872 } }, now), "draft_board_bye_coverage_incomplete");
 
   const snapshot = helpers.parseWaitingRoom(waitingFixture().document, waitingFixture().location);
   assert.throws(() => helpers.makePreflight(snapshot, now, { ...board, injuryCoverage:{ complete:false } }), /draft_board_injury_coverage_incomplete/);
+  const token = helpers.makePreflight(snapshot, now, board);
+  assert.equal(helpers.validateDraftPreflight(token, { roomId:"9391926", seat:7 }, now, futureBoard), "draft_board_timestamp_in_future");
+
+  const localStorage = memoryLocalStorage();
+  const rendered = [];
+  const events = [];
+  helpers.refuseArmForBoardHealth({ localStorage, SKRODZKaiYahooMockBoard:futureBoard }, {
+    setWarnings(warnings) { rendered.push({ warnings }); },
+    render(...args) { rendered.push({ render:args }); },
+    addEvent(...args) { events.push(args); },
+  }, { kind:"mock_arm_refused", roomId:"9391926", seat:7, expectedRosterTotal:15 }, new Error("draft_board_timestamp_in_future"));
+  const receipts = JSON.parse(localStorage.getItem("skrodzkai-yahoo-mock-extension-receipts-v1"));
+  assert.equal(receipts.at(-1).kind, "mock_arm_refused");
+  assert.equal(receipts.at(-1).failure, "draft_board_timestamp_in_future");
+  assert.deepEqual(rendered.find((entry) => entry.render)?.render, ["bad", "BOARD HEALTH LOCKED", "draft_board_timestamp_in_future"]);
+  assert.deepEqual(events.at(-1), ["arm refused", "draft_board_timestamp_in_future"]);
+  assert.equal((source.match(/kind: "mock_arm_refused"/g) ?? []).length, 1);
+  assert.equal((source.match(/kind: "test_arm_refused"/g) ?? []).length, 2);
+  assert.match(source, /const preflightError = validateDraftPreflight\([\s\S]*kind: "extension_locked"[\s\S]*failure: preflightError/);
   const warnings = helpers.buildUiWarnings({
     room:{ roomId:"9391926", seat:7 }, armRecord:null, autodraft:false, roster:{ total:15 }, board:board.players, boardData:board, expectedRosterTotal:15, now,
   });

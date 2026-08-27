@@ -354,11 +354,11 @@ function runnerLoopEnvironment(runtime, seat) {
     setTimeout,
     SKRODZKaiYahooDraftController: controllerApi,
   };
-  return { config, environment };
+  return { config, environment, poolSize: rows.length };
 }
 
 function createReplayRunner(runtime, seat, selectionHoldMs) {
-  const { config, environment } = runnerLoopEnvironment(runtime, seat);
+  const { config, environment, poolSize } = runnerLoopEnvironment(runtime, seat);
   const runner = runtime.runner.create({
     configName: "test_league_19_idp",
     executionMode: "TEST",
@@ -375,7 +375,7 @@ function createReplayRunner(runtime, seat, selectionHoldMs) {
     survivalCalibration: runtime.survivalCalibration,
     board: runtime.board,
   }, environment);
-  return { runner };
+  return { runner, poolSize };
 }
 
 export async function replayRunnerLoop({ boardSource, runnerSource, seat = 6 }) {
@@ -429,6 +429,7 @@ export async function replayRunnerLoop({ boardSource, runnerSource, seat = 6 }) 
     completion: {
       state: completion.runner.getStatus().state,
       picks: completion.runner.getStatus().picks.length,
+      poolSize: completion.poolSize,
       overrideApplied,
       maxPanelReadyMs: turnReceipts.length ? Math.max(...turnReceipts.map((entry) => entry.panelReadyMs)) : null,
       maxRecomputeMs: turnReceipts.length ? Math.max(...turnReceipts.map((entry) => entry.decision?.recomputeMs ?? Infinity)) : null,

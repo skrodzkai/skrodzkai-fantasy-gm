@@ -222,6 +222,11 @@ test("the two Travis Hunter Yahoo identities cannot occupy the same roster", () 
   assert.equal(override.manualOverride.reason, "manual_pin_unavailable_or_ineligible");
 });
 
+test("confirmed picks preserve canonical board identity instead of Yahoo display abbreviations", () => {
+  assert.match(source, /name: boardPlayer\?\.name \?\? confirmation\.name/);
+  assert.match(source, /team: boardPlayer\?\.team \?\? confirmation\.team/);
+});
+
 test("snake-seat geometry changes next-turn survival metrics on the same board", () => {
   const pool = helpers.validateBoard(boardForConfig(mockConfig).slice(0, 12));
   const edge = helpers.scoreCandidates({ round:1, seat:1, picks:[], pool, config:mockConfig, replacementBySlot });

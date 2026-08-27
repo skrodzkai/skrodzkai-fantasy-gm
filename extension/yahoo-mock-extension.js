@@ -1476,6 +1476,7 @@
       makePreflight,
       boardHealthReceipt,
       boardHealthGate,
+      refuseArmForBoardHealth,
       parseTestSettings,
       makeTestSettingsReceipt,
       validTestSettingsReceipt,
