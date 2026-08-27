@@ -1,4 +1,4 @@
-const OFFENSE_SCORING = Object.freeze({
+export const OFFENSE_SCORING = Object.freeze({
   passingCompletions: 0.1,
   passingYards: 0.04,
   passingTouchdowns: 6,
@@ -17,7 +17,7 @@ const OFFENSE_SCORING = Object.freeze({
   offensiveFumbleReturnTouchdowns: 6,
 });
 
-const IDP_SCORING = Object.freeze({
+export const IDP_SCORING = Object.freeze({
   soloTackles: 0.5,
   assistedTackles: 0.25,
   sacks: 2,
@@ -332,7 +332,7 @@ export function buildPlayerBoard({
     const ageHours = (now - updatedAt) / 3_600_000;
     const sourceMaxAgeHours = finite(source.maxAgeHours, maxAgeHours);
     if (!(sourceMaxAgeHours > 0)) throw new Error(`source ${sourceId} maxAgeHours must be positive`);
-    const fresh = ageHours >= 0 && ageHours <= sourceMaxAgeHours;
+    const fresh = source.freshOverride !== false && ageHours >= 0 && ageHours <= sourceMaxAgeHours;
     const weight = finite(source.weight, 1);
     if (weight <= 0) throw new Error(`source ${sourceId} weight must be positive`);
     const rows = Array.isArray(source.rows) ? source.rows : [];
@@ -343,6 +343,7 @@ export function buildPlayerBoard({
       ageHours,
       maxAgeHours: sourceMaxAgeHours,
       fresh,
+      freshnessOverride: source.freshOverride ?? null,
       inputRows: finite(source.inputRows, rows.length),
       joinedRows: rows.length,
     });
@@ -353,7 +354,16 @@ export function buildPlayerBoard({
       const perGamePoints = projectionPerGame(row, source);
       if (!Number.isFinite(perGamePoints)) continue;
       const evidence = evidenceByPlayer.get(playerId) ?? [];
-      evidence.push({ sourceId, family, perGamePoints, weight, updatedAt: source.updatedAt });
+      evidence.push({
+        sourceId,
+        family,
+        perGamePoints,
+        weight,
+        updatedAt: source.updatedAt,
+        omittedScoringCategories: Array.isArray(row.omittedScoringCategories)
+          ? [...new Set(row.omittedScoringCategories.map(String))].sort()
+          : [],
+      });
       evidenceByPlayer.set(playerId, evidence);
     }
   }
@@ -371,19 +381,8 @@ export function buildPlayerBoard({
       sourceIds: rows.map((row) => row.sourceId).sort(),
       perGamePoints: weightedMean(rows.map((row) => ({ ...row, points: row.perGamePoints }))),
       weight: 1,
+      omittedScoringCategories: [...new Set(rows.flatMap((row) => row.omittedScoringCategories))].sort(),
     }));
-    const normalizedEvidence = familyEvidence.map((row) => ({
-      ...row,
-      points: row.perGamePoints * expectedGames,
-    }));
-    const points = normalizedEvidence.map((row) => row.points);
-    const perGamePoints = familyEvidence.length
-      ? weightedMean(familyEvidence.map((row) => ({ ...row, points: row.perGamePoints })))
-      : null;
-    const consensus = perGamePoints == null ? null : perGamePoints * expectedGames;
-    const calibratedOutcome = player.outcomeCalibrated === true &&
-      hasFinite(player.outcomeLow) && hasFinite(player.outcomeHigh) &&
-      Number(player.outcomeLow) <= Number(player.outcomeHigh);
     const policy = evidencePolicy
       ? evidencePolicy(player)
       : { minimumFreshFamilies: minimumFreshSources };
@@ -391,7 +390,30 @@ export function buildPlayerBoard({
     if (!Number.isInteger(minimumFreshFamilies) || minimumFreshFamilies < 1) {
       throw new Error(`player ${player.playerId} minimumFreshFamilies must be a positive integer`);
     }
-    const executable = familyEvidence.length >= minimumFreshFamilies;
+    const requiredFamilies = [...new Set((policy?.requiredFamilies ?? []).map(String))].sort();
+    const presentFamilies = new Set(familyEvidence.map((row) => row.family));
+    const missingRequiredFamilies = requiredFamilies.filter((family) => !presentFamilies.has(family));
+    const completeRequiredEvidence = familyEvidence.filter((row) => requiredFamilies.includes(row.family) && row.omittedScoringCategories.length === 0);
+    const scoringEvidence = familyEvidence.some((row) => row.omittedScoringCategories.length > 0) && completeRequiredEvidence.length
+      ? completeRequiredEvidence
+      : familyEvidence;
+    const projectionBlendPolicy = scoringEvidence === familyEvidence
+      ? "equal-family-mean"
+      : "required-family-full-schema; incomplete families are diagnostic only";
+    const normalizedEvidence = familyEvidence.map((row) => ({
+      ...row,
+      points: row.perGamePoints * expectedGames,
+    }));
+    const points = normalizedEvidence.map((row) => row.points);
+    const perGamePoints = scoringEvidence.length
+      ? weightedMean(scoringEvidence.map((row) => ({ ...row, points: row.perGamePoints })))
+      : null;
+    const consensus = perGamePoints == null ? null : perGamePoints * expectedGames;
+    const calibratedOutcome = player.outcomeCalibrated === true &&
+      hasFinite(player.outcomeLow) && hasFinite(player.outcomeHigh) &&
+      Number(player.outcomeLow) <= Number(player.outcomeHigh);
+    const executable = familyEvidence.length >= minimumFreshFamilies && missingRequiredFamilies.length === 0;
+    const omittedScoringCategories = [...new Set(familyEvidence.flatMap((row) => row.omittedScoringCategories))].sort();
     return {
       ...player,
       consensusPoints: consensus,
@@ -407,17 +429,28 @@ export function buildPlayerBoard({
       sourceIds: evidence.map((row) => row.sourceId).sort(),
       sourceFamilyCount: familyEvidence.length,
       sourceFamilies: familyEvidence.map((row) => row.family).sort(),
+      sourceFamilyPerGamePoints: Object.fromEntries(
+        familyEvidence.map((row) => [row.family, row.perGamePoints]),
+      ),
+      projectionBlendPolicy,
       requiredFreshFamilies: minimumFreshFamilies,
+      requiredSourceFamilies: requiredFamilies,
+      missingRequiredSourceFamilies: missingRequiredFamilies,
+      omittedScoringCategories,
       executable,
       evidenceStatus: executable
         ? "VALIDATED"
+        : missingRequiredFamilies.length
+          ? "MISSING_REQUIRED_PROJECTION_FAMILY"
         : familyEvidence.length === 1
           ? "UNVALIDATED_SINGLE_SOURCE_PROJECTION"
           : "NO_FRESH_PROJECTION",
       blockReason:
         executable
           ? null
-          : `requires ${minimumFreshFamilies} fresh projection families; found ${familyEvidence.length}`,
+          : missingRequiredFamilies.length
+            ? `requires source families ${requiredFamilies.join(", ")}; missing ${missingRequiredFamilies.join(", ")}`
+            : `requires ${minimumFreshFamilies} fresh projection families; found ${familyEvidence.length}`,
     };
   });
 
@@ -470,5 +503,3 @@ export function buildPlayerBoard({
     players: ranked,
   });
 }
-
-export { IDP_SCORING, OFFENSE_SCORING };

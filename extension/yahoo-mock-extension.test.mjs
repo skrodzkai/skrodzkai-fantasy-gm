@@ -471,7 +471,9 @@ test("bundled board contains unique IDs and labeled market evidence or fallback"
   assert.ok(hunters.every((player) => player.manualEligible === true));
   assert.ok(hunters.every((player) => player.validationStatus === "DUAL_ROLE_SCORING_UNVERIFIED"));
   assert.match(board.source, /raw projections scored under exact league rules/);
-  assert.equal(offense.filter((player) => player.automaticEligible).length, 0);
+  const automaticOffense = offense.filter((player) => player.automaticEligible);
+  assert.ok(automaticOffense.length >= 100);
+  assert.ok(automaticOffense.every((player) => player.confidence === "MULTI_SOURCE"));
   for (const player of offense) {
     assert.equal(Number.isFinite(player.vor), true);
     if (player.adpLow == null) {
@@ -481,7 +483,7 @@ test("bundled board contains unique IDs and labeled market evidence or fallback"
       assert.equal(Number.isFinite(player.adpLow), true);
       assert.equal(Number.isFinite(player.adpHigh), true);
     }
-    assert.equal(player.confidence, "WITHHELD");
+    assert.ok(["MULTI_SOURCE", "WITHHELD"].includes(player.confidence));
   }
   assert.ok([...kickers, ...idp].some((player) => player.validationStatus === "UNVALIDATED_SPECIALIST_PROJECTION"));
 });

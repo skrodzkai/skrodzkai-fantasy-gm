@@ -18,7 +18,8 @@ export const FREE_SOURCE_REGISTRY = Object.freeze([
     access: "public ESPN Mike Clay 2026 projections PDF",
     cost: "free",
     constraints: "ingest raw stat columns only; do not use ESPN fantasy-point totals or redistribute the source PDF",
-    maximumRefreshHours: 24,
+    maximumRefreshHours: 168,
+    maximumRetrievalHours: 24,
     licenseUseNote: "Retain only source receipt and locally derived values; do not republish the PDF.",
   }),
   Object.freeze({
@@ -71,13 +72,24 @@ export function validateSourceSnapshot(snapshot, asOf) {
     if (!/^[a-f0-9]{64}$/.test(String(entry.contentSha256 ?? ""))) throw new Error(`${entry.sourceId} contentSha256 must be lowercase sha256`);
     const observed = Date.parse(entry.sourceAsOf);
     if (!Number.isFinite(observed)) throw new Error(`${entry.sourceId} sourceAsOf must be an ISO date`);
+    const retrieved = Date.parse(entry.retrievedAt);
+    if (!Number.isFinite(retrieved)) throw new Error(`${entry.sourceId} retrievedAt must be an ISO date`);
     const ageHours = (now - observed) / 3_600_000;
+    const retrievalAgeHours = (now - retrieved) / 3_600_000;
+    const maximumRetrievalHours = policy.maximumRetrievalHours ?? policy.maximumRefreshHours;
+    const sourceFresh = ageHours >= 0 && ageHours <= policy.maximumRefreshHours;
+    const retrievalFresh = retrievalAgeHours >= 0 && retrievalAgeHours <= maximumRetrievalHours;
     return {
       sourceId: entry.sourceId,
       sourceFamily,
       observedAt: entry.sourceAsOf,
       ageHours,
-      fresh: ageHours >= 0 && ageHours <= policy.maximumRefreshHours,
+      retrievalAgeHours,
+      maximumSourceAgeHours: policy.maximumRefreshHours,
+      maximumRetrievalHours,
+      sourceFresh,
+      retrievalFresh,
+      fresh: sourceFresh && retrievalFresh,
       role: policy.role,
     };
   });

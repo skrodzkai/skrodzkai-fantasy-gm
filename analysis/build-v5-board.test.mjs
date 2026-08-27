@@ -67,7 +67,7 @@ test("validates offense only with two fresh independent projection families", ()
       sourceAsOf: "2026-08-22T11:00:00Z", retrievedAt: "2026-08-22T11:10:00Z",
       contentSha256: "a".repeat(64), gamesBasis: "17", projectionPeriod: "2026", licenseUseNote: "test",
     },
-    rows: [{ name: "Quarterback", team: "BUF", position: "QB", projectionGames: 17, stats: { passingCompletions: 300, passingYards: 4000, passingTouchdowns: 30, interceptions: 10 } }],
+    rows: [{ playerId: "1", name: "Quarterback", team: "BUF", position: "QB", projectionGames: 17, stats: { passingCompletions: 300, passingYards: 4000, passingTouchdowns: 30, interceptions: 10 } }],
   }] });
   assert.equal(board.players[0].sourceFamilyCount, 2);
   assert.equal(board.players[0].automaticEligible, true);
@@ -221,7 +221,7 @@ test("a lone current Travis Hunter identity remains manual-only with two fresh f
         sourceAsOf: "2026-08-22T11:00:00Z", retrievedAt: "2026-08-22T11:10:00Z",
         contentSha256: "b".repeat(64), gamesBasis: "17", projectionPeriod: "2026", licenseUseNote: "test",
       },
-      rows: [{ name: "Travis Hunter", team: "JAX", position: "WR", projectionGames: 17, stats: { receptions: 50, receivingYards: 700, receivingTouchdowns: 5, receivingHundredYardGames: 0, rushingHundredYardGames: 0 } }],
+      rows: [{ playerId: "99001", name: "Travis Hunter", team: "JAX", position: "WR", projectionGames: 17, stats: { receptions: 50, receivingYards: 700, receivingTouchdowns: 5, receivingHundredYardGames: 0, rushingHundredYardGames: 0 } }],
     }],
     specialistSnapshot: { observedAt: "2026-08-22T10:01:00Z", positions: {}, eligibilityEvidence: {} },
     sleeperPlayers: {},
