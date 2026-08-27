@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 import { SCORING_SCHEMA_HASH } from "./build-v5-board.mjs";
-import { fetchEspnClayPdf, joinEspnRowsToYahoo, loadOrFetchSleeper, publishSuccessfulRun, refreshDraftPrep, writeSleeperCache } from "./refresh-draft-prep.mjs";
+import { buildHealth, byeCoverage, fetchEspnClayPdf, joinEspnRowsToYahoo, loadOrFetchSleeper, publishSuccessfulRun, refreshDraftPrep, writeSleeperCache } from "./refresh-draft-prep.mjs";
 
 function response(bytes, headers = {}) {
   const normalized = new Map(Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]));
@@ -107,7 +107,28 @@ test("publishes the complete successful artifact set with one atomic rename", as
   await assert.rejects(() => readdir(staging), { code: "ENOENT" });
 });
 
+test("health reasons fail closed on eligible-player injury or bye gaps", () => {
+  const players = [
+    { yahooId:"1", position:"QB", automaticEligible:true, manualEligible:true, bye:7 },
+    { yahooId:"2", position:"DEF", automaticEligible:true, manualEligible:true, bye:null },
+    { yahooId:"3", position:"WR", automaticEligible:false, manualEligible:false, bye:null },
+  ];
+  assert.deepEqual(byeCoverage(players), {
+    complete:false, playersWithBye:1, playersTotal:2, denominator:"automatic-or-manual-eligible players, including DEF",
+  });
+  const health = buildHealth({
+    generatedAt:"2026-08-27T18:00:00Z",
+    clock:{ fresh:true },
+    board:{ players, injuryCoverage:{ complete:false } },
+  });
+  assert.equal(health.status, "FAIL");
+  assert.ok(health.reasons.includes("injury_coverage_incomplete"));
+  assert.ok(health.reasons.includes("bye_coverage_incomplete"));
+  assert.equal(health.byes.playersTotal, 2);
+});
+
 test("stale caller-supplied Yahoo inputs publish a health-only failure atomically", async () => {
+  const now = new Date();
   const allowedRoot = await mkdtemp(join(tmpdir(), "draft-prep-v11-test-"));
   const outputParent = join(allowedRoot, "runs");
   await mkdir(outputParent);
@@ -121,7 +142,7 @@ test("stale caller-supplied Yahoo inputs publish a health-only failure atomicall
     leagueId: "420010",
     scoringModel: "2-minute-drillers-2026",
     scoringSchemaHash: SCORING_SCHEMA_HASH,
-    observedAt: "2026-08-20T00:00:00Z",
+    observedAt: new Date(now.getTime() - 7 * 60 * 60 * 1000).toISOString(),
     players: [],
     positions: {},
   };
@@ -133,8 +154,7 @@ test("stale caller-supplied Yahoo inputs publish a health-only failure atomicall
   const runnerPath = join(allowedRoot, "runner.js");
   await Promise.all([writeFile(historyPath, ""), writeFile(runnerPath, "")]);
   await assert.rejects(() => refreshDraftPrep({
-    generatedAt: "2026-08-26T20:00:00Z",
-    now: Date.parse("2026-08-26T20:00:00Z"),
+    generatedAt: now.toISOString(),
     outputParent,
     allowedOutputRoot: allowedRoot,
     baselinePath,
@@ -161,7 +181,6 @@ test("a caller-supplied generatedAt cannot make old evidence look current", asyn
   await mkdir(outputParent);
   await assert.rejects(() => refreshDraftPrep({
     generatedAt: "2026-08-20T00:00:00Z",
-    now: "2026-08-26T20:00:00Z",
     outputParent,
     allowedOutputRoot: allowedRoot,
   }), /differs from wall clock/);
@@ -173,6 +192,7 @@ test("a caller-supplied generatedAt cannot make old evidence look current", asyn
 });
 
 test("Yahoo projections must declare the real league and scoring schema", async () => {
+  const generatedAt = new Date().toISOString();
   const allowedRoot = await mkdtemp(join(tmpdir(), "draft-prep-v11-yahoo-receipt-test-"));
   const outputParent = join(allowedRoot, "runs");
   await mkdir(outputParent);
@@ -181,10 +201,9 @@ test("Yahoo projections must declare the real league and scoring schema", async 
     await writeFile(path, JSON.stringify(value));
     return path;
   };
-  const wrongLeague = { leagueId: "18599", scoringModel: "test", scoringSchemaHash: "0".repeat(64), observedAt: "2026-08-26T20:00:00Z" };
+  const wrongLeague = { leagueId: "18599", scoringModel: "test", scoringSchemaHash: "0".repeat(64), observedAt: generatedAt };
   const shared = {
-    generatedAt: "2026-08-26T20:00:00Z",
-    now: "2026-08-26T20:00:00Z",
+    generatedAt,
     outputParent,
     allowedOutputRoot: allowedRoot,
     baselinePath: await writeJson("baseline.json", []),
@@ -200,6 +219,7 @@ test("Yahoo projections must declare the real league and scoring schema", async 
 });
 
 test("a short parsed ESPN snapshot leaves only a health receipt", async () => {
+  const generatedAt = new Date().toISOString();
   const allowedRoot = await mkdtemp(join(tmpdir(), "draft-prep-v11-coverage-test-"));
   const outputParent = join(allowedRoot, "runs");
   await mkdir(outputParent);
@@ -212,7 +232,7 @@ test("a short parsed ESPN snapshot leaves only a health receipt", async () => {
     leagueId: "420010",
     scoringModel: "2-minute-drillers-2026",
     scoringSchemaHash: SCORING_SCHEMA_HASH,
-    observedAt: "2026-08-26T20:00:00Z",
+    observedAt: generatedAt,
     players: [],
     positions: {},
   };
@@ -225,8 +245,7 @@ test("a short parsed ESPN snapshot leaves only a health receipt", async () => {
   const opponentCalibrationPath = await writeJson("calibration.json", {});
   await Promise.all([writeFile(historyPath, ""), writeFile(runnerPath, "")]);
   await assert.rejects(() => refreshDraftPrep({
-    generatedAt: "2026-08-26T20:00:00Z",
-    now: "2026-08-26T20:00:00Z",
+    generatedAt,
     outputParent,
     allowedOutputRoot: allowedRoot,
     baselinePath,
@@ -236,7 +255,7 @@ test("a short parsed ESPN snapshot leaves only a health receipt", async () => {
     historyPath,
     opponentCalibrationPath,
     runnerPath,
-    fetchImpl: async () => response(Buffer.alloc(100_001, 1), { "content-type": "application/pdf", "last-modified": "Wed, 26 Aug 2026 17:30:59 GMT" }),
+    fetchImpl: async () => response(Buffer.alloc(100_001, 1), { "content-type": "application/pdf", "last-modified": new Date(Date.parse(generatedAt) - 60_000).toUTCString() }),
     extractPdf: async () => ({
       text: "Quarterback Projections\nQuarterback Team Pos Rk FF Pt G P Att Comp P Yds P TD INT Sk Carry Ru Yds Ru TD\nJosh Allen BUF 1 369 17 509 340 3946 26 12 36 116 580 12",
       receipt: { command: "pdftotext -layout", version: "test", textSha256: "b".repeat(64) },
@@ -250,4 +269,5 @@ test("refresh command has no static import path to Yahoo execution modules", asy
   const source = await readFile(new URL("./refresh-draft-prep.mjs", import.meta.url), "utf8");
   assert.equal(source.includes("../controller/"), false);
   assert.equal(source.includes("../extension/"), false);
+  assert.equal(source.includes("options.now"), false);
 });

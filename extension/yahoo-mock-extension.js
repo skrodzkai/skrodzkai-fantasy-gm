@@ -1,7 +1,7 @@
 (function installYahooMockExtension(root) {
   "use strict";
 
-  const VERSION = "0.9.0";
+  const VERSION = "0.10.0";
   const GLOBAL_KEY = "__skrodzkaiYahooMockExtensionV1";
   const PREFLIGHT_KEY = "skrodzkai-yahoo-mock-extension-preflight-v1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-extension-receipts-v1";
@@ -10,6 +10,8 @@
   const MANUAL_STAGE_KEY = "skrodzkai-yahoo-mock-manual-stage-v1";
   const TEST_SETTINGS_KEY = "skrodzkai-yahoo-test-settings-v1";
   const PREFLIGHT_TTL_MS = 30 * 60 * 1000;
+  const BOARD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+  const BOARD_FUTURE_TOLERANCE_MS = 15 * 60 * 1000;
   const DISABLED_LEAGUE_ID = "420010";
   const TEST_LEAGUE_ID = "18599";
   const TEST_TEAM_ID = 12;
@@ -77,6 +79,33 @@
     const a = Array.from(left ?? [], normalize);
     const b = Array.from(right ?? [], normalize);
     return a.length === b.length && a.every((slot, index) => slot === b[index]);
+  }
+
+  function boardHealthReceipt(boardData, now = Date.now()) {
+    const generatedAtMs = Date.parse(boardData?.generatedAt);
+    const ageMs = Number.isFinite(generatedAtMs) ? now - generatedAtMs : null;
+    return {
+      generatedAt: boardData?.generatedAt ?? null,
+      ageMs,
+      maximumAgeMs: BOARD_MAX_AGE_MS,
+      injuryCoverageComplete: boardData?.injuryCoverage?.complete === true,
+      injuryPlayersChecked: Number(boardData?.injuryCoverage?.checkedPlayers ?? 0),
+      injuryPlayersTotal: Number(boardData?.injuryCoverage?.expectedPlayers ?? boardData?.injuryCoverage?.totalPlayers ?? boardData?.injuryCoverage?.playersTotal ?? 0),
+      byeCoverageComplete: boardData?.byeCoverage?.complete === true,
+      byePlayersWithBye: Number(boardData?.byeCoverage?.playersWithBye ?? 0),
+      byePlayersTotal: Number(boardData?.byeCoverage?.playersTotal ?? 0),
+    };
+  }
+
+  function boardHealthGate(boardData, now = Date.now()) {
+    if (!boardData || typeof boardData !== "object") return "draft_board_missing";
+    const health = boardHealthReceipt(boardData, now);
+    if (!Number.isFinite(health.ageMs)) return "draft_board_timestamp_missing";
+    if (health.ageMs < -BOARD_FUTURE_TOLERANCE_MS) return "draft_board_timestamp_in_future";
+    if (health.ageMs > BOARD_MAX_AGE_MS) return "draft_board_stale_over_24h";
+    if (!health.injuryCoverageComplete) return "draft_board_injury_coverage_incomplete";
+    if (!health.byeCoverageComplete) return "draft_board_bye_coverage_incomplete";
+    return null;
   }
 
   function requiredTestFilterLabels(environment = root) {
@@ -168,9 +197,9 @@
     return { roomId, seat, teamCount, rosterSlots, errors, ready: errors.length === 0 };
   }
 
-  function makePreflight(snapshot, now = Date.now()) {
+  function makePreflight(snapshot, now = Date.now(), boardData = root.SKRODZKaiYahooMockBoard) {
     if (!snapshot?.ready) throw new Error("public mock waiting-room preflight is not ready");
-    return {
+    const armRecord = {
       version: VERSION,
       mode: "public_mock_15",
       roomId: snapshot.roomId,
@@ -179,7 +208,11 @@
       observedRosterSlots: snapshot.rosterSlots,
       armedAt: now,
       expiresAt: now + PREFLIGHT_TTL_MS,
+      boardHealth: boardHealthReceipt(boardData, now),
     };
+    const failure = validateDraftPreflight(armRecord, { roomId: snapshot.roomId, seat: snapshot.seat }, now, boardData);
+    if (failure) throw new Error(failure);
+    return armRecord;
   }
 
   function parseTestDraftHome(documentRef, locationRef, settingsReceipt = null, now = Date.now()) {
@@ -204,9 +237,9 @@
     };
   }
 
-  function makeTestPreflight(snapshot, now = Date.now()) {
+  function makeTestPreflight(snapshot, now = Date.now(), boardData = root.SKRODZKaiYahooMockBoard) {
     if (!snapshot?.ready) throw new Error("verified test draft preflight is not ready");
-    return {
+    const armRecord = {
       version: VERSION,
       mode: "test_league_19_idp",
       roomId: TEST_LEAGUE_ID,
@@ -216,7 +249,11 @@
       observedRosterSlots: [...snapshot.rosterSlots],
       armedAt: now,
       expiresAt: now + 4 * 60 * 60 * 1000,
+      boardHealth: boardHealthReceipt(boardData, now),
     };
+    const failure = validateDraftPreflight(armRecord, { roomId: TEST_LEAGUE_ID, seat: TEST_TEAM_ID }, now, boardData);
+    if (failure) throw new Error(failure);
+    return armRecord;
   }
 
   function parseTestDraftClient(documentRef, locationRef, settingsReceipt = null, now = Date.now()) {
@@ -248,10 +285,12 @@
     };
   }
 
-  function validateDraftPreflight(token, room, now = Date.now()) {
+  function validateDraftPreflight(token, room, now = Date.now(), boardData = root.SKRODZKaiYahooMockBoard) {
     if (!token || !["public_mock_15", "test_league_19_idp"].includes(token.mode)) return "approved_draft_arm_required";
     if (token.version !== VERSION) return "draft_arm_version_mismatch";
     if (String(room?.roomId ?? token.roomId) === DISABLED_LEAGUE_ID) return "league_420010_hard_disabled";
+    const boardFailure = boardHealthGate(boardData, now);
+    if (boardFailure) return boardFailure;
     if (!Number.isFinite(token.expiresAt) || token.expiresAt <= now) return "draft_arm_expired";
     const expectedUrlSeat = token.mode === "test_league_19_idp" ? Number(token.urlSeat) : Number(token.seat);
     if (!room || String(token.roomId) !== String(room.roomId) || expectedUrlSeat !== Number(room.seat)) {
@@ -280,6 +319,23 @@
     receipts.push(entry);
     storage.setItem(RECEIPT_KEY, JSON.stringify(receipts.slice(-500)));
     return entry;
+  }
+
+  function refuseArmForBoardHealth(environment, rail, { kind, roomId, seat, urlSeat = seat, expectedRosterTotal }, error) {
+    const failure = String(error?.message ?? error);
+    writeReceipt(environment.localStorage, { kind, roomId, seat, urlSeat, failure, boardHealth: boardHealthReceipt(environment.SKRODZKaiYahooMockBoard) });
+    rail.setWarnings(buildUiWarnings({
+      room: { roomId, seat: urlSeat },
+      armRecord: null,
+      autodraft: false,
+      roster: null,
+      board: environment.SKRODZKaiYahooMockBoard?.players ?? [],
+      boardData: environment.SKRODZKaiYahooMockBoard,
+      expectedRosterTotal,
+    }));
+    rail.render("bad", "BOARD HEALTH LOCKED", failure);
+    rail.addEvent("arm refused", failure);
+    return null;
   }
 
   function findFilter(documentRef, label) {
@@ -905,7 +961,7 @@
         reason: manual
           ? "operator pin validated; baseline fallbacks retained"
           : leader
-            ? `BPA ${Number(leader.marginalUtility ?? 0).toFixed(1)} · wait ${Number(leader.costOfWaiting ?? 0).toFixed(1)} · Pnext ${Math.round(Number(leader.pAvailableNext ?? 0) * 100)}%`
+            ? leader.valueReason ?? `BPA ${Number(leader.marginalUtility ?? 0).toFixed(1)} · wait ${Number(leader.costOfWaiting ?? 0).toFixed(1)} · Pnext ${Math.round(Number(leader.pAvailableNext ?? 0) * 100)}%`
             : "verified local ladder; exact Yahoo ID",
       }];
     });
@@ -932,11 +988,17 @@
     };
   }
 
-  function buildUiWarnings({ room, armRecord, autodraft, roster, board, expectedRosterTotal = 15 }) {
+  function buildUiWarnings({ room, armRecord, autodraft, roster, board, boardData = root.SKRODZKaiYahooMockBoard, decision = null, expectedRosterTotal = 15, now = Date.now() }) {
+    const health = boardHealthReceipt(boardData, now);
+    const healthFailure = boardHealthGate(boardData, now);
+    const asOf = health.generatedAt ? new Date(health.generatedAt).toISOString() : "missing";
+    const ageHours = Number.isFinite(health.ageMs) ? (health.ageMs / 3_600_000).toFixed(1) : "unknown";
     const warnings = [
-      { text: "Injury status: not live-validated; verify before setting a next-pick pin." },
-      { text: "Freshness: local board snapshot only; no remote refresh path." },
-      { text: "Eligibility / bye: Yahoo row readback remains authoritative." },
+      { severity: healthFailure ? "danger" : "", text: `Data as-of ${asOf} · ${ageHours}h old${healthFailure ? ` · ${healthFailure}` : ""}` },
+      { severity: health.injuryCoverageComplete ? "" : "danger", text: `Injury coverage: ${health.injuryCoverageComplete ? "COMPLETE" : "INCOMPLETE"}${health.injuryPlayersTotal ? ` · ${health.injuryPlayersChecked}/${health.injuryPlayersTotal}` : ""}` },
+      { severity: health.byeCoverageComplete ? "" : "danger", text: `Bye coverage: ${health.byeCoverageComplete ? "COMPLETE" : "INCOMPLETE"} · ${health.byePlayersWithBye}/${health.byePlayersTotal}` },
+      ...(decision?.qb2 ? [{ text: `QB2 ${decision.qb2.recommendation}: ${decision.qb2.reason}` }] : []),
+      ...(decision?.byeConcentration?.warning ? [{ severity: "danger", text: decision.byeConcentration.reason }] : []),
     ];
     if (autodraft) warnings.unshift({ severity: "danger", text: "Autodraft is active: execution is fail-closed." });
     if (!armRecord) warnings.unshift({ severity: "danger", text: "Roster mismatch or missing arm token: locked." });
@@ -978,7 +1040,13 @@
         writeReceipt(environment.localStorage, { kind: "mock_disarmed", roomId: snapshot.roomId, seat: snapshot.seat });
         rail.addEvent("mock disarmed", `room ${snapshot.roomId} · seat ${snapshot.seat}`);
       } else {
-        const armRecord = makePreflight(snapshot);
+        let armRecord;
+        try {
+          armRecord = makePreflight(snapshot, Date.now(), environment.SKRODZKaiYahooMockBoard);
+        } catch (error) {
+          refuseArmForBoardHealth(environment, rail, { kind: "mock_arm_refused", roomId: snapshot.roomId, seat: snapshot.seat, expectedRosterTotal: 15 }, error);
+          return;
+        }
         environment.sessionStorage.setItem(PREFLIGHT_KEY, JSON.stringify(armRecord));
         writeReceipt(environment.localStorage, { kind: "mock_armed", roomId: snapshot.roomId, seat: snapshot.seat, expiresAt: armRecord.expiresAt });
         rail.addEvent("mock armed", `room ${snapshot.roomId} · seat ${snapshot.seat}`);
@@ -1032,7 +1100,13 @@
         writeReceipt(environment.localStorage, { kind: "test_disarmed", roomId: TEST_LEAGUE_ID, seat: snapshot.seat, urlSeat: TEST_TEAM_ID });
         rail.addEvent("test disarmed", `league ${TEST_LEAGUE_ID} · draft slot ${snapshot.seat}`);
       } else {
-        const armRecord = makeTestPreflight(snapshot);
+        let armRecord;
+        try {
+          armRecord = makeTestPreflight(snapshot, Date.now(), environment.SKRODZKaiYahooMockBoard);
+        } catch (error) {
+          refuseArmForBoardHealth(environment, rail, { kind: "test_arm_refused", roomId: TEST_LEAGUE_ID, seat: snapshot.seat, urlSeat: TEST_TEAM_ID, expectedRosterTotal: 19 }, error);
+          return;
+        }
         environment.sessionStorage.setItem(PREFLIGHT_KEY, JSON.stringify(armRecord));
         writeReceipt(environment.localStorage, { kind: "test_armed", roomId: TEST_LEAGUE_ID, seat: snapshot.seat, urlSeat: TEST_TEAM_ID, expiresAt: armRecord.expiresAt });
         rail.addEvent("test armed", `league ${TEST_LEAGUE_ID} · draft slot ${snapshot.seat}`);
@@ -1185,7 +1259,12 @@
           rail.render("bad", "TEST PREFLIGHT LOCKED", [...fresh.errors, ...(currentAutodraft ? ["autodraft_active"] : [])].join(" · "));
           return;
         }
-        armRecord = makeTestPreflight(fresh);
+        try {
+          armRecord = makeTestPreflight(fresh, Date.now(), environment.SKRODZKaiYahooMockBoard);
+        } catch (error) {
+          refuseArmForBoardHealth(environment, rail, { kind: "test_arm_refused", roomId: TEST_LEAGUE_ID, seat: fresh.seat, urlSeat: TEST_TEAM_ID, expectedRosterTotal: 19 }, error);
+          return;
+        }
         environment.sessionStorage.setItem(PREFLIGHT_KEY, JSON.stringify(armRecord));
         writeReceipt(environment.localStorage, { kind: "test_armed_from_draftclient", roomId: TEST_LEAGUE_ID, seat: fresh.seat, urlSeat: TEST_TEAM_ID, expiresAt: armRecord.expiresAt });
         rail.addEvent("test armed", `league ${TEST_LEAGUE_ID} · draft slot ${fresh.seat}`);
@@ -1220,7 +1299,7 @@
     const preflightError = validateDraftPreflight(armRecord, room);
     if (preflightError) {
       writeReceipt(environment.localStorage, { kind: "extension_locked", roomId: room.roomId, seat: room.seat, failure: preflightError });
-      rail.setWarnings(buildUiWarnings({ room, armRecord: null, autodraft: controllerApi.runtime.isAutodraftActive(environment.document), roster: null, board: boardData.players, expectedRosterTotal }));
+      rail.setWarnings(buildUiWarnings({ room, armRecord: null, autodraft: controllerApi.runtime.isAutodraftActive(environment.document), roster: null, board: boardData.players, boardData, expectedRosterTotal }));
       rail.render("bad", "LOCKED", `${preflightError} · arm from the approved ${executionMode.toLowerCase()} preflight`);
       return;
     }
@@ -1230,7 +1309,7 @@
     const board = await prepareBoard(environment.document, environment, controllerApi, boardData, executionMode);
     rail.setBoard(board);
     rail.setRecommendations([], { fullBoard: board });
-    rail.setWarnings(buildUiWarnings({ room, armRecord, autodraft: controllerApi.runtime.isAutodraftActive(environment.document), roster: { total: expectedRosterTotal }, board, expectedRosterTotal }));
+    rail.setWarnings(buildUiWarnings({ room, armRecord, autodraft: controllerApi.runtime.isAutodraftActive(environment.document), roster: { total: expectedRosterTotal }, board, boardData, expectedRosterTotal }));
     const runner = runnerApi.create({
       configName,
       executionMode,
@@ -1335,7 +1414,7 @@
       rail.setRoster(buildUiRoster(status.picks, rosterSlots), status.picks.at(-1));
       rail.setRecommendations(buildUiRecommendations(board, decision), { fullBoard: board, disagreement: status.failure?.code?.includes("mismatch") });
       rail.setBetweenTurns(buildUiOpponentWindow(decision, executionMode));
-      rail.setWarnings(buildUiWarnings({ room, armRecord, autodraft, roster, board, expectedRosterTotal }));
+      rail.setWarnings(buildUiWarnings({ room, armRecord, autodraft, roster, board, boardData, decision, expectedRosterTotal }));
       rail.render(kind, status.state, `${status.picks.length}/${expectedRosterTotal} confirmed${status.failure ? ` · ${status.failure.code ?? status.failure}` : ""}`);
       if (["completed", "failed", "halted", "stopped"].includes(status.state)) {
         environment.clearInterval(statusTimer);
@@ -1395,6 +1474,8 @@
       parseRosterSlots,
       parseWaitingRoom,
       makePreflight,
+      boardHealthReceipt,
+      boardHealthGate,
       parseTestSettings,
       makeTestSettingsReceipt,
       validTestSettingsReceipt,
@@ -1415,6 +1496,7 @@
       buildUiRoster,
       buildUiRecommendations,
       buildUiOpponentWindow,
+      buildUiWarnings,
       commandCenterRole,
       attachCommandCenterBridge,
       publicRosterSlots: PUBLIC_ROSTER_SLOTS,

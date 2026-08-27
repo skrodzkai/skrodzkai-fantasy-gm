@@ -125,6 +125,14 @@ export function extensionBoardFromV5(board) {
     }
   }
   const players = [...playerByYahooId.values()];
+  const byeEligible = players.filter((player) => player.automaticEligible || player.manualEligible);
+  const playersWithBye = byeEligible.filter((player) => Number.isInteger(Number(player.bye)) && Number(player.bye) >= 1 && Number(player.bye) <= 17).length;
+  const byeCoverage = {
+    complete: byeEligible.length > 0 && playersWithBye === byeEligible.length,
+    playersWithBye,
+    playersTotal: byeEligible.length,
+    denominator: "automatic-or-manual-eligible players, including DEF",
+  };
   return {
     generatedAt: board.generatedAt,
     source: "free-source board: raw projections scored under exact league rules and equal-weighted per independent source family; market/history are timing context only; injuries use source-specific freshness",
@@ -134,6 +142,7 @@ export function extensionBoardFromV5(board) {
     survivalCalibration: board.survivalCalibration ?? null,
     injuryCoverage: board.injuryCoverage ?? null,
     injuryFreshnessPolicy: board.injuryFreshnessPolicy ?? null,
+    byeCoverage,
     players,
     offense,
     kickers,
@@ -152,10 +161,38 @@ export function renderExtensionBoard(board) {
     survivalCalibration: board.survivalCalibration,
     injuryCoverage: board.injuryCoverage,
     injuryFreshnessPolicy: board.injuryFreshnessPolicy,
+    byeCoverage: board.byeCoverage,
     players: board.players,
     defenses: board.defenses,
   };
   return `(function installYahooMockBoard(root) {\n  "use strict";\n\n  root.SKRODZKaiYahooMockBoard = Object.freeze(${JSON.stringify(runtimeBoard, null, 2)});\n})(globalThis);\n`;
+}
+
+function csvCell(value) {
+  const text = value == null ? "" : String(value);
+  return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+export function renderOfflineBoardCsv(board) {
+  const columns = ["value_rank", "name", "team", "position", "eligible", "projection", "vor", "bye", "yahoo_rank", "confidence", "automatic_eligible", "manual_eligible", "validation_status"];
+  const rows = Array.from(board?.players ?? [])
+    .sort((left, right) => Number(left.valueRank ?? Infinity) - Number(right.valueRank ?? Infinity) || Number(left.rank ?? Infinity) - Number(right.rank ?? Infinity) || String(left.yahooId).localeCompare(String(right.yahooId)))
+    .map((player) => [
+      player.valueRank,
+      player.name,
+      player.team,
+      player.position,
+      Array.from(player.eligible ?? []).join("/"),
+      player.projection,
+      player.vor,
+      player.bye,
+      player.yahooRank,
+      player.confidence,
+      player.automaticEligible,
+      player.manualEligible,
+      player.validationStatus,
+    ].map(csvCell).join(","));
+  return `${columns.join(",")}\n${rows.join("\n")}\n`;
 }
 
 async function main() {
@@ -167,7 +204,8 @@ async function main() {
   const source = JSON.parse(await readFile(args.input, "utf8"));
   const board = extensionBoardFromV5(source);
   await writeFile(args.output, renderExtensionBoard(board), "utf8");
-  process.stdout.write(`${JSON.stringify({ output: args.output, offense: board.offense.length, kickers: board.kickers.length, defenses: board.defenses.length, idp: board.idp.length })}\n`);
+  if (args["csv-output"]) await writeFile(args["csv-output"], renderOfflineBoardCsv(board), "utf8");
+  process.stdout.write(`${JSON.stringify({ output: args.output, csvOutput: args["csv-output"] ?? null, offense: board.offense.length, kickers: board.kickers.length, defenses: board.defenses.length, idp: board.idp.length })}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
