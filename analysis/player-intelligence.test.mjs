@@ -210,6 +210,37 @@ test("two feeds from one family count as one independent projection", () => {
   assert.equal(board.players[0].executable, false);
 });
 
+test("required Yahoo family cannot be replaced by two external families", () => {
+  const board = buildPlayerBoard({
+    asOf: "2026-08-22T12:00:00Z",
+    players: [{ playerId: "r1", name: "Runner", position: "RB" }],
+    replacementRanks: { RB: 1 },
+    evidencePolicy: () => ({ minimumFreshFamilies: 2, requiredFamilies: ["yahoo"] }),
+    sources: [
+      { sourceId: "external-a", family: "a", updatedAt: "2026-08-22T11:00:00Z", rows: [{ playerId: "r1", leaguePoints: 200 }] },
+      { sourceId: "external-b", family: "b", updatedAt: "2026-08-22T11:00:00Z", rows: [{ playerId: "r1", leaguePoints: 220 }] },
+    ],
+  });
+  assert.equal(board.players[0].sourceFamilyCount, 2);
+  assert.equal(board.players[0].executable, false);
+  assert.equal(board.players[0].evidenceStatus, "MISSING_REQUIRED_PROJECTION_FAMILY");
+  assert.deepEqual(board.players[0].missingRequiredSourceFamilies, ["yahoo"]);
+});
+
+test("projection omission receipts propagate without fabricated numeric values", () => {
+  const board = buildPlayerBoard({
+    asOf: "2026-08-22T12:00:00Z",
+    players: [{ playerId: "r1", name: "Runner", position: "RB" }],
+    replacementRanks: { RB: 1 },
+    sources: [
+      { sourceId: "yahoo", family: "yahoo", updatedAt: "2026-08-22T11:00:00Z", rows: [{ playerId: "r1", leaguePoints: 200 }] },
+      { sourceId: "espn", family: "espn-clay", updatedAt: "2026-08-22T11:00:00Z", rows: [{ playerId: "r1", stats: { rushingYards: 1_000 }, omittedScoringCategories: ["rushingHundredYardGames"] }] },
+    ],
+  });
+  assert.deepEqual(board.players[0].omittedScoringCategories, ["rushingHundredYardGames"]);
+  assert.equal(board.players[0].executable, true);
+});
+
 test("null and blank projection values do not become zero-point evidence", () => {
   const board = buildPlayerBoard({
     asOf: "2026-08-22T12:00:00Z",

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { makeEspnClaySnapshot, parseEspnClayText } from "./parse-espn-clay-projections.mjs";
+import { makeEspnClaySnapshot, parseEspnClayText, parseEspnClayTextWithCoverage } from "./parse-espn-clay-projections.mjs";
 import { scoreOffenseStatLine } from "./player-intelligence.mjs";
 
 const TEXT = `Quarterback Projections
@@ -16,12 +16,19 @@ test("parses raw offense stats and ignores ESPN fantasy-point totals", () => {
   assert.equal(rows.length, 2);
   assert.equal(rows[0].name, "Josh Allen");
   assert.equal(rows[0].stats.passingCompletions, 340);
-  assert.equal(rows[0].stats.rushingHundredYardGames, 0);
-  assert.equal(rows[0].stats.receivingHundredYardGames, 0);
+  assert.equal("rushingHundredYardGames" in rows[0].stats, false);
+  assert.ok(rows[0].omittedScoringCategories.includes("rushingHundredYardGames"));
   assert.equal(rows[1].stats.receptions, 65);
-  assert.equal(rows[1].stats.rushingHundredYardGames, 0);
-  assert.equal(rows[1].stats.receivingHundredYardGames, 0);
+  assert.equal("receivingHundredYardGames" in rows[1].stats, false);
+  assert.ok(rows[1].omittedScoringCategories.includes("fumblesLost"));
   assert.notEqual(scoreOffenseStatLine(rows[0].stats), 369);
+});
+
+test("receipts invalid numeric rows and filters zero-game projections", () => {
+  const parsed = parseEspnClayTextWithCoverage(`${TEXT}\nZero Runner LV 99 0 0 0 0 0 0 0 0 0 0 0\nBroken QB BUF 2 200 17 300 200 3000 20 10 20 nope 200 3`);
+  assert.equal(parsed.coverage.rejected.zeroProjectedGames, 1);
+  assert.equal(parsed.coverage.rejected.invalidNumericRow, 1);
+  assert.deepEqual(parsed.coverage.sections, ["QB", "RB"]);
 });
 
 test("keeps suffix names by matching only valid NFL team codes", () => {
@@ -30,8 +37,17 @@ test("keeps suffix names by matching only valid NFL team codes", () => {
   assert.equal(rows.at(-1).team, "KC");
 });
 
-test("emits the strict free-source manifest", () => {
-  const snapshot = makeEspnClaySnapshot({ text: TEXT, pdfBytes: Buffer.from("pdf"), sourceAsOf: "2026-08-19T17:54:25Z", retrievedAt: "2026-08-25T19:00:00Z" });
+test("emits the strict free-source manifest and extraction receipt", () => {
+  const snapshot = makeEspnClaySnapshot({
+    text: TEXT,
+    pdfBytes: Buffer.from("pdf"),
+    sourceAsOf: "2026-08-19T17:54:25Z",
+    retrievedAt: "2026-08-25T19:00:00Z",
+    etag: "test-etag",
+    extraction: { command: "pdftotext -layout", version: "test", textSha256: "b".repeat(64) },
+  });
   assert.equal(snapshot.manifest.sourceFamily, "espn-clay");
   assert.match(snapshot.manifest.contentSha256, /^[a-f0-9]{64}$/);
+  assert.equal(snapshot.manifest.etag, "test-etag");
+  assert.equal(snapshot.coverage.rejected.zeroProjectedGames, 0);
 });

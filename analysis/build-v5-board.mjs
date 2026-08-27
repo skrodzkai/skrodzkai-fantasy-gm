@@ -1,8 +1,9 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
 
 import { buildDraftWatchlist, compileInjuryBoard } from "./injury-monitor.mjs";
-import { buildPlayerBoard } from "./player-intelligence.mjs";
+import { buildPlayerBoard, IDP_SCORING, OFFENSE_SCORING } from "./player-intelligence.mjs";
 import { buildWeeklyProjectionProfile, expectedGamesFromInjury } from "./weekly-roster-utility.mjs";
 import { FREE_SOURCE_REGISTRY, validateSourceSnapshot } from "./free-source-registry.mjs";
 
@@ -21,6 +22,10 @@ export const LEAGUE_REPLACEMENT_RANKS = Object.freeze({
 export const LEAGUE_STARTER_SLOTS = Object.freeze([
   "QB", "WR", "WR", "WR", "RB", "RB", "TE", "W/R/T", "K", "DEF", "D", "DB", "LB",
 ]);
+
+export const SCORING_SCHEMA_HASH = createHash("sha256")
+  .update(JSON.stringify({ offense: OFFENSE_SCORING, idp: IDP_SCORING }))
+  .digest("hex");
 
 const YAHOO_STATUS = Object.freeze({
   Q: "QUESTIONABLE",
@@ -55,6 +60,13 @@ function identityKey(name, team) {
 
 function hasFiniteProjection(value) {
   return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
+}
+
+function median(values) {
+  const sorted = values.filter(Number.isFinite).sort((left, right) => left - right);
+  if (!sorted.length) return null;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
 function requireObservedAt(snapshot, label) {
@@ -130,6 +142,7 @@ export function assembleV5Board({
       .map((row) => [identityKey(row.name, row.team), { ...row, payload: parsePayload(row) }]),
   );
   const playerIdByIdentity = new Map();
+  const ambiguousIdentities = new Set();
   const { rows: yahooRows, filterMembership } = flattenYahooRows(
     offenseSnapshot,
     specialistSnapshot,
@@ -189,7 +202,14 @@ export function assembleV5Board({
       marketAdpHigh: baseline?.adp_high ?? null,
       marketAdpSamples: baseline?.payload?.adp_samples ?? null,
     };
-    playerIdByIdentity.set(identityKey(player.name, player.team), player.playerId);
+    const identity = identityKey(player.name, player.team);
+    const existingId = playerIdByIdentity.get(identity);
+    if (existingId && existingId !== player.playerId) {
+      playerIdByIdentity.delete(identity);
+      ambiguousIdentities.add(identity);
+    } else if (!ambiguousIdentities.has(identity)) {
+      playerIdByIdentity.set(identity, player.playerId);
+    }
     return player;
   });
 
@@ -218,18 +238,20 @@ export function assembleV5Board({
       .map((row) => ({ playerId: String(row.yahooId), leaguePoints: row.yahooProjectedPoints })),
   };
   const registryById = new Map(FREE_SOURCE_REGISTRY.map((source) => [source.id, source]));
-  validateSourceSnapshot(projectionSnapshots.map((snapshot) => snapshot.manifest), asOf);
-  const externalProjectionSources = projectionSnapshots.map((snapshot) => {
+  const projectionHealth = validateSourceSnapshot(projectionSnapshots.map((snapshot) => snapshot.manifest), asOf);
+  const externalProjectionSources = projectionSnapshots.map((snapshot, index) => {
     const policy = registryById.get(snapshot.manifest.sourceId);
     return {
       sourceId: snapshot.manifest.sourceId,
       family: policy.sourceFamily,
       maxAgeHours: policy.maximumRefreshHours,
       updatedAt: snapshot.manifest.sourceAsOf,
+      freshOverride: projectionHealth[index]?.fresh === true,
       weight: 1,
       inputRows: snapshot.rows.length,
       rows: snapshot.rows
         .filter((row) => ["QB", "RB", "WR", "TE"].includes(normalizePosition(row.position)))
+        .filter((row) => !hasFiniteProjection(row.projectionGames) || Number(row.projectionGames) > 0)
         .map((row) => ({ ...row, playerId: row.playerId ?? playerIdByIdentity.get(identityKey(row.name, row.team)) }))
         .filter((row) => row.playerId),
     };
@@ -240,7 +262,10 @@ export function assembleV5Board({
     sources: [yahooOffenseSource, yahooSpecialistSource, ...externalProjectionSources],
     replacementRanks: LEAGUE_REPLACEMENT_RANKS,
     asOf,
-    evidencePolicy: (player) => ({ minimumFreshFamilies: ["QB", "RB", "WR", "TE"].includes(player.position) ? 2 : 1 }),
+    evidencePolicy: (player) => ({
+      minimumFreshFamilies: ["QB", "RB", "WR", "TE"].includes(player.position) ? 2 : 1,
+      requiredFamilies: ["QB", "RB", "WR", "TE"].includes(player.position) ? ["yahoo"] : [],
+    }),
     replacementRoster,
   });
 
@@ -364,12 +389,30 @@ export function assembleV5Board({
         .map((player, index) => ({ ...player, specialistRank: player.consensusPoints === null ? null : index + 1 })),
     ]),
   );
+  const projectionGapByPosition = Object.fromEntries(
+    ["QB", "RB", "WR", "TE"].map((position) => {
+      const gaps = combined
+        .filter((player) => player.position === position)
+        .map((player) => {
+          const yahoo = player.sourceFamilyPerGamePoints?.yahoo;
+          const external = Object.entries(player.sourceFamilyPerGamePoints ?? {})
+            .filter(([family]) => family !== "yahoo")
+            .map(([, points]) => Number(points));
+          return Number.isFinite(Number(yahoo)) && external.length
+            ? Number(yahoo) - external.reduce((sum, value) => sum + value, 0) / external.length
+            : null;
+        })
+        .filter(Number.isFinite);
+      return [position, { sampleCount: gaps.length, medianYahooMinusExternalPerGame: median(gaps) }];
+    }),
+  );
 
   return Object.freeze({
     schemaVersion: 1,
     generatedAt: asOf,
     leagueId: "420010",
     scoringModel: "2-minute-drillers-2026",
+    scoringSchemaHash: SCORING_SCHEMA_HASH,
     replacementRanks: LEAGUE_REPLACEMENT_RANKS,
     replacementBySlot: projectionBoard.replacementBySlot,
     replacementRankBasis: "joint maximum-weight allocation of every 2 Minute Drillers starter slot",
@@ -388,9 +431,11 @@ export function assembleV5Board({
       fantasyWeeks: "1-17",
       weeklyBonuses: "weekly events; never season-thresholded",
       outcomeIntervals: "calibrated inputs only; source disagreement remains diagnostic",
+      sourceGapByPosition: projectionGapByPosition,
     },
     survivalCalibration,
     eligibilityEvidence: specialistSnapshot.eligibilityEvidence ?? {},
+    identityEvidence: { ambiguousNameTeamKeys: [...ambiguousIdentities].sort() },
     players: combined,
     boards: { unified: combined, offense, specialists },
   });

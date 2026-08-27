@@ -1,15 +1,20 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import vm from "node:vm";
+import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
 
 import { reconcileSettingsAndYahoo } from "./draft-readiness.mjs";
 
-function loadRuntime(boardSource, runnerSource) {
+export function loadRuntime(boardSource, runnerSource) {
+  const startedAt = performance.now();
   const context = { console, crypto, Date, Math, setInterval, setTimeout, clearInterval };
   context.globalThis = context;
   vm.createContext(context);
   vm.runInContext(boardSource, context);
   vm.runInContext(runnerSource, context);
+  const forbiddenGlobals = ["fetch", "document", "window", "XMLHttpRequest"]
+    .filter((key) => key in context);
   const boardData = context.SKRODZKaiYahooMockBoard;
   const source = Array.isArray(boardData.players)
     ? boardData.players
@@ -18,6 +23,10 @@ function loadRuntime(boardSource, runnerSource) {
     board: [...new Map(source.map((player) => [String(player.yahooId), player])).values()],
     replacementBySlot: boardData.replacementBySlot,
     survivalCalibration: boardData.survivalCalibration ?? null,
+    scoringSchemaHash: boardData.scoringSchemaHash ?? null,
+    runnerSourceSha256: createHash("sha256").update(runnerSource).digest("hex"),
+    coldStartMs: performance.now() - startedAt,
+    forbiddenVmGlobals: forbiddenGlobals,
     runner: context.SKRODZKaiYahooMockRunner,
   };
 }
@@ -160,7 +169,7 @@ function openingDistribution(simulations) {
 }
 
 export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, seeds = [2026, 2027, 2028, 2029, 2030] }) {
-  const { board, replacementBySlot, survivalCalibration, runner } = loadRuntime(boardSource, runnerSource);
+  const { board, replacementBySlot, survivalCalibration, scoringSchemaHash, runnerSourceSha256, coldStartMs, forbiddenVmGlobals, runner } = loadRuntime(boardSource, runnerSource);
   const config = runner.configs.real_league_19_idp;
   const helpers = runner._test;
   if (!replacementBySlot || !Object.keys(replacementBySlot).length) throw new Error("extension board is missing joint replacement baselines");
@@ -185,7 +194,13 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
   });
   const recomputeValues = simulations.flatMap((simulation) => simulation.picks.map((pick) => pick.recomputeMs));
   const latency = {
+    scope: "offline-compute-only",
+    draftClockSeconds: 30,
+    ownedTurnBudgetMs: 2000,
+    coldStartMs,
+    recomputeP50Ms: percentile(recomputeValues, 0.5),
     recomputeP95Ms: percentile(recomputeValues, 0.95),
+    recomputeMaxMs: recomputeValues.length ? Math.max(...recomputeValues) : null,
     recomputeBudgetMs: 100,
     fallbackCount: simulations.flatMap((simulation) => simulation.picks).filter((pick) => pick.fallbackUsed).length,
     fallbackContract: "static verified value order",
@@ -199,6 +214,8 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     jointReplacementBaselinesPresent: Object.keys(replacementBySlot).length >= 10,
     dualRoleNeverAutoSelected: simulations.every((simulation) => simulation.picks.every((pick) => pick.name !== "Travis Hunter" && !["41787", "99001", "99002"].includes(String(pick.yahooId)))),
     realLeagueExecutionDisabled: config.qualification === "unverified-real-room",
+    vmExecutionGlobalsAbsent: forbiddenVmGlobals.length === 0,
+    scoringSchemaReceipted: /^[a-f0-9]{64}$/.test(String(scoringSchemaHash ?? "")),
   };
   const chaos = {
     wrongTeamIdentity: { pass: identityChaos.status === "LOCKED", observed: identityChaos },
@@ -213,18 +230,22 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     simulationCount: simulations.length === 60,
     allRostersValid: validRosters === simulations.length,
     latencyWithinBudget: latency.recomputeP95Ms < latency.recomputeBudgetMs,
+    everyPickWithinOwnedTurnBudget: latency.recomputeMaxMs < latency.ownedTurnBudgetMs,
     policyChecks: Object.values(policyChecks).every(Boolean),
     chaosChecks: Object.values(chaos).every((scenario) => scenario.pass),
   };
   const accepted = Object.values(acceptanceGates).every(Boolean);
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     generatedAt,
     basis: "actual 2 Minute Drillers 19-round roster shape over the current executable unified board, with deterministic observed-ADP removals, explicitly uncalibrated Yahoo-rank fallback where ADP is absent, and 10% deterministic specialist stress thinning; this is offline policy, feasibility, and latency evidence only and does not enable real league 420010",
     accepted,
     simulations: simulations.length,
     seats: 12,
     seeds,
+    nodeVersion: process.version,
+    scoringSchemaHash,
+    runnerSourceSha256,
     validRosters,
     latency,
     acceptanceGates,

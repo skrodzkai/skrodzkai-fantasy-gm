@@ -32,6 +32,7 @@ function compactOffense(player) {
     validationStatus: player.validationStatus ?? "MISSING_VALIDATION_STATUS",
     confidence: player.sourceFamilyCount >= 2 ? "MULTI_SOURCE" : "WITHHELD",
     bye: player.bye ?? null,
+    omittedScoringCategories: Array.from(player.omittedScoringCategories ?? []),
   };
 }
 
@@ -68,6 +69,7 @@ function compactSpecialist(player, positionOverride = null) {
     validationStatus: player.validationStatus ?? "MISSING_VALIDATION_STATUS",
     confidence,
     bye: player.bye ?? null,
+    omittedScoringCategories: Array.from(player.omittedScoringCategories ?? []),
   };
 }
 
@@ -125,6 +127,7 @@ export function extensionBoardFromV5(board) {
     generatedAt: board.generatedAt,
     source: "free-source board: raw projections scored under exact league rules and equal-weighted per independent source family; market/history are timing context only; injuries use source-specific freshness",
     scoringModel: board.scoringModel,
+    scoringSchemaHash: board.scoringSchemaHash ?? null,
     replacementBySlot: board.replacementBySlot ?? null,
     survivalCalibration: board.survivalCalibration ?? null,
     injuryCoverage: board.injuryCoverage ?? null,
@@ -142,6 +145,7 @@ export function renderExtensionBoard(board) {
     generatedAt: board.generatedAt,
     source: board.source,
     scoringModel: board.scoringModel,
+    scoringSchemaHash: board.scoringSchemaHash,
     replacementBySlot: board.replacementBySlot,
     survivalCalibration: board.survivalCalibration,
     injuryCoverage: board.injuryCoverage,
