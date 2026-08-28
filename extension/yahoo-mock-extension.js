@@ -1,7 +1,7 @@
 (function installYahooMockExtension(root) {
   "use strict";
 
-  const VERSION = "0.10.0";
+  const VERSION = "0.11.0";
   const GLOBAL_KEY = "__skrodzkaiYahooMockExtensionV1";
   const PREFLIGHT_KEY = "skrodzkai-yahoo-mock-extension-preflight-v1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-extension-receipts-v1";
@@ -75,6 +75,17 @@
       .toUpperCase();
   }
 
+  function recommendationHotkeyPlayer(state, event) {
+    if (["INPUT", "TEXTAREA", "SELECT"].includes(String(event?.target?.tagName ?? "").toUpperCase())) return null;
+    const index = Number(event?.key) - 1;
+    if (index < 0 || index >= 3 || state?.context?.ownedTurn !== true) return null;
+    return state?.recommendations?.[index] ?? null;
+  }
+
+  function ownedTurnFromRunnerStatus(status) {
+    return Boolean(status?.pendingDecision);
+  }
+
   function sameSlots(left, right) {
     const a = Array.from(left ?? [], normalize);
     const b = Array.from(right ?? [], normalize);
@@ -103,8 +114,8 @@
     if (!Number.isFinite(health.ageMs)) return "draft_board_timestamp_missing";
     if (health.ageMs < -BOARD_FUTURE_TOLERANCE_MS) return "draft_board_timestamp_in_future";
     if (health.ageMs > BOARD_MAX_AGE_MS) return "draft_board_stale_over_24h";
-    if (!health.injuryCoverageComplete) return "draft_board_injury_coverage_incomplete";
-    if (!health.byeCoverageComplete) return "draft_board_bye_coverage_incomplete";
+    if (!health.injuryCoverageComplete || health.injuryPlayersTotal <= 0 || health.injuryPlayersChecked !== health.injuryPlayersTotal || health.injuryPlayersTotal !== health.byePlayersTotal) return "draft_board_injury_coverage_incomplete";
+    if (!health.byeCoverageComplete || health.byePlayersTotal <= 0 || health.byePlayersWithBye !== health.byePlayersTotal) return "draft_board_bye_coverage_incomplete";
     return null;
   }
 
@@ -689,10 +700,8 @@
     };
     data.search.addEventListener("input", redrawManual);
     documentRef.addEventListener("keydown", (event) => {
-      if (["INPUT", "TEXTAREA", "SELECT"].includes(String(event.target?.tagName ?? "").toUpperCase())) return;
-      const index = Number(event.key) - 1;
-      const player = ui.recommendations[index];
-      if (index >= 0 && index < 3 && player && typeof ui.onManualConfirm === "function") {
+      const player = recommendationHotkeyPlayer(ui, event);
+      if (player && typeof ui.onManualConfirm === "function") {
         event.preventDefault();
         ui.onManualConfirm([player]);
       }
@@ -1410,7 +1419,7 @@
       const kind = status.state === "completed" ? "complete" : status.state === "running" ? "ok" : "bad";
       const roster = controllerApi.runtime.parseRosterCount(environment.document.body?.innerText);
       const decision = runner.exportReceipts().filter((entry) => entry.kind === "runner_turn_resolved").at(-1)?.decision ?? null;
-      rail.setContext({ roomId: room.roomId, seat: draftSeat, league: leagueLabel, round: turn?.round, pick: turn?.pick, clock, clockVerified, armed: true, autodraft, kill: ["halted", "failed"].includes(status.state) });
+      rail.setContext({ roomId: room.roomId, seat: draftSeat, league: leagueLabel, round: turn?.round, pick: turn?.pick, clock, clockVerified, ownedTurn: ownedTurnFromRunnerStatus(status), armed: true, autodraft, kill: ["halted", "failed"].includes(status.state) });
       rail.setRoster(buildUiRoster(status.picks, rosterSlots), status.picks.at(-1));
       rail.setRecommendations(buildUiRecommendations(board, decision), { fullBoard: board, disagreement: status.failure?.code?.includes("mismatch") });
       rail.setBetweenTurns(buildUiOpponentWindow(decision, executionMode));
@@ -1498,6 +1507,8 @@
       buildUiRecommendations,
       buildUiOpponentWindow,
       buildUiWarnings,
+      recommendationHotkeyPlayer,
+      ownedTurnFromRunnerStatus,
       commandCenterRole,
       attachCommandCenterBridge,
       publicRosterSlots: PUBLIC_ROSTER_SLOTS,

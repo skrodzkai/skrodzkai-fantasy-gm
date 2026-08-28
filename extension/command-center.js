@@ -119,4 +119,4 @@ elements.kill.addEventListener("click",()=>command("kill"));
 elements.export.addEventListener("click",()=>command("export"));
 elements.clearPin.addEventListener("click",()=>command("clear_pin"));
 elements.pin.addEventListener("click",()=>{const targets=board.filter((player)=>selectedIds.has(String(player.yahooId)));command("pin",{targets});selectedIds.clear();renderSearch();});
-document.addEventListener("keydown",(event)=>{if(["INPUT","TEXTAREA","SELECT"].includes(String(event.target?.tagName??"").toUpperCase()))return;const index=Number(event.key)-1;const player=state?.recommendations?.[index];if(index>=0&&index<3&&player){event.preventDefault();command("pin",{targets:[player]});}});
+document.addEventListener("keydown",(event)=>{if(["INPUT","TEXTAREA","SELECT"].includes(String(event.target?.tagName??"").toUpperCase()))return;const index=Number(event.key)-1;const player=state?.recommendations?.[index];if(index>=0&&index<3&&player&&state?.context?.ownedTurn===true){event.preventDefault();command("pin",{targets:[player]});}});

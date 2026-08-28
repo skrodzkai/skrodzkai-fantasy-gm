@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SKRODZKai Yahoo Mock Draft Control",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "SKRODZKai popup command center for deterministic public-mock and verified test-league draft execution.",
   "background": {
     "service_worker": "extension/command-center-background.js"

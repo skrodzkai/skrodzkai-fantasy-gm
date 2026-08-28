@@ -33,6 +33,10 @@ test("offline runner-loop replay completes 19 turns and separately proves the ki
   assert.equal(replay.completion.turns.length, 19);
   assert.equal(replay.acceptance.onClockOverrideApplied, true);
   assert.equal(replay.acceptance.everyPanelReadyUnder250ms, true);
+  assert.equal(replay.acceptance.firstTurnPressureNeutral, true);
+  assert.equal(replay.acceptance.laterTurnPressureObserved, true);
+  assert.equal(Object.keys(replay.completion.turns[0].runPressureByPosition).length, 0);
+  assert.equal(replay.completion.turns.slice(1).some((turn) => Object.values(turn.runPressureByPosition).some((value) => value > 0)), true);
   assert.equal(replay.acceptance.killDuringDecisionWindow, true);
   assert.equal(replay.acceptance.killProducedNoClick, true);
   assert.equal(replay.acceptance.realLeagueExecutionDisabled, true);

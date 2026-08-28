@@ -571,6 +571,23 @@
     return Math.max(0.01, Math.min(0.99, 1 / (1 + Math.exp((nextPick - adjustedMean) / spread))));
   }
 
+  function runPressureFromAvailability(previousPlayers, currentPlayers, ownPicks = []) {
+    const currentIds = new Set(Array.from(currentPlayers ?? [], (player) => String(player?.yahooId ?? "")));
+    const ownIds = new Set(Array.from(ownPicks ?? [], (player) => String(player?.yahooId ?? "")));
+    const counts = {};
+    for (const player of previousPlayers ?? []) {
+      const yahooId = String(player?.yahooId ?? "");
+      if (!yahooId || currentIds.has(yahooId) || ownIds.has(yahooId)) continue;
+      const position = normalize(player.position);
+      if (!position) continue;
+      counts[position] = (counts[position] ?? 0) + 1;
+    }
+    return Object.fromEntries(Object.entries(counts).map(([position, count]) => [
+      position,
+      Math.min(2, Math.max(0, (count - 1) / 2)),
+    ]));
+  }
+
   function compactPlayer(player) {
     if (!player) return null;
     return {
@@ -1025,7 +1042,7 @@
     const filterDeadlineMs = Number(options.filterDeadlineMs ?? 5000);
     const selectionHoldMs = Number(options.selectionHoldMs ?? 1200);
     const replacementBySlot = options.replacementBySlot ?? {};
-    const runPressureByPosition = options.runPressureByPosition ?? {};
+    const configuredRunPressure = options.runPressureByPosition ?? {};
     const survivalCalibration = options.survivalCalibration ?? null;
     const board = validateBoard(options.board);
     const readManualOverride = typeof options.readManualOverride === "function" ? options.readManualOverride : () => null;
@@ -1067,6 +1084,13 @@
     let busy = false;
     let pendingDecision = null;
     let activeTurnMetrics = null;
+    let previousAvailablePlayers = null;
+
+    function liveRunPressure(availablePlayers) {
+      const observed = runPressureFromAvailability(previousAvailablePlayers, availablePlayers, picks);
+      return Object.fromEntries([...new Set([...Object.keys(configuredRunPressure), ...Object.keys(observed)])]
+        .map((position) => [position, Math.max(Number(configuredRunPressure[position] ?? 0), Number(observed[position] ?? 0))]));
+    }
 
     function readReceipts() {
       const parsed = JSON.parse(storage.getItem(RECEIPT_KEY) ?? "[]");
@@ -1127,6 +1151,7 @@
         if (state !== "running") throw new Error("runner_not_running");
         try {
           const availablePlayers = readAvailablePlayers(documentRef, controllerApi);
+          const runPressureByPosition = liveRunPressure(availablePlayers);
           const baseline = buildDecisionLadder({
             round: turn.round,
             seat: expectedSeat,
@@ -1154,6 +1179,7 @@
           });
           const decision = {
             ...baseline.decision,
+            runPressureByPosition,
             baselineChosenYahooId: baseline.decision.chosenYahooId,
             chosenYahooId: targets[0].yahooId,
             targetYahooIds: targets.map((target) => target.yahooId),
@@ -1217,7 +1243,7 @@
         environment,
       );
       try {
-        activeTurnMetrics = { turn: pending.turn.label, detectedAt: pending.detectedAt, controllerStartedAt: Date.now(), source };
+        activeTurnMetrics = { turn: pending.turn.label, detectedAt: pending.detectedAt, controllerStartedAt: Date.now(), source, availablePlayers:pending.availablePlayers.slice() };
         currentController = nextController.start();
       } catch (error) {
         nextController.stop("start_failed");
@@ -1327,6 +1353,7 @@
         ) {
           throw new Error("roster_drift");
         }
+        previousAvailablePlayers = activeTurnMetrics.availablePlayers.slice();
         receipt("runner_pick_confirmed", { round: picks.length, pick });
         currentController.stop("round_complete");
         currentController = null;
@@ -1479,6 +1506,7 @@
       overallPick,
       turnWindow,
       survivalProbability,
+      runPressureFromAvailability,
       optimalRosterUtility,
       maximumFilledStarterSlots,
       canCompleteRoster,

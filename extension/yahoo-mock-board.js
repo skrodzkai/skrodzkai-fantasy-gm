@@ -18700,26 +18700,33 @@
     }
   },
   "injuryCoverage": {
-    "expectedPlayers": 872,
-    "checkedPlayers": 872,
     "complete": true,
+    "checkedPlayers": 681,
+    "expectedPlayers": 681,
     "uncheckedPlayerIds": [],
-    "bySourceKind": {
-      "nfl_official": {
-        "checkedPlayers": 0,
-        "freshReports": 0
-      },
-      "team_official": {
-        "checkedPlayers": 0,
-        "freshReports": 0
-      },
-      "yahoo": {
-        "checkedPlayers": 872,
-        "freshReports": 872
-      },
-      "sleeper": {
-        "checkedPlayers": 257,
-        "freshReports": 257
+    "denominator": "automatic-or-manual-eligible players, including DEF",
+    "sourceCoverage": {
+      "expectedPlayers": 872,
+      "checkedPlayers": 872,
+      "complete": true,
+      "uncheckedPlayerIds": [],
+      "bySourceKind": {
+        "nfl_official": {
+          "checkedPlayers": 0,
+          "freshReports": 0
+        },
+        "team_official": {
+          "checkedPlayers": 0,
+          "freshReports": 0
+        },
+        "yahoo": {
+          "checkedPlayers": 872,
+          "freshReports": 872
+        },
+        "sleeper": {
+          "checkedPlayers": 257,
+          "freshReports": 257
+        }
       }
     }
   },

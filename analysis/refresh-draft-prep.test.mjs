@@ -80,7 +80,7 @@ test("writes a fetched Sleeper snapshot back to the daily cache atomically", asy
 });
 
 test("publishes the complete successful artifact set with one atomic rename", async () => {
-  const root = await mkdtemp(join(tmpdir(), "draft-prep-v11-publish-test-"));
+  const root = await mkdtemp(join(tmpdir(), "draft-prep-v13-publish-test-"));
   const staging = await mkdtemp(join(root, ".staging-"));
   await mkdir(join(staging, "source-snapshots"));
   await writeFile(join(staging, "source-snapshots", "source.json"), "{}\n");
@@ -90,19 +90,21 @@ test("publishes the complete successful artifact set with one atomic rename", as
     finalPath,
     board: { players: [] },
     extensionSource: "globalThis.board = {};\n",
+    offlineBoardCsv: "value_rank,name\n1,Player\n",
     readiness: { status: "PASS" },
     rehearsal: { accepted: true },
     packets: { packets: Array.from({ length: 12 }) },
     health: { status: "PASS" },
   });
   assert.deepEqual((await readdir(finalPath)).sort(), [
-    "draft-readiness-v11.json",
+    "draft-readiness-v13.json",
     "nightly-health.json",
-    "player-board-v11.json",
-    "rehearsal-30s-v11.json",
-    "snake-seat-packets-v11.json",
+    "player-board-v13.json",
+    "rehearsal-30s-v13.json",
+    "snake-seat-packets-v13.json",
     "source-snapshots",
-    "yahoo-mock-board-v11.js",
+    "yahoo-mock-board-v13.csv",
+    "yahoo-mock-board-v13.js",
   ]);
   await assert.rejects(() => readdir(staging), { code: "ENOENT" });
 });
@@ -129,7 +131,7 @@ test("health reasons fail closed on eligible-player injury or bye gaps", () => {
 
 test("stale caller-supplied Yahoo inputs publish a health-only failure atomically", async () => {
   const now = new Date();
-  const allowedRoot = await mkdtemp(join(tmpdir(), "draft-prep-v11-test-"));
+  const allowedRoot = await mkdtemp(join(tmpdir(), "draft-prep-v13-test-"));
   const outputParent = join(allowedRoot, "runs");
   await mkdir(outputParent);
   const writeJson = async (name, value) => {
@@ -176,7 +178,7 @@ test("stale caller-supplied Yahoo inputs publish a health-only failure atomicall
 });
 
 test("a caller-supplied generatedAt cannot make old evidence look current", async () => {
-  const allowedRoot = await mkdtemp(join(tmpdir(), "draft-prep-v11-clock-test-"));
+  const allowedRoot = await mkdtemp(join(tmpdir(), "draft-prep-v13-clock-test-"));
   const outputParent = join(allowedRoot, "runs");
   await mkdir(outputParent);
   await assert.rejects(() => refreshDraftPrep({
@@ -193,7 +195,7 @@ test("a caller-supplied generatedAt cannot make old evidence look current", asyn
 
 test("Yahoo projections must declare the real league and scoring schema", async () => {
   const generatedAt = new Date().toISOString();
-  const allowedRoot = await mkdtemp(join(tmpdir(), "draft-prep-v11-yahoo-receipt-test-"));
+  const allowedRoot = await mkdtemp(join(tmpdir(), "draft-prep-v13-yahoo-receipt-test-"));
   const outputParent = join(allowedRoot, "runs");
   await mkdir(outputParent);
   const writeJson = async (name, value) => {
@@ -220,7 +222,7 @@ test("Yahoo projections must declare the real league and scoring schema", async 
 
 test("a short parsed ESPN snapshot leaves only a health receipt", async () => {
   const generatedAt = new Date().toISOString();
-  const allowedRoot = await mkdtemp(join(tmpdir(), "draft-prep-v11-coverage-test-"));
+  const allowedRoot = await mkdtemp(join(tmpdir(), "draft-prep-v13-coverage-test-"));
   const outputParent = join(allowedRoot, "runs");
   await mkdir(outputParent);
   const writeJson = async (name, value) => {

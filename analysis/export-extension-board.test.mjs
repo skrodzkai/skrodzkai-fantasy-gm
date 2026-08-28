@@ -20,6 +20,7 @@ function player(position, rank, overrides = {}) {
     sourceCount: 2,
     sourceFamilyCount: 2,
     sourceIds: ["yahoo-season-projection", "league-scored-history-market-baseline"],
+    injury: { draftAction:"CLEAR", conflict:false, evidence:[{ fresh:true, sourceKind:"yahoo" }] },
     bye: 7,
     ...overrides,
   };
@@ -60,6 +61,9 @@ test("exports only executable offense while retaining explicitly labeled special
   assert.equal(board.replacementBySlot.D, 50);
   assert.deepEqual(board.injuryFreshnessPolicy, { default: 36, yahoo: 6 });
   assert.equal(board.byeCoverage.complete, true);
+  assert.equal(board.injuryCoverage.complete, true);
+  assert.equal(board.injuryCoverage.checkedPlayers, board.injuryCoverage.expectedPlayers);
+  assert.equal(board.injuryCoverage.expectedPlayers, board.byeCoverage.playersTotal);
   assert.equal(board.byeCoverage.playersWithBye, board.byeCoverage.playersTotal);
   assert.match(board.byeCoverage.denominator, /including DEF/);
   assert.deepEqual(board.idp.slice(-2).map((entry) => entry.position), ["CB", "CB"]);
@@ -68,6 +72,25 @@ test("exports only executable offense while retaining explicitly labeled special
   const csv = renderOfflineBoardCsv(board);
   assert.match(csv, /^value_rank,name,team,position,eligible,projection,vor,bye,yahoo_rank,confidence,automatic_eligible,manual_eligible,validation_status/m);
   assert.match(csv, /RB 2,TST,RB/);
+});
+
+test("eligible-player injury coverage uses the bye denominator and missing evidence fails closed", () => {
+  const offense = Array.from({ length: 100 }, (_, index) => player("RB", index + 1));
+  offense[0].injury = null;
+  const board = extensionBoardFromV5({
+    generatedAt: "2026-08-27T00:00:00Z",
+    boards: {
+      offense,
+      specialists: {
+        K: Array.from({ length: 12 }, (_, index) => player("K", index + 1)),
+        DEF: Array.from({ length: 32 }, (_, index) => player("DEF", index + 1)),
+      },
+    },
+  });
+  assert.equal(board.injuryCoverage.complete, false);
+  assert.equal(board.injuryCoverage.expectedPlayers, board.byeCoverage.playersTotal);
+  assert.equal(board.injuryCoverage.checkedPlayers, board.injuryCoverage.expectedPlayers - 1);
+  assert.deepEqual(board.injuryCoverage.uncheckedPlayerIds, ["RB-1"]);
 });
 
 test("missing eligibility fields export fail closed", () => {

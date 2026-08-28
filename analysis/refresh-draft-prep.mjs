@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { assembleV5Board, SCORING_SCHEMA_HASH } from "./build-v5-board.mjs";
 import { buildV5ReadinessReport } from "./build-v5-readiness-report.mjs";
 import { buildSnakeSeatPackets } from "./build-snake-seat-packets.mjs";
-import { extensionBoardFromV5, renderExtensionBoard } from "./export-extension-board.mjs";
+import { extensionBoardFromV5, renderExtensionBoard, renderOfflineBoardCsv } from "./export-extension-board.mjs";
 import { validateSourceSnapshot } from "./free-source-registry.mjs";
 import { parseHistory } from "./opponent-calibration.mjs";
 import { makeEspnClaySnapshot } from "./parse-espn-clay-projections.mjs";
@@ -307,7 +307,7 @@ export function buildHealth({ generatedAt, clock, yahoo, espnHealth, sleeperHeal
 }
 
 function finalDirectoryName(generatedAt) {
-  return `draft-prep-v11-${generatedAt.replace(/[-:.]/g, "")}`;
+  return `draft-prep-v13-${generatedAt.replace(/[-:.]/g, "")}`;
 }
 
 async function ensureOutputParent(outputParent, allowedOutputRoot) {
@@ -316,13 +316,14 @@ async function ensureOutputParent(outputParent, allowedOutputRoot) {
   return parent;
 }
 
-export async function publishSuccessfulRun({ staging, finalPath, board, extensionSource, readiness, rehearsal, packets, health }) {
+export async function publishSuccessfulRun({ staging, finalPath, board, extensionSource, offlineBoardCsv, readiness, rehearsal, packets, health }) {
   await Promise.all([
-    writeFile(join(staging, "player-board-v11.json"), `${JSON.stringify(board, null, 2)}\n`, { mode: 0o600 }),
-    writeFile(join(staging, "yahoo-mock-board-v11.js"), extensionSource, { mode: 0o600 }),
-    writeFile(join(staging, "draft-readiness-v11.json"), `${JSON.stringify(readiness, null, 2)}\n`, { mode: 0o600 }),
-    writeFile(join(staging, "rehearsal-30s-v11.json"), `${JSON.stringify(rehearsal, null, 2)}\n`, { mode: 0o600 }),
-    writeFile(join(staging, "snake-seat-packets-v11.json"), `${JSON.stringify(packets, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(staging, "player-board-v13.json"), `${JSON.stringify(board, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(staging, "yahoo-mock-board-v13.js"), extensionSource, { mode: 0o600 }),
+    writeFile(join(staging, "yahoo-mock-board-v13.csv"), offlineBoardCsv, { mode: 0o600 }),
+    writeFile(join(staging, "draft-readiness-v13.json"), `${JSON.stringify(readiness, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(staging, "rehearsal-30s-v13.json"), `${JSON.stringify(rehearsal, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(staging, "snake-seat-packets-v13.json"), `${JSON.stringify(packets, null, 2)}\n`, { mode: 0o600 }),
   ]);
   await writeFile(join(staging, "nightly-health.json"), `${JSON.stringify(health, null, 2)}\n`, { mode: 0o600 });
   await rename(staging, finalPath);
@@ -339,7 +340,7 @@ export async function refreshDraftPrep(options) {
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
-  const staging = await mkdtemp(join(outputParent, `.draft-prep-v11-${randomUUID()}-`));
+  const staging = await mkdtemp(join(outputParent, `.draft-prep-v13-${randomUUID()}-`));
   let health;
   try {
     if (!clock.fresh) throw new Error(`generatedAt differs from wall clock by ${clock.generatedAtSkewMinutes.toFixed(2)} minutes`);
@@ -398,6 +399,7 @@ export async function refreshDraftPrep(options) {
     });
     const extensionBoard = extensionBoardFromV5(board);
     const extensionSource = renderExtensionBoard(extensionBoard);
+    const offlineBoardCsv = renderOfflineBoardCsv(extensionBoard);
     const readiness = buildV5ReadinessReport({
       historyRows: parseHistory(historyText),
       playerBoard: board,
@@ -411,11 +413,11 @@ export async function refreshDraftPrep(options) {
     if (health.status !== "PASS") throw new Error(health.reasons.join("; "));
     if (!sleeper.reused) await writeSleeperCache(options.sleeperCachePath, sleeper.snapshot);
 
-    await publishSuccessfulRun({ staging, finalPath, board, extensionSource, readiness, rehearsal, packets, health });
+    await publishSuccessfulRun({ staging, finalPath, board, extensionSource, offlineBoardCsv, readiness, rehearsal, packets, health });
     return { finalPath, health };
   } catch (error) {
     await rm(staging, { recursive: true, force: true });
-    const failedStaging = await mkdtemp(join(outputParent, `.draft-prep-v11-failed-${randomUUID()}-`));
+    const failedStaging = await mkdtemp(join(outputParent, `.draft-prep-v13-failed-${randomUUID()}-`));
     health = buildHealth({ generatedAt, clock, failure: String(error?.message ?? error) });
     await writeFile(join(failedStaging, "nightly-health.json"), `${JSON.stringify(health, null, 2)}\n`, { mode: 0o600 });
     try {

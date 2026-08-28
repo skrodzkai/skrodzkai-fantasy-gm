@@ -66,21 +66,28 @@ function completedRunnerRun(receipts, errors) {
 
 function replayDecision(decision) {
   const manual = decision?.manualOverride?.status === "applied";
-  const ranked = asArray(decision?.positionLeaders)
+  const fallbackUsed = decision?.fallbackUsed === true;
+  const eligible = asArray(decision?.positionLeaders)
     .filter((leader) => leader?.eligible === true && leader?.player?.yahooId)
-    .sort((left, right) =>
+  const ranked = eligible.slice().sort((left, right) =>
       Number(right.adjustedScore) - Number(left.adjustedScore) ||
       Number(left.player.rank) - Number(right.player.rank),
     );
+  const staticFallback = eligible.slice().sort((left, right) => Number(left.player.rank) - Number(right.player.rank));
   const expectedYahooId = manual
     ? String(decision?.manualOverride?.chosenYahooId ?? "") || null
-    : ranked[0]?.player?.yahooId == null ? null : String(ranked[0].player.yahooId);
+    : fallbackUsed
+      ? staticFallback[0]?.player?.yahooId == null ? null : String(staticFallback[0].player.yahooId)
+      : ranked[0]?.player?.yahooId == null ? null : String(ranked[0].player.yahooId);
   const chosenYahooId = decision?.chosenYahooId == null ? null : String(decision.chosenYahooId);
+  const targetYahooId = decision?.targetYahooIds?.[0] == null ? null : String(decision.targetYahooIds[0]);
   return {
-    consistent: expectedYahooId !== null && expectedYahooId === chosenYahooId,
+    consistent: expectedYahooId !== null && expectedYahooId === chosenYahooId && (!fallbackUsed || targetYahooId === expectedYahooId),
     expectedYahooId,
     chosenYahooId,
     manualOverride: manual,
+    fallbackUsed,
+    replayMode: manual ? "MANUAL_OVERRIDE" : fallbackUsed ? "STATIC_BOARD_FALLBACK" : "DECISION_SCORE",
     counterfactual: "not_available",
   };
 }
@@ -127,7 +134,7 @@ export function evaluateTestDraftExport(payload, options = {}) {
   }
   if (payload?.status?.state !== "completed") errors.push("exported_runner_status_not_completed");
   if (asArray(payload?.status?.picks).length !== TEST_CONFIG.rounds) errors.push("exported_status_pick_count_mismatch");
-  if (payload?.extensionVersion !== "0.10.0") errors.push("extension_version_mismatch");
+  if (payload?.extensionVersion !== "0.11.0") errors.push("extension_version_mismatch");
   const operatorAttestation = payload?.operatorAttestation;
   if (operatorAttestation?.status === "intervention") {
     if (
@@ -273,7 +280,8 @@ export function evaluateTestDraftExport(payload, options = {}) {
     confirmedPicks: picks.length,
     latencyBudgetMs,
     maxObservedLatencyMs: picks.length ? Math.max(...picks.map((pick) => pick.latencyMs)) : null,
-    fallbackPicks: replays.filter((replay) => replay.targetIndex > 0).length,
+    fallbackPicks: replays.filter((replay) => replay.fallbackUsed && !replay.manualOverride).length,
+    fallbackDecisions: replays.filter((replay) => replay.fallbackUsed).length,
     counterfactualScoring: "not_available_from_compact_receipts",
     finalCounts: countsByPosition(picks),
     picks: picks.map((pick, index) => ({
@@ -285,6 +293,8 @@ export function evaluateTestDraftExport(payload, options = {}) {
       latencyMs: pick.latencyMs,
       targetIndex: replays[index]?.targetIndex ?? -1,
       decisionReplay: replays[index]?.consistent === true ? "MATCH" : "MISMATCH",
+      replayMode: replays[index]?.replayMode ?? null,
+      fallbackUsed: replays[index]?.fallbackUsed === true,
       counterfactual: "not_available",
     })),
   };
