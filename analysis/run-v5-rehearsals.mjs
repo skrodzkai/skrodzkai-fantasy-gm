@@ -285,7 +285,7 @@ async function waitFor(predicate, timeoutMs = 15_000) {
 function runnerLoopEnvironment(runtime, seat) {
   const config = runtime.runner.configs.test_league_19_idp;
   const validated = runtime.runner._test.validateBoard(runtime.board);
-  const state = { filled: 0 };
+  const state = { filled: 0, unavailable:new Set(), opponentRunApplied:false };
   const select = { value: "all", options: [{ value: "all", textContent: "All Positions" }], dispatchEvent() {} };
   const rows = ["QB", "RB", "WR", "TE", "K", "DEF", "D", "LB", "CB", "S"]
     .flatMap((position) => validated.filter((player) => player.position === position && player.automaticEligible !== false).slice(0, 12))
@@ -296,7 +296,7 @@ function runnerLoopEnvironment(runtime, seat) {
     body,
     querySelectorAll(selector) {
       if (selector === "select") return [select];
-      if (selector === "tr") return rows;
+      if (selector === "tr") return rows.filter((row) => !state.unavailable.has(row.player.yahooId));
       return [];
     },
   };
@@ -324,6 +324,11 @@ function runnerLoopEnvironment(runtime, seat) {
           const turn = runtimeHooks.readOwnedTurn();
           controllerState = "running";
           state.filled += 1;
+          state.unavailable.add(target.yahooId);
+          if (!state.opponentRunApplied) {
+            for (const row of rows.filter((entry) => entry.player.position === "WR" && entry.player.yahooId !== target.yahooId).slice(0, 3)) state.unavailable.add(row.player.yahooId);
+            state.opponentRunApplied = true;
+          }
           confirmedPicks = 1;
           receipts.push({ kind: "draft_click", yahooId: target.yahooId, detectionToClickMs: 1 });
           receipts.push({
@@ -413,6 +418,8 @@ export async function replayRunnerLoop({ boardSource, runnerSource, seat = 6 }) 
     everyRecommendationUnder100ms: turnReceipts.every((entry) => entry.decision?.recomputeMs < 100),
     zeroFallbacks: turnReceipts.every((entry) => entry.decision?.fallbackUsed === false),
     zeroTimeoutOrFailureReceipts: failureCodes.length === 0 && !completionReceipts.some((entry) => forbiddenFailures.some((code) => String(entry.code ?? entry.failure ?? "").includes(code))),
+    firstTurnPressureNeutral: !Object.values(turnReceipts[0]?.decision?.runPressureByPosition ?? {}).some((value) => Number(value) > 0),
+    laterTurnPressureObserved: turnReceipts.slice(1).some((entry) => Object.values(entry.decision?.runPressureByPosition ?? {}).some((value) => Number(value) > 0)),
     killDuringDecisionWindow: killReceipt?.reason === "replay_kill_switch" && killReceipt?.picks === 0,
     killProducedNoClick: killReceipt?.draftClicks === 0 && killReceipt?.pickConfirmations === 0,
     realLeagueExecutionDisabled: runtime.runner.configs.real_league_19_idp.qualification === "unverified-real-room",
@@ -433,7 +440,7 @@ export async function replayRunnerLoop({ boardSource, runnerSource, seat = 6 }) 
       overrideApplied,
       maxPanelReadyMs: turnReceipts.length ? Math.max(...turnReceipts.map((entry) => entry.panelReadyMs)) : null,
       maxRecomputeMs: turnReceipts.length ? Math.max(...turnReceipts.map((entry) => entry.decision?.recomputeMs ?? Infinity)) : null,
-      turns: turnReceipts.map((entry) => ({ turn: entry.turn, panelReadyMs: entry.panelReadyMs, panelBudgetMs: entry.panelBudgetMs, recomputeMs: entry.decision?.recomputeMs, fallbackUsed: entry.decision?.fallbackUsed })),
+      turns: turnReceipts.map((entry) => ({ turn: entry.turn, panelReadyMs: entry.panelReadyMs, panelBudgetMs: entry.panelBudgetMs, recomputeMs: entry.decision?.recomputeMs, fallbackUsed: entry.decision?.fallbackUsed, runPressureByPosition:entry.decision?.runPressureByPosition ?? {} })),
       failureCodes,
     },
     kill: killReceipt,

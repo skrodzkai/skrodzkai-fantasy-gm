@@ -56,7 +56,7 @@ function waitingFixture({ teams = 12, starters = "QB, WR, WR, RB, RB, TE, W/R/T,
 function healthyBoard(now = 1_000) {
   return {
     generatedAt: new Date(now - 100).toISOString(),
-    injuryCoverage: { complete:true, totalPlayers:872 },
+    injuryCoverage: { complete:true, checkedPlayers:872, expectedPlayers:872 },
     byeCoverage: { complete:true, playersWithBye:872, playersTotal:872 },
     players: Array.from({ length:6 }, (_, index) => ({ yahooId:String(index + 1) })),
   };
@@ -129,6 +129,8 @@ test("board health is a single fail-closed arm gate with visible freshness and c
   assert.equal(helpers.boardHealthGate(futureBoard, now), "draft_board_timestamp_in_future");
   assert.equal(helpers.boardHealthGate({ ...board, generatedAt:"2026-08-26T17:59:59Z" }, now), "draft_board_stale_over_24h");
   assert.equal(helpers.boardHealthGate({ ...board, injuryCoverage:{ complete:false } }, now), "draft_board_injury_coverage_incomplete");
+  assert.equal(helpers.boardHealthGate({ ...board, injuryCoverage:{ complete:true, checkedPlayers:871, expectedPlayers:872 } }, now), "draft_board_injury_coverage_incomplete");
+  assert.equal(helpers.boardHealthGate({ ...board, injuryCoverage:{ complete:true, checkedPlayers:873, expectedPlayers:873 } }, now), "draft_board_injury_coverage_incomplete");
   assert.equal(helpers.boardHealthGate({ ...board, byeCoverage:{ complete:false, playersWithBye:871, playersTotal:872 } }, now), "draft_board_bye_coverage_incomplete");
 
   const snapshot = helpers.parseWaitingRoom(waitingFixture().document, waitingFixture().location);
@@ -417,10 +419,14 @@ test("version handshake requires the current installed background version", asyn
 
 test("recommendation hotkeys resolve only during an owned-turn decision window", () => {
   const recommendations = [{ yahooId:"1" }, { yahooId:"2" }, { yahooId:"3" }];
+  assert.equal(helpers.ownedTurnFromRunnerStatus({ pendingDecision:{ turn:"R1P6" } }), true);
+  assert.equal(helpers.ownedTurnFromRunnerStatus({ pendingDecision:null }), false);
   assert.equal(helpers.recommendationHotkeyPlayer({ context:{ ownedTurn:false }, recommendations }, { key:"1", target:{} }), null);
   assert.equal(helpers.recommendationHotkeyPlayer({ context:{ ownedTurn:true }, recommendations }, { key:"2", target:{} })?.yahooId, "2");
   assert.equal(helpers.recommendationHotkeyPlayer({ context:{ ownedTurn:true }, recommendations }, { key:"1", target:{ tagName:"INPUT" } }), null);
   assert.match(popupSource, /state\?\.context\?\.ownedTurn===true/);
+  assert.match(source, /ui\.context = \{ \.\.\.context, roomId \}/);
+  assert.match(source, /getSnapshot\(\) \{\s*return \{ version:VERSION,[^}]*context:ui\.context/);
 });
 
 test("war-room roster placement respects exact and flex slots rather than pick order", () => {

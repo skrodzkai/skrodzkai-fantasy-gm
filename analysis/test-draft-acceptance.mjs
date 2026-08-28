@@ -280,7 +280,8 @@ export function evaluateTestDraftExport(payload, options = {}) {
     confirmedPicks: picks.length,
     latencyBudgetMs,
     maxObservedLatencyMs: picks.length ? Math.max(...picks.map((pick) => pick.latencyMs)) : null,
-    fallbackPicks: replays.filter((replay) => replay.fallbackUsed).length,
+    fallbackPicks: replays.filter((replay) => replay.fallbackUsed && !replay.manualOverride).length,
+    fallbackDecisions: replays.filter((replay) => replay.fallbackUsed).length,
     counterfactualScoring: "not_available_from_compact_receipts",
     finalCounts: countsByPosition(picks),
     picks: picks.map((pick, index) => ({
@@ -293,6 +294,7 @@ export function evaluateTestDraftExport(payload, options = {}) {
       targetIndex: replays[index]?.targetIndex ?? -1,
       decisionReplay: replays[index]?.consistent === true ? "MATCH" : "MISMATCH",
       replayMode: replays[index]?.replayMode ?? null,
+      fallbackUsed: replays[index]?.fallbackUsed === true,
       counterfactual: "not_available",
     })),
   };

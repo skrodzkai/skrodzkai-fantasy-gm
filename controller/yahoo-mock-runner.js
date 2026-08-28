@@ -1084,7 +1084,7 @@
     let busy = false;
     let pendingDecision = null;
     let activeTurnMetrics = null;
-    let previousAvailablePlayers = board.slice();
+    let previousAvailablePlayers = null;
 
     function liveRunPressure(availablePlayers) {
       const observed = runPressureFromAvailability(previousAvailablePlayers, availablePlayers, picks);
@@ -1189,7 +1189,6 @@
               chosenYahooId: manualOverride.chosenYahooId ?? null,
             },
           };
-          previousAvailablePlayers = availablePlayers.slice();
           return { targets, decision, manualOverride, availablePlayers, filterReadyMs: Date.now() - startedAt };
         } catch (error) {
           if (!/^(fewer_than_|no_legal_bpa_candidates)/.test(String(error?.message ?? error))) throw error;
@@ -1244,7 +1243,7 @@
         environment,
       );
       try {
-        activeTurnMetrics = { turn: pending.turn.label, detectedAt: pending.detectedAt, controllerStartedAt: Date.now(), source };
+        activeTurnMetrics = { turn: pending.turn.label, detectedAt: pending.detectedAt, controllerStartedAt: Date.now(), source, availablePlayers:pending.availablePlayers.slice() };
         currentController = nextController.start();
       } catch (error) {
         nextController.stop("start_failed");
@@ -1354,6 +1353,7 @@
         ) {
           throw new Error("roster_drift");
         }
+        previousAvailablePlayers = activeTurnMetrics.availablePlayers.slice();
         receipt("runner_pick_confirmed", { round: picks.length, pick });
         currentController.stop("round_complete");
         currentController = null;

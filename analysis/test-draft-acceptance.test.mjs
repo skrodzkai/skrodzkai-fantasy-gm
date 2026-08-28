@@ -5,6 +5,8 @@ import { evaluateTestDraftExport } from "./test-draft-acceptance.mjs";
 import "../controller/yahoo-mock-runner.js";
 
 const TEST_ALLOCATOR = globalThis.SKRODZKaiYahooMockRunner._test.allocateRosterSlots;
+const RUNNER_HELPERS = globalThis.SKRODZKaiYahooMockRunner._test;
+const TEST_CONFIG = globalThis.SKRODZKaiYahooMockRunner.configs.test_league_19_idp;
 
 const POSITIONS = ["QB", "QB", "RB", "RB", "RB", "RB", "RB", "WR", "WR", "WR", "WR", "WR", "TE", "K", "DEF", "D", "LB", "CB", "S"];
 
@@ -75,6 +77,34 @@ function validPayload() {
   };
 }
 
+function runtimeFallbackDecision() {
+  const positions = ["RB", "WR", "QB", "TE", "RB", "WR"];
+  const ids = ["40001", "50001", "60001", "70001", "80001", "90001"];
+  const board = RUNNER_HELPERS.validateBoard(ids.map((yahooId, index) => ({
+    yahooId,
+    name:`Fallback ${index + 1}`,
+    team:"BUF",
+    position:positions[index],
+    eligible:[positions[index]],
+    rank:index + 1,
+    projection:300 - index * 10,
+    automaticEligible:true,
+    manualEligible:true,
+    validationStatus:"EXECUTABLE",
+  })));
+  return RUNNER_HELPERS.buildDecisionLadder({
+    round:1,
+    seat:6,
+    picks:[],
+    board,
+    availablePlayers:board,
+    minimum:5,
+    config:TEST_CONFIG,
+    replacementBySlot:{ QB:200, RB:100, WR:100, TE:80, K:70, DEF:60, D:50, LB:48, DB:45, CB:45, S:45 },
+    recomputeBudgetMs:-1,
+  }).decision;
+}
+
 test("accepts one exact completed TEST draft without inventing counterfactuals", () => {
   const result = evaluateTestDraftExport(validPayload());
   assert.equal(result.status, "PASS", JSON.stringify(result.errors));
@@ -94,12 +124,8 @@ test("locks when a recorded decision does not reproduce the chosen player", () =
 
 test("acceptance replays a runtime fallback against static board rank rather than decision score", () => {
   const payload = validPayload();
-  const decision = payload.runnerReceipts.find((entry) => entry.kind === "runner_turn_resolved").decision;
-  decision.fallbackUsed = true;
-  decision.positionLeaders = [
-    { player:{ yahooId:decision.chosenYahooId, rank:1 }, eligible:true, adjustedScore:5 },
-    { player:{ yahooId:"49998", rank:2 }, eligible:true, adjustedScore:500 },
-  ];
+  const receipt = payload.runnerReceipts.find((entry) => entry.kind === "runner_turn_resolved");
+  receipt.decision = runtimeFallbackDecision();
   const result = evaluateTestDraftExport(payload);
   assert.equal(result.status, "PASS", JSON.stringify(result.errors));
   assert.equal(result.fallbackPicks, 1);
