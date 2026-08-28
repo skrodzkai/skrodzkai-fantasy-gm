@@ -18,6 +18,8 @@
   const PANEL_BUDGET_MS = 250;
   const TURN_TO_CLICK_BUDGET_MS = 2000;
   const NEXT_TURN_COMPARISON_POOL = 6;
+  const BYE_CONCENTRATION_LIMIT = 2;
+  const QB2_SURVIVAL_CLIFF = 0.35;
   const NORMALIZED_VALUE_CACHE = new Map();
   const SURVIVAL_BUCKET_CACHE = new WeakMap();
 
@@ -204,6 +206,7 @@
         outcomeLow: player.outcomeLow == null || player.outcomeLow === "" ? null : Number(player.outcomeLow),
         outcomeHigh: player.outcomeHigh == null || player.outcomeHigh === "" ? null : Number(player.outcomeHigh),
         uncertaintyStatus: String(player.uncertaintyStatus ?? "OUTCOME_INTERVAL_UNAVAILABLE"),
+        bye: player.bye == null || player.bye === "" ? null : Number(player.bye),
         replacementPoints: player.replacementPoints == null || player.replacementPoints === "" ? null : Number(player.replacementPoints),
         eligible: [...new Set(Array.from(player.eligible ?? [position], normalize).filter(Boolean))],
         automaticEligible: player.automaticEligible === true,
@@ -223,6 +226,9 @@
       }
       if (copy.weeklyAvailability && (copy.weeklyAvailability.length !== 17 || copy.weeklyAvailability.some((value) => !Number.isFinite(value) || value < 0 || value > 1))) {
         throw new Error(`board player ${index} has invalid weekly availability`);
+      }
+      if (copy.bye !== null && (!Number.isInteger(copy.bye) || copy.bye < 1 || copy.bye > 17)) {
+        throw new Error(`board player ${index} has invalid bye week`);
       }
       if (!copy.eligible.length) throw new Error(`board player ${index} requires Yahoo eligibility`);
       const vor = Number(player.vor);
@@ -478,6 +484,21 @@
     return maximumAssignment(picks, slots, () => 1).count;
   }
 
+  function rosterIdentityKey(player) {
+    const name = normalize(player?.name);
+    const team = normalize(player?.team);
+    return name && team ? `${name}:${team}` : null;
+  }
+
+  function sameRosterIdentity(left, right) {
+    const leftKey = rosterIdentityKey(left);
+    return Boolean(leftKey && leftKey === rosterIdentityKey(right));
+  }
+
+  function alreadyRostered(player, picks) {
+    return Array.from(picks ?? []).some((pick) => sameRosterIdentity(player, pick));
+  }
+
   function withinPositionLimit(player, picks, config) {
     const counts = positionCounts(picks);
     const position = normalize(player.position);
@@ -500,6 +521,7 @@
 
   function canCompleteRoster({ player, picks, config }) {
     if (!withinPositionLimit(player, picks, config)) return false;
+    if (alreadyRostered(player, picks)) return false;
     const after = [...Array.from(picks ?? []), player];
     if (after.length > config.rounds) return false;
     const starters = starterSlots(config).length;
@@ -553,7 +575,9 @@
     if (!player) return null;
     return {
       yahooId: player.yahooId,
+      name: player.name,
       position: player.position,
+      team: player.team,
       rank: player.rank,
       vor: player.vor,
       projection: player.projection,
@@ -565,6 +589,7 @@
       yahooRank: player.yahooRank,
       marketMean: player.marketMean,
       marketStatus: player.marketStatus,
+      bye: player.bye,
     };
   }
 
@@ -769,8 +794,28 @@
     return { window, ranked, recomputeMs: Date.now() - startedAt, utilityModel: weeklyMode ? "WEEKLY_OPTIMAL_LINEUP_W1_17" : "SEASON_TOTAL_FALLBACK" };
   }
 
-  function summarizeDecision(scored, selected, fallbackUsed = false) {
+  function summarizeDecision(scored, selected, picks, fallbackUsed = false) {
     const chosen = selected[0];
+    const quarterbacks = Array.from(picks ?? []).filter((pick) => normalize(pick.position) === "QB");
+    const qbCandidate = selected.find((entry) => normalize(entry.player.position) === "QB") ?? null;
+    let qb2 = { recommendation: "NO", reason: "starting quarterback not yet rostered" };
+    if (quarterbacks.length >= 2) {
+      qb2 = { recommendation: "NO", reason: "two quarterbacks are already rostered" };
+    } else if (quarterbacks.length === 1 && qbCandidate) {
+      const sameBye = quarterbacks[0].bye != null && qbCandidate.player.bye != null && Number(quarterbacks[0].bye) === Number(qbCandidate.player.bye);
+      if (sameBye) qb2 = { recommendation: "NO", reason: `weekly-utility conflict: both quarterbacks have Week ${qbCandidate.player.bye} byes` };
+      else if (qbCandidate.pAvailableNext <= QB2_SURVIVAL_CLIFF) qb2 = { recommendation: "YES", reason: `remaining-QB cliff: ${Math.round(qbCandidate.pAvailableNext * 100)}% next-turn survival` };
+      else qb2 = { recommendation: "NO", reason: `not yet: ${Math.round(qbCandidate.pAvailableNext * 100)}% next-turn survival` };
+    } else if (quarterbacks.length === 1) {
+      qb2 = { recommendation: "NO", reason: "not yet: no quarterback is inside the current decision ladder" };
+    }
+    const byeCounts = [...Array.from(picks ?? []), chosen.player].reduce((counts, player) => {
+      if (Number.isInteger(player.bye)) counts[player.bye] = (counts[player.bye] ?? 0) + 1;
+      return counts;
+    }, {});
+    const concentratedBye = Object.entries(byeCounts)
+      .filter(([, count]) => count > BYE_CONCENTRATION_LIMIT)
+      .sort((left, right) => right[1] - left[1] || Number(left[0]) - Number(right[0]))[0] ?? null;
     return {
       currentPick: scored.window.currentPick,
       nextPick: scored.window.nextPick,
@@ -791,8 +836,13 @@
         costOfWaiting: entry.costOfWaiting,
         pAvailableNext: entry.pAvailableNext,
         survivalStatus: entry.survivalStatus,
+        valueReason: `league-scored BPA ${entry.marginalUtility.toFixed(1)} + next-turn option ${entry.expectedNextUtility.toFixed(1)}; wait cost ${entry.costOfWaiting.toFixed(1)}; market ${Number.isFinite(entry.player.yahooRank) ? `Y!${entry.player.yahooRank}` : entry.player.marketStatus}`,
         eligible: true,
       })),
+      qb2,
+      byeConcentration: concentratedBye
+        ? { warning: true, week: Number(concentratedBye[0]), count: Number(concentratedBye[1]), limit: BYE_CONCENTRATION_LIMIT, reason: `Week ${concentratedBye[0]} would contain ${concentratedBye[1]} rostered players` }
+        : { warning: false, week: null, count: 0, limit: BYE_CONCENTRATION_LIMIT, reason: "bye concentration remains within limit" },
       chosenYahooId: chosen.player.yahooId,
     };
   }
@@ -812,11 +862,13 @@
   }) {
     const requiredMinimum = round === config.rounds ? 1 : minimum;
     const used = new Set(Array.from(picks ?? [], boardKey));
+    const usedIdentities = new Set(Array.from(picks ?? [], rosterIdentityKey).filter(Boolean));
     const availableById = new Map(
       Array.from(availablePlayers ?? [], (player) => [String(player.yahooId), player]),
     );
     let pool = board
       .filter((player) => !used.has(boardKey(player)))
+      .filter((player) => !usedIdentities.has(rosterIdentityKey(player)))
       .filter((player) => availableById.has(player.yahooId));
     if (pool.length < requiredMinimum) {
       throw new Error(`fewer_than_${requiredMinimum}_eligible_targets`);
@@ -844,8 +896,9 @@
       outcomeLow: player.outcomeLow,
       outcomeHigh: player.outcomeHigh,
       uncertaintyStatus: player.uncertaintyStatus,
+      bye: player.bye,
     }));
-    const decision = summarizeDecision(scored, selected, fallbackUsed);
+    const decision = summarizeDecision(scored, selected, picks, fallbackUsed);
     decision.targetYahooIds = targets.map((target) => target.yahooId);
     return { targets, decision };
   }
@@ -1248,9 +1301,9 @@
         const turnDetectionToClickMs = (activeTurnMetrics?.controllerStartedAt - activeTurnMetrics?.detectedAt) + clicks[0].detectionToClickMs;
         const pick = {
           yahooId: confirmation.yahooId,
-          name: confirmation.name,
+          name: boardPlayer?.name ?? confirmation.name,
           position: positionForConfirmedPick(board, confirmation),
-          team: confirmation.team,
+          team: boardPlayer?.team ?? confirmation.team,
           eligible: boardPlayer?.eligible ?? [positionForConfirmedPick(board, confirmation)],
           projection: boardPlayer?.projection ?? null,
           perGamePoints: boardPlayer?.perGamePoints ?? null,
@@ -1260,6 +1313,7 @@
           outcomeLow: boardPlayer?.outcomeLow ?? null,
           outcomeHigh: boardPlayer?.outcomeHigh ?? null,
           uncertaintyStatus: boardPlayer?.uncertaintyStatus ?? "OUTCOME_INTERVAL_UNAVAILABLE",
+          bye: boardPlayer?.bye ?? null,
           turn: confirmation.turn,
           detectionToClickMs: clicks[0].detectionToClickMs,
           turnDetectionToClickMs,
@@ -1428,6 +1482,8 @@
       optimalRosterUtility,
       maximumFilledStarterSlots,
       canCompleteRoster,
+      sameRosterIdentity,
+      summarizeDecision,
       scoreCandidates,
       buildDecisionLadder,
       applyManualOverride,

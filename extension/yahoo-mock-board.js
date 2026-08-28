@@ -18730,6 +18730,12 @@
     "nfl_official": 24,
     "team_official": 24
   },
+  "byeCoverage": {
+    "complete": true,
+    "playersWithBye": 681,
+    "playersTotal": 681,
+    "denominator": "automatic-or-manual-eligible players, including DEF"
+  },
   "players": [
     {
       "yahooId": "40059",

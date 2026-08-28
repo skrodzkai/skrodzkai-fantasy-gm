@@ -171,6 +171,74 @@ test("weekly utility gives bench and QB2 picks real bye-week value after starter
   assert.ok(result.ranked.find((entry) => entry.player.position === "RB").marginalUtility > 0);
 });
 
+test("league-scored quarterback value can beat generic Yahoo order with an explicit VONA reason", () => {
+  const config = { ...mockConfig, rounds: 6, rosterSlots: ["QB", "RB", "WR", "W/R/T", "BN", "BN"], positionLimits: { QB:2, RB:4, WR:4, TE:2 } };
+  const board = helpers.validateBoard([
+    player("QB", 1, 1, { projection:1200, yahooRank:20, adpLow:null, adpHigh:null }),
+    player("RB", 1, 2, { projection:360, yahooRank:1, adpLow:null, adpHigh:null }),
+    player("WR", 1, 3, { projection:350, yahooRank:2, adpLow:null, adpHigh:null }),
+    player("TE", 1, 4, { projection:300, yahooRank:3, adpLow:null, adpHigh:null }),
+    player("RB", 2, 5, { projection:340, yahooRank:4, adpLow:null, adpHigh:null }),
+    player("WR", 2, 6, { projection:330, yahooRank:5, adpLow:null, adpHigh:null }),
+  ]);
+  const result = helpers.buildDecisionLadder({ round:1, seat:6, picks:[], board, availablePlayers:board, minimum:5, config, replacementBySlot });
+  assert.equal(result.targets[0].position, "QB");
+  assert.match(result.decision.positionLeaders[0].valueReason, /league-scored BPA/);
+  assert.match(result.decision.positionLeaders[0].valueReason, /Y!20/);
+});
+
+test("QB2 and bye annotations explain the recommendation without changing ranking", () => {
+  const chosen = helpers.validateBoard([player("QB", 2, 2, { bye:7, yahooRank:30 })])[0];
+  const scored = { window:{ currentPick:18, nextPick:31, interveningOpponentPicks:12 }, utilityModel:"WEEKLY_OPTIMAL_LINEUP_W1_17", recomputeMs:2 };
+  const entry = { player:chosen, marginalUtility:14, expectedNextUtility:3, costOfWaiting:11, decisionScore:17, pAvailableNext:0.2, survivalStatus:"TEST" };
+  const yes = helpers.summarizeDecision(scored, [entry], [player("QB", 1, 1, { bye:5 })]);
+  assert.deepEqual(JSON.parse(JSON.stringify(yes.qb2)), { recommendation:"YES", reason:"remaining-QB cliff: 20% next-turn survival" });
+  assert.equal(yes.chosenYahooId, chosen.yahooId);
+
+  const conflict = helpers.summarizeDecision(scored, [{ ...entry, player:{ ...chosen, bye:5 } }], [player("QB", 1, 1, { bye:5 })]);
+  assert.match(conflict.qb2.reason, /weekly-utility conflict/);
+  assert.equal(conflict.qb2.recommendation, "NO");
+
+  const bye = helpers.summarizeDecision(scored, [{ ...entry, player:{ ...chosen, position:"WR", bye:9 } }], [
+    player("RB", 1, 1, { bye:9 }),
+    player("WR", 1, 2, { bye:9 }),
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(bye.byeConcentration)), { warning:true, week:9, count:3, limit:2, reason:"Week 9 would contain 3 rostered players" });
+});
+
+test("the two Travis Hunter Yahoo identities cannot occupy the same roster", () => {
+  const [offense, defense] = helpers.validateBoard([
+    player("WR", 1, 1, { yahooId:"99001", name:"Travis Hunter", team:"JAX", eligible:["WR"], automaticEligible:false, manualEligible:true }),
+    player("CB", 1, 2, { yahooId:"99002", name:"Travis Hunter", team:"JAX", eligible:["CB", "DB", "D"], automaticEligible:false, manualEligible:true }),
+  ]);
+  assert.equal(helpers.canCompleteRoster({ player:defense, picks:[offense], config:testConfig }), false);
+  const override = helpers.applyManualOverride({
+    stage:{ roomId:"18599", seat:6, expectedRound:2, targets:[{ yahooId:"99002" }] },
+    roomId:"18599", seat:6, round:2, board:[offense, defense], availablePlayers:[defense],
+    baselineTargets:Array.from({ length:5 }, (_, index) => ({ yahooId:`fallback-${index}` })),
+    picks:[offense], config:testConfig,
+  });
+  assert.equal(override.manualOverride.status, "rejected");
+  assert.equal(override.manualOverride.reason, "manual_pin_unavailable_or_ineligible");
+});
+
+test("confirmed picks preserve canonical board identity instead of Yahoo display abbreviations", () => {
+  assert.match(source, /name: boardPlayer\?\.name \?\? confirmation\.name/);
+  assert.match(source, /team: boardPlayer\?\.team \?\? confirmation\.team/);
+});
+
+test("snake-seat geometry changes next-turn survival metrics on the same board", () => {
+  const pool = helpers.validateBoard(boardForConfig(mockConfig).slice(0, 12));
+  const edge = helpers.scoreCandidates({ round:1, seat:1, picks:[], pool, config:mockConfig, replacementBySlot });
+  const middle = helpers.scoreCandidates({ round:1, seat:6, picks:[], pool, config:mockConfig, replacementBySlot });
+  const yahooId = pool[0].yahooId;
+  const atEdge = edge.ranked.find((entry) => entry.player.yahooId === yahooId);
+  const atMiddle = middle.ranked.find((entry) => entry.player.yahooId === yahooId);
+  assert.notEqual(edge.window.nextPick, middle.window.nextPick);
+  assert.notEqual(atEdge.pAvailableNext, atMiddle.pAvailableNext);
+  assert.notEqual(edge.window.interveningOpponentPicks, middle.window.interveningOpponentPicks);
+});
+
 test("a confirmed target preserves its weekly profile for the following round", () => {
   const weekly = (points, byeIndex = null) => Array.from({ length: 17 }, (_, index) => index === byeIndex ? 0 : points);
   const board = helpers.validateBoard([

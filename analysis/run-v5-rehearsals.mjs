@@ -263,6 +263,184 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
   };
 }
 
+function memoryStorage() {
+  const values = new Map();
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
+  };
+}
+
+async function waitFor(predicate, timeoutMs = 15_000) {
+  const startedAt = performance.now();
+  while (performance.now() - startedAt < timeoutMs) {
+    const value = predicate();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  throw new Error("runner_loop_replay_timeout");
+}
+
+function runnerLoopEnvironment(runtime, seat) {
+  const config = runtime.runner.configs.test_league_19_idp;
+  const validated = runtime.runner._test.validateBoard(runtime.board);
+  const state = { filled: 0 };
+  const select = { value: "all", options: [{ value: "all", textContent: "All Positions" }], dispatchEvent() {} };
+  const rows = ["QB", "RB", "WR", "TE", "K", "DEF", "D", "LB", "CB", "S"]
+    .flatMap((position) => validated.filter((player) => player.position === position && player.automaticEligible !== false).slice(0, 12))
+    .map((player) => ({ player }));
+  const body = {};
+  Object.defineProperty(body, "innerText", { get: () => `${state.filled} / ${config.rosterTotal}` });
+  const document = {
+    body,
+    querySelectorAll(selector) {
+      if (selector === "select") return [select];
+      if (selector === "tr") return rows;
+      return [];
+    },
+  };
+  const runtimeHooks = {
+    parseRoom: () => ({ roomId: "18599", seat: 12 }),
+    parseRosterCount: () => ({ filled: state.filled, total: config.rosterTotal }),
+    isAutodraftActive: () => false,
+    readOwnedTurn: () => {
+      if (state.filled >= config.rounds) return null;
+      const round = state.filled + 1;
+      const pick = runtime.runner._test.overallPick(round, seat, config.teams);
+      return { label: `R${round}P${pick}`, round, pick };
+    },
+    readPlayerRow: (row) => row.player,
+  };
+  const controllerApi = {
+    runtime: runtimeHooks,
+    create(options) {
+      const receipts = [];
+      let controllerState = "created";
+      let confirmedPicks = 0;
+      return {
+        start() {
+          const target = options.targets[0];
+          const turn = runtimeHooks.readOwnedTurn();
+          controllerState = "running";
+          state.filled += 1;
+          confirmedPicks = 1;
+          receipts.push({ kind: "draft_click", yahooId: target.yahooId, detectionToClickMs: 1 });
+          receipts.push({
+            kind: "pick_confirmed",
+            yahooId: target.yahooId,
+            name: target.name,
+            team: target.team,
+            turn: turn.label,
+            clickToConfirmationMs: 1,
+            rosterAfter: { filled: state.filled, total: config.rosterTotal },
+          });
+          return this;
+        },
+        stop() { controllerState = "stopped"; },
+        getStatus() { return { state: controllerState, confirmedPicks }; },
+        exportReceipts() { return receipts.slice(); },
+      };
+    },
+  };
+  const environment = {
+    Event: class Event { constructor(type) { this.type = type; } },
+    clearInterval,
+    crypto,
+    document,
+    location: { pathname: "/draftclient/f1/18599/12" },
+    localStorage: memoryStorage(),
+    setInterval,
+    setTimeout,
+    SKRODZKaiYahooDraftController: controllerApi,
+  };
+  return { config, environment, poolSize: rows.length };
+}
+
+function createReplayRunner(runtime, seat, selectionHoldMs) {
+  const { config, environment, poolSize } = runnerLoopEnvironment(runtime, seat);
+  const runner = runtime.runner.create({
+    configName: "test_league_19_idp",
+    executionMode: "TEST",
+    expectedRoomId: "18599",
+    expectedSeat: seat,
+    expectedUrlSeat: 12,
+    observedTeamCount: 12,
+    observedRosterSlots: config.rosterSlots,
+    minimumFallbacks: 5,
+    pollMs: 25,
+    filterDeadlineMs: 500,
+    selectionHoldMs,
+    replacementBySlot: runtime.replacementBySlot,
+    survivalCalibration: runtime.survivalCalibration,
+    board: runtime.board,
+  }, environment);
+  return { runner, poolSize };
+}
+
+export async function replayRunnerLoop({ boardSource, runnerSource, seat = 6 }) {
+  const runtime = loadRuntime(boardSource, runnerSource);
+  const completion = createReplayRunner(runtime, seat, 100);
+  completion.runner.start();
+  let overrideApplied = false;
+  await waitFor(() => {
+    const status = completion.runner.getStatus();
+    if (!overrideApplied && status.pendingDecision?.targetYahooIds?.length > 1) {
+      overrideApplied = completion.runner.chooseOnClock(status.pendingDecision.targetYahooIds[1], "replay_operator_override");
+    }
+    if (["failed", "halted", "stopped"].includes(status.state)) throw new Error(`runner_loop_completion_${status.state}:${status.failure?.code ?? "unknown"}`);
+    return status.state === "completed" ? status : null;
+  });
+  const completionReceipts = completion.runner.exportReceipts();
+  const turnReceipts = completionReceipts.filter((entry) => entry.kind === "runner_turn_resolved");
+  const failureCodes = completionReceipts
+    .filter((entry) => entry.kind === "runner_failed")
+    .map((entry) => entry.code ?? entry.failure ?? "runner_failed");
+  const forbiddenFailures = ["panel_ready_budget_exhausted", "turn_to_click_budget_exhausted", "position_filter_timeout"];
+
+  const kill = createReplayRunner(runtime, seat, 100);
+  kill.runner.start();
+  await waitFor(() => kill.runner.getStatus().pendingDecision);
+  kill.runner.halt("replay_kill_switch");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const killReceipts = kill.runner.exportReceipts();
+  const killReceipt = killReceipts.find((entry) => entry.kind === "runner_halted") ?? null;
+
+  const acceptance = {
+    completedNineteenTurns: completion.runner.getStatus().state === "completed" && completion.runner.getStatus().picks.length === 19 && turnReceipts.length === 19,
+    onClockOverrideApplied: completionReceipts.filter((entry) => entry.kind === "runner_on_clock_choice_applied").length === 1,
+    everyPanelReadyUnder250ms: turnReceipts.every((entry) => entry.panelBudgetMs === 250 && entry.panelReadyMs < entry.panelBudgetMs),
+    everyRecommendationUnder100ms: turnReceipts.every((entry) => entry.decision?.recomputeMs < 100),
+    zeroFallbacks: turnReceipts.every((entry) => entry.decision?.fallbackUsed === false),
+    zeroTimeoutOrFailureReceipts: failureCodes.length === 0 && !completionReceipts.some((entry) => forbiddenFailures.some((code) => String(entry.code ?? entry.failure ?? "").includes(code))),
+    killDuringDecisionWindow: killReceipt?.reason === "replay_kill_switch" && killReceipt?.picks === 0,
+    killProducedNoClick: killReceipt?.draftClicks === 0 && killReceipt?.pickConfirmations === 0,
+    realLeagueExecutionDisabled: runtime.runner.configs.real_league_19_idp.qualification === "unverified-real-room",
+  };
+  return {
+    schemaVersion: 1,
+    evidenceClass: "OFFLINE_RUNNER_LOOP_REPLAY",
+    clockBasis: "real-league 30s assumption stressed through the TEST 19-round runner contract",
+    yahooLiveDraft: false,
+    yahooTestLeagueCleanAutomationPass: false,
+    roomIdentityUsedByHarness: { leagueId: "18599", yahooTeamId: 12, draftSeat: seat },
+    accepted: Object.values(acceptance).every(Boolean),
+    acceptance,
+    completion: {
+      state: completion.runner.getStatus().state,
+      picks: completion.runner.getStatus().picks.length,
+      poolSize: completion.poolSize,
+      overrideApplied,
+      maxPanelReadyMs: turnReceipts.length ? Math.max(...turnReceipts.map((entry) => entry.panelReadyMs)) : null,
+      maxRecomputeMs: turnReceipts.length ? Math.max(...turnReceipts.map((entry) => entry.decision?.recomputeMs ?? Infinity)) : null,
+      turns: turnReceipts.map((entry) => ({ turn: entry.turn, panelReadyMs: entry.panelReadyMs, panelBudgetMs: entry.panelBudgetMs, recomputeMs: entry.decision?.recomputeMs, fallbackUsed: entry.decision?.fallbackUsed })),
+      failureCodes,
+    },
+    kill: killReceipt,
+    receipts: { completion: completionReceipts, kill: killReceipts },
+  };
+}
+
 async function main() {
   const args = Object.fromEntries(process.argv.slice(2).map((entry) => {
     const [key, ...value] = entry.split("=");
@@ -272,9 +450,11 @@ async function main() {
     if (!args[required]) throw new Error(`missing --${required}=...`);
   }
   const [boardSource, runnerSource] = await Promise.all([readFile(args.board, "utf8"), readFile(args.runner, "utf8")]);
+  const runnerLoopEvidence = await replayRunnerLoop({ boardSource, runnerSource });
   const report = buildRehearsalReport({ boardSource, runnerSource, generatedAt: args["generated-at"] });
+  report.runnerLoopEvidence = runnerLoopEvidence;
   await writeFile(args.output, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
-  process.stdout.write(`${JSON.stringify({ output: args.output, accepted: report.accepted, acceptanceGates: report.acceptanceGates, simulations: report.simulations, validRosters: report.validRosters, recomputeP95Ms: report.latency.recomputeP95Ms, fallbackCount: report.latency.fallbackCount, chaosPass: Object.values(report.rehearsals.chaos).every((scenario) => scenario.pass) })}\n`);
+  process.stdout.write(`${JSON.stringify({ output: args.output, accepted: report.accepted, runnerLoopAccepted: report.runnerLoopEvidence.accepted, acceptanceGates: report.acceptanceGates, simulations: report.simulations, validRosters: report.validRosters, recomputeP95Ms: report.latency.recomputeP95Ms, fallbackCount: report.latency.fallbackCount, chaosPass: Object.values(report.rehearsals.chaos).every((scenario) => scenario.pass) })}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

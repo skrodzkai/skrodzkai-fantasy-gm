@@ -53,6 +53,23 @@ function waitingFixture({ teams = 12, starters = "QB, WR, WR, RB, RB, TE, W/R/T,
   };
 }
 
+function healthyBoard(now = 1_000) {
+  return {
+    generatedAt: new Date(now - 100).toISOString(),
+    injuryCoverage: { complete:true, totalPlayers:872 },
+    byeCoverage: { complete:true, playersWithBye:872, playersTotal:872 },
+    players: Array.from({ length:6 }, (_, index) => ({ yahooId:String(index + 1) })),
+  };
+}
+
+function memoryLocalStorage() {
+  const values = new Map();
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+  };
+}
+
 test("qualifies only the exact 12-team public mock waiting-room shape", () => {
   const fixture = waitingFixture();
   const snapshot = helpers.parseWaitingRoom(fixture.document, fixture.location);
@@ -94,13 +111,53 @@ test("rejects the wrong team count, roster shape, path, or missing seat", () => 
 test("binds an arm token to one room and seat with a fixed expiration", () => {
   const fixture = waitingFixture();
   const snapshot = helpers.parseWaitingRoom(fixture.document, fixture.location);
-  const armRecord = helpers.makePreflight(snapshot, 1_000);
+  const board = healthyBoard();
+  const armRecord = helpers.makePreflight(snapshot, 1_000, board);
   assert.equal(armRecord.expiresAt, 1_801_000);
-  assert.equal(helpers.validateDraftPreflight(armRecord, { roomId: "9391926", seat: 7 }, 1_001), null);
-  assert.equal(helpers.validateDraftPreflight(armRecord, { roomId: "9391926", seat: 6 }, 1_001), "draft_room_or_url_team_changed");
-  assert.equal(helpers.validateDraftPreflight(armRecord, { roomId: "9391927", seat: 7 }, 1_001), "draft_room_or_url_team_changed");
-  assert.equal(helpers.validateDraftPreflight(armRecord, { roomId: "9391926", seat: 7 }, armRecord.expiresAt), "draft_arm_expired");
+  assert.equal(helpers.validateDraftPreflight(armRecord, { roomId: "9391926", seat: 7 }, 1_001, board), null);
+  assert.equal(helpers.validateDraftPreflight(armRecord, { roomId: "9391926", seat: 6 }, 1_001, board), "draft_room_or_url_team_changed");
+  assert.equal(helpers.validateDraftPreflight(armRecord, { roomId: "9391927", seat: 7 }, 1_001, board), "draft_room_or_url_team_changed");
+  assert.equal(helpers.validateDraftPreflight(armRecord, { roomId: "9391926", seat: 7 }, armRecord.expiresAt, healthyBoard(armRecord.expiresAt)), "draft_arm_expired");
   assert.equal(helpers.validateDraftPreflight(null, { roomId: "9391926", seat: 7 }, 1_001), "approved_draft_arm_required");
+});
+
+test("board health is a single fail-closed arm gate with visible freshness and coverage", () => {
+  const now = Date.parse("2026-08-27T18:00:00Z");
+  const board = healthyBoard(now);
+  assert.equal(helpers.boardHealthGate(board, now), null);
+  const futureBoard = { ...board, generatedAt:new Date(now + 15 * 60 * 1_000 + 1).toISOString() };
+  assert.equal(helpers.boardHealthGate(futureBoard, now), "draft_board_timestamp_in_future");
+  assert.equal(helpers.boardHealthGate({ ...board, generatedAt:"2026-08-26T17:59:59Z" }, now), "draft_board_stale_over_24h");
+  assert.equal(helpers.boardHealthGate({ ...board, injuryCoverage:{ complete:false } }, now), "draft_board_injury_coverage_incomplete");
+  assert.equal(helpers.boardHealthGate({ ...board, byeCoverage:{ complete:false, playersWithBye:871, playersTotal:872 } }, now), "draft_board_bye_coverage_incomplete");
+
+  const snapshot = helpers.parseWaitingRoom(waitingFixture().document, waitingFixture().location);
+  assert.throws(() => helpers.makePreflight(snapshot, now, { ...board, injuryCoverage:{ complete:false } }), /draft_board_injury_coverage_incomplete/);
+  const preflight = helpers.makePreflight(snapshot, now, board);
+  assert.equal(helpers.validateDraftPreflight(preflight, { roomId:"9391926", seat:7 }, now, futureBoard), "draft_board_timestamp_in_future");
+
+  const localStorage = memoryLocalStorage();
+  const rendered = [];
+  const events = [];
+  helpers.refuseArmForBoardHealth({ localStorage, SKRODZKaiYahooMockBoard:futureBoard }, {
+    setWarnings(warnings) { rendered.push({ warnings }); },
+    render(...args) { rendered.push({ render:args }); },
+    addEvent(...args) { events.push(args); },
+  }, { kind:"mock_arm_refused", roomId:"9391926", seat:7, expectedRosterTotal:15 }, new Error("draft_board_timestamp_in_future"));
+  const receipts = JSON.parse(localStorage.getItem("skrodzkai-yahoo-mock-extension-receipts-v1"));
+  assert.equal(receipts.at(-1).kind, "mock_arm_refused");
+  assert.equal(receipts.at(-1).failure, "draft_board_timestamp_in_future");
+  assert.deepEqual(rendered.find((entry) => entry.render)?.render, ["bad", "BOARD HEALTH LOCKED", "draft_board_timestamp_in_future"]);
+  assert.deepEqual(events.at(-1), ["arm refused", "draft_board_timestamp_in_future"]);
+  assert.equal((source.match(/kind: "mock_arm_refused"/g) ?? []).length, 1);
+  assert.equal((source.match(/kind: "test_arm_refused"/g) ?? []).length, 2);
+  assert.match(source, /const preflightError = validateDraftPreflight\([\s\S]*kind: "extension_locked"[\s\S]*failure: preflightError/);
+  const warnings = helpers.buildUiWarnings({
+    room:{ roomId:"9391926", seat:7 }, armRecord:null, autodraft:false, roster:{ total:15 }, board:board.players, boardData:board, expectedRosterTotal:15, now,
+  });
+  assert.ok(warnings.some((warning) => /Data as-of/.test(warning.text)));
+  assert.ok(warnings.some((warning) => /Injury coverage: COMPLETE/.test(warning.text)));
+  assert.ok(warnings.some((warning) => /Bye coverage: COMPLETE · 872\/872/.test(warning.text)));
 });
 
 test("binds the verified test league to team 12 while keeping the snake draft slot separate", () => {
@@ -125,12 +182,13 @@ test("binds the verified test league to team 12 while keeping the snake draft sl
   assert.equal(snapshot.seat, 4);
   assert.equal(helpers.parseTestDraftHome({ body: { innerText: document.body.innerText.replace("SKRODZKai", "Chef Joe") } }, location, settingsReceipt, 1_001).ready, false);
   assert.deepEqual([...snapshot.rosterSlots], [...helpers.testRosterSlots]);
-  const preflight = helpers.makeTestPreflight(snapshot, 1_000);
+  const board = healthyBoard();
+  const preflight = helpers.makeTestPreflight(snapshot, 1_000, board);
   assert.equal(preflight.seat, 4);
   assert.equal(preflight.urlSeat, 12);
   assert.equal(preflight.expiresAt, 14_401_000);
-  assert.equal(helpers.validateDraftPreflight(preflight, { roomId: "18599", seat: 12 }, 1_001), null);
-  assert.equal(helpers.validateDraftPreflight(preflight, { roomId: "18599", seat: 4 }, 1_001), "draft_room_or_url_team_changed");
+  assert.equal(helpers.validateDraftPreflight(preflight, { roomId: "18599", seat: 12 }, 1_001, board), null);
+  assert.equal(helpers.validateDraftPreflight(preflight, { roomId: "18599", seat: 4 }, 1_001, board), "draft_room_or_url_team_changed");
   assert.equal(
     helpers.parseTestDraftHome({ body: { innerText: document.body.innerText.replace("Your Draft Position: 4th", "Draft position pending") } }, location, settingsReceipt, 1_001).ready,
     false,
@@ -164,7 +222,7 @@ test("arms the exact TEST draftclient from its live slot while preserving Yahoo 
   assert.equal(snapshot.rosterSlots.length, 19);
   assert.deepEqual([...snapshot.missingFilters], []);
   assert.deepEqual([...helpers.requiredTestFilterLabels()], ["All Positions", "Kickers", "Team Defenses", "Defensive Players", "Linebackers", "Defensive Backs"]);
-  assert.equal(helpers.makeTestPreflight(snapshot, 1_000).seat, 3);
+  assert.equal(helpers.makeTestPreflight(snapshot, 1_000, healthyBoard()).seat, 3);
   assert.equal(helpers.parseTestDraftClient(document, { pathname: "/draftclient/f1/420010/12" }, settingsReceipt, 1_000).ready, false);
   assert.equal(helpers.parseTestDraftClient({ ...document, body: { innerText: document.body.innerText.replace("0/19", "1/19") } }, { pathname: "/draftclient/f1/18599/12" }, settingsReceipt, 1_000).ready, false);
   const sevenPicked = helpers.parseTestDraftClient({ ...document, body: { innerText: document.body.innerText.replace("0/19", "7/19").replace("YOUR TURN - 3RD PICK", "WAITING FOR PICK") } }, { pathname: "/draftclient/f1/18599/12" }, settingsReceipt, 1_000);
@@ -226,7 +284,7 @@ test("exports runner and controller receipts using distinct draft-slot and Yahoo
 test("manifest has only the two public-mock surfaces plus the exact verified test league and no broad permissions", async () => {
   const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "0.9.0");
+  assert.equal(manifest.version, "0.10.0");
   assert.deepEqual(manifest.permissions, ["storage"]);
   assert.equal(manifest.host_permissions, undefined);
   assert.deepEqual(manifest.background, { service_worker: "extension/command-center-background.js" });
@@ -344,7 +402,7 @@ test("bridge locks every action when Chrome invalidates the extension context", 
 });
 
 test("version handshake requires the current installed background version", async () => {
-  assert.equal(await helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.9.0" }) } } }), "0.9.0");
+  assert.equal(await helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.10.0" }) } } }), "0.10.0");
   await assert.rejects(
     helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.7.5" }) } } }),
     /extension_version_mismatch/,
@@ -353,7 +411,7 @@ test("version handshake requires the current installed background version", asyn
     helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage() { throw new Error("invalidated"); } } } }),
     /extension_context_invalidated/,
   );
-  assert.equal(backgroundHelpers.extensionVersion({ runtime:{ getManifest:() => ({ version:"0.9.0" }) } }), "0.9.0");
+  assert.equal(backgroundHelpers.extensionVersion({ runtime:{ getManifest:() => ({ version:"0.10.0" }) } }), "0.10.0");
   assert.doesNotMatch(backgroundSource, /identify_arm_surface|tabs\.query/);
 });
 

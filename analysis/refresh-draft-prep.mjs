@@ -102,8 +102,8 @@ function requireFreshIso(value, label) {
   return new Date(parsed).toISOString();
 }
 
-function buildClockReceipt(generatedAt, nowValue) {
-  const wallClockDate = new Date(nowValue ?? Date.now());
+function buildClockReceipt(generatedAt) {
+  const wallClockDate = new Date();
   if (!Number.isFinite(wallClockDate.getTime())) throw new Error("wall clock must be a dated value");
   const wallClockAt = wallClockDate.toISOString();
   const generatedAtSkewMinutes = (Date.parse(generatedAt) - Date.parse(wallClockAt)) / 60_000;
@@ -257,9 +257,20 @@ function countsByPosition(players) {
   return counts;
 }
 
-function buildHealth({ generatedAt, clock, yahoo, espnHealth, sleeperHealth, sleeperReused, board, priorBoard, rehearsal, packets, identityReceipt, failure = null }) {
+export function byeCoverage(players) {
+  const eligible = Array.from(players ?? []).filter((player) => player.automaticEligible === true || player.manualEligible === true);
+  const playersWithBye = eligible.filter((player) => Number.isInteger(Number(player.bye)) && Number(player.bye) >= 1 && Number(player.bye) <= 17).length;
+  return {
+    complete: eligible.length > 0 && playersWithBye === eligible.length,
+    playersWithBye,
+    playersTotal: eligible.length,
+    denominator: "automatic-or-manual-eligible players, including DEF",
+  };
+}
+
+export function buildHealth({ generatedAt, clock, yahoo, espnHealth, sleeperHealth, sleeperReused, board, priorBoard, rehearsal, packets, identityReceipt, failure = null }) {
   const automatic = (board?.players ?? []).filter((player) => player.automaticEligible === true);
-  const byeKnown = (board?.players ?? []).filter((player) => player.bye !== null && player.bye !== undefined).length;
+  const byes = byeCoverage(board?.players);
   const reasons = [
     ...Object.entries(yahoo ?? {}).filter(([, value]) => !value.fresh).map(([key]) => `stale_or_missing_yahoo_${key}`),
     ...(espnHealth && !espnHealth.fresh ? ["stale_espn_projection_family"] : []),
@@ -267,6 +278,8 @@ function buildHealth({ generatedAt, clock, yahoo, espnHealth, sleeperHealth, sle
     ...(rehearsal && rehearsal.accepted !== true ? ["rehearsal_not_accepted"] : []),
     ...(packets && packets.packets?.length !== 12 ? ["twelve_seat_packets_missing"] : []),
     ...(clock && !clock.fresh ? ["generated_at_wall_clock_skew"] : []),
+    ...(board && board.injuryCoverage?.complete !== true ? ["injury_coverage_incomplete"] : []),
+    ...(board && byes.complete !== true ? ["bye_coverage_incomplete"] : []),
     ...(failure ? [String(failure)] : []),
   ];
   return {
@@ -284,7 +297,7 @@ function buildHealth({ generatedAt, clock, yahoo, espnHealth, sleeperHealth, sle
       automaticEligibleTotal: automatic.length,
       ambiguousNameTeamKeys: board?.identityEvidence?.ambiguousNameTeamKeys ?? [],
     },
-    byes: { source: "caller-supplied Yahoo player snapshots", playersWithBye: byeKnown, playersTotal: board?.players?.length ?? 0 },
+    byes: { source: "caller-supplied Yahoo player snapshots", ...byes },
     boardMovement: board ? boardMovers(board, priorBoard) : { movers: null, reason: "board-not-built" },
     projectionBias: board?.projectionModel?.sourceGapByPosition ?? null,
     rehearsal: rehearsal ? { accepted: rehearsal.accepted, latency: rehearsal.latency, runnerSourceSha256: rehearsal.runnerSourceSha256, scoringSchemaHash: rehearsal.scoringSchemaHash } : null,
@@ -317,7 +330,7 @@ export async function publishSuccessfulRun({ staging, finalPath, board, extensio
 
 export async function refreshDraftPrep(options) {
   const generatedAt = requireFreshIso(options.generatedAt, "generatedAt");
-  const clock = buildClockReceipt(generatedAt, options.now);
+  const clock = buildClockReceipt(generatedAt);
   const outputParent = await ensureOutputParent(options.outputParent, options.allowedOutputRoot ?? "/Volumes/TradingFloor");
   const finalPath = join(outputParent, finalDirectoryName(generatedAt));
   try {

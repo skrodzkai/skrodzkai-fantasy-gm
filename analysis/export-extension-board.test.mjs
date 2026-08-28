@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { extensionBoardFromV5, renderExtensionBoard } from "./export-extension-board.mjs";
+import { extensionBoardFromV5, renderExtensionBoard, renderOfflineBoardCsv } from "./export-extension-board.mjs";
 
 function player(position, rank, overrides = {}) {
   return {
@@ -20,6 +20,7 @@ function player(position, rank, overrides = {}) {
     sourceCount: 2,
     sourceFamilyCount: 2,
     sourceIds: ["yahoo-season-projection", "league-scored-history-market-baseline"],
+    bye: 7,
     ...overrides,
   };
 }
@@ -58,8 +59,15 @@ test("exports only executable offense while retaining explicitly labeled special
   assert.equal(board.players.find((entry) => entry.yahooId === "WR-102").position, "WR");
   assert.equal(board.replacementBySlot.D, 50);
   assert.deepEqual(board.injuryFreshnessPolicy, { default: 36, yahoo: 6 });
+  assert.equal(board.byeCoverage.complete, true);
+  assert.equal(board.byeCoverage.playersWithBye, board.byeCoverage.playersTotal);
+  assert.match(board.byeCoverage.denominator, /including DEF/);
   assert.deepEqual(board.idp.slice(-2).map((entry) => entry.position), ["CB", "CB"]);
   assert.match(renderExtensionBoard(board), /SKRODZKaiYahooMockBoard/);
+  assert.match(renderExtensionBoard(board), /"byeCoverage"/);
+  const csv = renderOfflineBoardCsv(board);
+  assert.match(csv, /^value_rank,name,team,position,eligible,projection,vor,bye,yahoo_rank,confidence,automatic_eligible,manual_eligible,validation_status/m);
+  assert.match(csv, /RB 2,TST,RB/);
 });
 
 test("missing eligibility fields export fail closed", () => {
