@@ -100,7 +100,7 @@ export function buildSnakeSeatPackets({ rehearsal, board, opponentCalibration, g
     generatedAt,
     executionInput: false,
     managerBinding: null,
-    policy: "snapshot-time preparation only; recompute the deterministic live ladder on every owned turn; room pressure may break close tiers only",
+    policy: "display-only snapshot-time preparation; never feed these estimates into BPA, VONA, survival, or Yahoo execution",
     packets: seats.map((seat) => {
       const simulations = teams.filter((team) => Number(team.seat) === seat);
       return {
@@ -121,15 +121,13 @@ export function buildSnakeSeatPackets({ rehearsal, board, opponentCalibration, g
             overallPick: overallPick(round, seat, 12),
             nextOverallPick: round < 19 ? overallPick(round + 1, seat, 12) : null,
             interveningOpponentPicks: between.length,
-            pressureBasis: "room-phase fallback; manager-specific pressure disabled until Yahoo seat binding",
+            pressureBasis: "descriptive room-phase fallback; manager-specific seat binding unavailable before draft order",
             positionRunPressure: normalizedPressure(pressure),
             exactSuggestions: exactSuggestions
               ? { topThree: exactSuggestions.slice(0, 3), fallbacks: exactSuggestions.slice(3, 8), source: `${simulations.length}-seed simulation consensus` }
               : null,
             positionContingency: positionContingency(simulations, round),
-            instruction: round <= EARLY_EXACT_TURNS
-              ? "suggestions are snapshot-time only; recompute on the live board"
-              : "recompute live; use position contingency and room pressure only inside a close value tier",
+            instruction: "display only; recompute the deterministic live ladder from actual Yahoo availability",
           };
         }),
       };

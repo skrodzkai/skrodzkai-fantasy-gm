@@ -24,10 +24,12 @@ test("builds one evidence-bounded card per opponent and excludes Joe", () => {
     historyRows: [{ managerId: "alpha" }, { managerId: "alpha" }],
   });
   assert.equal(result.cards.length, 2);
-  assert.equal(result.cards[0].model, "HELD_OUT_CLEARED_MANAGER_TIEBREAK");
+  assert.equal(result.cards[0].modelLabel, "HELD_OUT_CLEARED_MANAGER_DESCRIPTION");
   assert.equal(result.cards[0].topByPhase.opening[0].position, "QB");
-  assert.equal(result.cards[0].evidencePicks, 2);
-  assert.equal(result.cards[1].model, "ROOM_PHASE_FALLBACK");
+  assert.equal(result.cards[0].sampleCount, 2);
+  assert.equal(result.cards[0].phaseDistribution.opening.QB, 0.5);
+  assert.equal(result.cards[1].modelLabel, "ROOM_PHASE_DESCRIPTION");
+  assert.match(result.policy, /display-only/);
 });
 
 test("maps exact snake turns to the managers selecting before us", () => {

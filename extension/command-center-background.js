@@ -35,6 +35,15 @@
           const snapshot = message.snapshot ?? stored["skz.armSnapshot"];
           if (snapshot) update["skz.snapshot"] = snapshot;
         }
+      } else if (role === "shadow") {
+        update["skz.shadowTabId"] = tabId;
+        update["skz.shadowSeenAt"] = at;
+        if (message.snapshot) update["skz.shadowSnapshot"] = message.snapshot;
+        if (!fresh(stored["skz.runnerSeenAt"]) && !fresh(stored["skz.armSeenAt"])) {
+          update["skz.heartbeatAt"] = at;
+          update["skz.activeRole"] = "shadow";
+          if (message.snapshot) update["skz.snapshot"] = message.snapshot;
+        }
       } else {
         if (message.snapshot) update["skz.observerSnapshot"] = message.snapshot;
         if (!fresh(stored["skz.runnerSeenAt"]) && !fresh(stored["skz.armSeenAt"])) {
@@ -49,16 +58,17 @@
     }
 
     async function targetTab(command) {
-      const stored = await session.get(["skz.runnerTabId", "skz.runnerSeenAt", "skz.armTabId", "skz.armSeenAt"]);
+      const stored = await session.get(["skz.runnerTabId", "skz.runnerSeenAt", "skz.armTabId", "skz.armSeenAt", "skz.shadowTabId", "skz.shadowSeenAt"]);
       const runner = fresh(stored["skz.runnerSeenAt"]) && Number.isInteger(Number(stored["skz.runnerTabId"])) ? Number(stored["skz.runnerTabId"]) : null;
       const armOwner = fresh(stored["skz.armSeenAt"]) && Number.isInteger(Number(stored["skz.armTabId"])) ? Number(stored["skz.armTabId"]) : null;
+      const shadow = fresh(stored["skz.shadowSeenAt"]) && Number.isInteger(Number(stored["skz.shadowTabId"])) ? Number(stored["skz.shadowTabId"]) : null;
       if (command === "arm") return armOwner ?? runner;
-      if (command === "export") return runner ?? armOwner;
+      if (command === "export") return runner ?? armOwner ?? shadow;
       return runner;
     }
 
     async function removeTab(tabId) {
-      const stored = await session.get(["skz.runnerTabId", "skz.armTabId", "skz.armSeenAt", "skz.armSnapshot"]);
+      const stored = await session.get(["skz.runnerTabId", "skz.armTabId", "skz.armSeenAt", "skz.armSnapshot", "skz.shadowTabId"]);
       const removed = [];
       const update = {};
       if (Number(stored["skz.runnerTabId"]) === tabId) {
@@ -70,6 +80,7 @@
         }
       }
       if (Number(stored["skz.armTabId"]) === tabId) removed.push("skz.armTabId", "skz.armSeenAt", "skz.armSnapshot");
+      if (Number(stored["skz.shadowTabId"]) === tabId) removed.push("skz.shadowTabId", "skz.shadowSeenAt", "skz.shadowSnapshot");
       if (removed.length) await session.remove(removed);
       if (Object.keys(update).length) await session.set(update);
     }

@@ -64,6 +64,7 @@
       ]),
       offenseStarters: Object.freeze({ QB: 1, RB: 2, WR: 3, TE: 1, FLEX: 1 }),
       positionLimits: Object.freeze({ QB: 2, RB: 6, WR: 7, TE: 3, K: 1, DEF: 1, D: 3, LB: 3, CB: 3, S: 3 }),
+      categoryLimits: Object.freeze({ IDP: 3, K: 1, DEF: 1 }),
       qualification: "unverified-real-room",
     }),
   });
@@ -514,6 +515,8 @@
       const drafted = normalize(pick.position);
       return category === "IDP" ? ["D", "LB", "CB", "S"].includes(drafted) : drafted === category;
     });
+    const categoryLimit = Number(config.categoryLimits?.[category]);
+    if (Number.isFinite(categoryLimit) && categoryPicks.length >= categoryLimit) return false;
     const before = maximumAssignment(categoryPicks, categorySlots, () => 1).count;
     const after = maximumAssignment([...categoryPicks, player], categorySlots, () => 1).count;
     return after === before + 1;
@@ -1005,10 +1008,12 @@
 
   function validateCompletedRoster(picks, config = CONFIGS.public_mock_15) {
     const counts = positionCounts(picks);
+    const idpCount = ["D", "LB", "CB", "S"].reduce((sum, position) => sum + (counts[position] ?? 0), 0);
     return (
       picks.length === config.rounds &&
       maximumFilledStarterSlots(picks, config) === starterSlots(config).length &&
-      Object.entries(config.positionLimits).every(([position, limit]) => (counts[position] ?? 0) <= limit)
+      Object.entries(config.positionLimits).every(([position, limit]) => (counts[position] ?? 0) <= limit) &&
+      (config.categoryLimits?.IDP == null || idpCount <= config.categoryLimits.IDP)
     );
   }
 
@@ -1488,11 +1493,24 @@
     return api;
   }
 
+  const decision = Object.freeze({
+    validateBoard,
+    buildDecisionLadder,
+    scoreCandidates,
+    applyManualOverride,
+    canCompleteRoster,
+    validateCompletedRoster,
+    allocateRosterSlots,
+    overallPick,
+    turnWindow,
+  });
+
   root.SKRODZKaiYahooMockRunner = {
     version: VERSION,
     configs: CONFIGS,
     create,
     receiptKey: RECEIPT_KEY,
+    decision,
     _test: {
       normalizeSlots,
       sameSlots,

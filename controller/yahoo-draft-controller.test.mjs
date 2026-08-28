@@ -4,6 +4,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 const source = await readFile(new URL("./yahoo-draft-controller.js", import.meta.url), "utf8");
+const readerSource = await readFile(new URL("./yahoo-page-readers.js", import.meta.url), "utf8");
 const context = {
   clearInterval,
   console,
@@ -15,6 +16,7 @@ const context = {
 };
 context.globalThis = context;
 vm.createContext(context);
+vm.runInContext(readerSource, context);
 vm.runInContext(source, context);
 const helpers = context.SKRODZKaiYahooDraftController._test;
 const controllerApi = context.SKRODZKaiYahooDraftController;

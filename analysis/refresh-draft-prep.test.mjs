@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 import { SCORING_SCHEMA_HASH } from "./build-v5-board.mjs";
-import { buildHealth, byeCoverage, fetchEspnClayPdf, joinEspnRowsToYahoo, loadOrFetchSleeper, publishSuccessfulRun, refreshDraftPrep, writeSleeperCache } from "./refresh-draft-prep.mjs";
+import { boardMovers, buildHealth, byeCoverage, discoverPreviousPassingBoard, fetchEspnClayPdf, joinEspnRowsToYahoo, loadOrFetchSleeper, publishSuccessfulRun, refreshDraftPrep, renderBoardMovementMarkdown, writeSleeperCache } from "./refresh-draft-prep.mjs";
 
 function response(bytes, headers = {}) {
   const normalized = new Map(Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]));
@@ -79,7 +79,32 @@ test("writes a fetched Sleeper snapshot back to the daily cache atomically", asy
   assert.deepEqual(await readdir(root), ["sleeper.json"]);
 });
 
-test("publishes the complete successful artifact set with one atomic rename", async () => {
+test("discovers only the newest prior PASS board and reports rank, projection, injury, eligibility, and bye movement", async () => {
+  const root = await mkdtemp(join(tmpdir(), "draft-prep-v14-prior-test-"));
+  const failed = join(root, "draft-prep-v14-20260828T120000000Z");
+  const passed = join(root, "draft-prep-v13-20260828T110000000Z");
+  await Promise.all([mkdir(failed), mkdir(passed)]);
+  await Promise.all([
+    writeFile(join(failed, "nightly-health.json"), JSON.stringify({ status:"FAIL" })),
+    writeFile(join(failed, "player-board-v14.json"), JSON.stringify({ players:[{ yahooId:"bad" }] })),
+    writeFile(join(passed, "nightly-health.json"), JSON.stringify({ status:"PASS", generatedAt:"2026-08-28T11:00:00Z" })),
+    writeFile(join(passed, "player-board-v13.json"), JSON.stringify({ players:[{ yahooId:"1", name:"Player", position:"RB", overallRank:10, consensusPoints:200, bye:7, automaticEligible:true, manualEligible:true, validationStatus:"EXECUTABLE", injury:{ status:"CLEAR", draftAction:"CLEAR" } }] })),
+  ]);
+  const prior = await discoverPreviousPassingBoard(root);
+  assert.match(prior.receipt.boardPath, /player-board-v13\.json$/);
+  const board = { generatedAt:"2026-08-28T12:00:00Z", injuryWatchlist:[{ yahooId:"1", status:"QUESTIONABLE", draftAction:"REVIEW", primarySourceId:"team-report" }], players:[{ yahooId:"1", name:"Player", position:"RB", overallRank:7, consensusPoints:210, bye:8, automaticEligible:false, manualEligible:true, validationStatus:"INJURY_REVIEW", injury:{ status:"QUESTIONABLE", draftAction:"REVIEW" } }] };
+  const movement = boardMovers(board, prior.board, prior.receipt);
+  assert.equal(movement.changedPlayers, 1);
+  assert.equal(movement.changes[0].rankDelta, 3);
+  assert.equal(movement.changes[0].projectionDelta, 10);
+  assert.equal(movement.changes[0].before.draftAction, "CLEAR");
+  assert.equal(movement.changes[0].after.bye, 8);
+  const markdown = renderBoardMovementMarkdown(board, movement);
+  assert.match(markdown, /CLEAR → REVIEW/);
+  assert.match(markdown, /\| Player \| QUESTIONABLE \| REVIEW \| team-report \|/);
+});
+
+test("publishes the complete v14 artifact set with one atomic rename", async () => {
   const root = await mkdtemp(join(tmpdir(), "draft-prep-v13-publish-test-"));
   const staging = await mkdtemp(join(root, ".staging-"));
   await mkdir(join(staging, "source-snapshots"));
@@ -94,17 +119,22 @@ test("publishes the complete successful artifact set with one atomic rename", as
     readiness: { status: "PASS" },
     rehearsal: { accepted: true },
     packets: { packets: Array.from({ length: 12 }) },
+    opponentWarRoom: { cards:Array.from({ length:11 }) },
+    movementMarkdown: "# movement\n",
+    realShadowAcceptance: { status:"PASS" },
     health: { status: "PASS" },
   });
   assert.deepEqual((await readdir(finalPath)).sort(), [
-    "draft-readiness-v13.json",
+    "board-movement-v14.md",
+    "draft-readiness-v14.json",
     "nightly-health.json",
-    "player-board-v13.json",
-    "rehearsal-30s-v13.json",
-    "snake-seat-packets-v13.json",
+    "opponent-war-room-v14.json",
+    "player-board-v14.json",
+    "real-shadow-acceptance-v14.json",
+    "rehearsal-30s-v14.json",
     "source-snapshots",
-    "yahoo-mock-board-v13.csv",
-    "yahoo-mock-board-v13.js",
+    "yahoo-mock-board-v14.csv",
+    "yahoo-mock-board-v14.js",
   ]);
   await assert.rejects(() => readdir(staging), { code: "ENOENT" });
 });
