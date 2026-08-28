@@ -133,8 +133,8 @@ test("board health is a single fail-closed arm gate with visible freshness and c
 
   const snapshot = helpers.parseWaitingRoom(waitingFixture().document, waitingFixture().location);
   assert.throws(() => helpers.makePreflight(snapshot, now, { ...board, injuryCoverage:{ complete:false } }), /draft_board_injury_coverage_incomplete/);
-  const token = helpers.makePreflight(snapshot, now, board);
-  assert.equal(helpers.validateDraftPreflight(token, { roomId:"9391926", seat:7 }, now, futureBoard), "draft_board_timestamp_in_future");
+  const preflight = helpers.makePreflight(snapshot, now, board);
+  assert.equal(helpers.validateDraftPreflight(preflight, { roomId:"9391926", seat:7 }, now, futureBoard), "draft_board_timestamp_in_future");
 
   const localStorage = memoryLocalStorage();
   const rendered = [];
