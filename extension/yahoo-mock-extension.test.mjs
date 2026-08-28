@@ -6,6 +6,7 @@ import vm from "node:vm";
 const source = await readFile(new URL("./yahoo-mock-extension.js", import.meta.url), "utf8");
 const boardSource = await readFile(new URL("./yahoo-mock-board.js", import.meta.url), "utf8");
 const controllerSource = await readFile(new URL("../controller/yahoo-draft-controller.js", import.meta.url), "utf8");
+const readersSource = await readFile(new URL("../controller/yahoo-page-readers.js", import.meta.url), "utf8");
 const runnerSource = await readFile(new URL("../controller/yahoo-mock-runner.js", import.meta.url), "utf8");
 const popupSource = await readFile(new URL("./command-center.js", import.meta.url), "utf8");
 const popupCss = await readFile(new URL("./command-center.css", import.meta.url), "utf8");
@@ -18,6 +19,7 @@ const context = {
 };
 context.globalThis = context;
 vm.createContext(context);
+vm.runInContext(readersSource, context);
 vm.runInContext(runnerSource, context);
 vm.runInContext(source, context);
 vm.runInContext(boardSource, context);
@@ -383,13 +385,27 @@ test("REAL SHADOW can never receive mutation commands or overwrite the live boar
   assert.equal(await router.targetTab("arm"), null);
   assert.equal(await router.targetTab("pin"), null);
   assert.equal(await router.targetTab("kill"), null);
-  assert.equal(await router.targetTab("export"), 33);
+  assert.equal(await router.targetTab("export"), null);
   now = 101;
   await router.handleState({ role:"runner", at:now, snapshot:{ label:"RUNNING" }, board:[{ yahooId:"test-2" }] }, { tab:{ id:22 } });
   now = 102;
   await router.handleState({ role:"shadow", at:now, snapshot:{ mode:"REAL SHADOW", label:"READ ONLY" } }, { tab:{ id:33 } });
   assert.equal(session.value("skz.snapshot").label, "RUNNING");
   assert.equal(await router.targetTab("export"), 22);
+});
+
+test("background exposes session storage to isolated content scripts", () => {
+  const access = [];
+  const session = { ...memorySession(), setAccessLevel(options) { access.push(options); return Promise.resolve(); } };
+  const chromeApi = {
+    storage:{ session },
+    runtime:{ getManifest:() => ({ version:"0.12.0" }), getURL:(value) => value, onMessage:{ addListener() {} } },
+    windows:{ onRemoved:{ addListener() {} }, update:async () => {}, create:async () => ({ id:1 }) },
+    tabs:{ onRemoved:{ addListener() {} }, sendMessage:async () => ({ ok:true }) },
+  };
+  backgroundHelpers.register(chromeApi);
+  assert.equal(access.length, 1);
+  assert.equal(access[0].accessLevel, "TRUSTED_AND_UNTRUSTED_CONTEXTS");
 });
 
 test("command-center bridge sends content changes separately from its stable heartbeat", () => {

@@ -28,6 +28,8 @@ export function runRealShadowAcceptance({ engine, boardData, settingsSnapshot, s
   const decision = engine?.decision;
   const config = engine?.configs?.real_league_19_idp;
   if (!decision || !config) throw new Error("real shadow decision engine is unavailable");
+  const idpPositions = Array.from(decision.IDP_POSITIONS ?? []);
+  if (!idpPositions.length) throw new Error("real shadow IDP position contract is unavailable");
   if (!settingsSnapshot?.ready) throw new Error("real settings must be verified before stress acceptance");
   const board = decision.validateBoard(boardData?.players ?? boardData);
   const replacementBySlot = boardData?.replacementBySlot ?? {};
@@ -48,10 +50,11 @@ export function runRealShadowAcceptance({ engine, boardData, settingsSnapshot, s
       const opponentIds = [];
       for (const player of opponentPicks > 0 ? available.filter((candidate) => !rostered.has(String(candidate.yahooId))).sort((left, right) => left.rank - right.rank) : []) {
         const position = String(player.position);
-        const category = position === "K" ? "K" : position === "DEF" ? "DEF" : ["D", "LB", "CB", "S"].includes(position) ? "IDP" : null;
-        const limit = category === "IDP" ? 33 : category ? 11 : Infinity;
+        const category = position === "K" ? "K" : position === "DEF" ? "DEF" : idpPositions.includes(position) ? "IDP" : null;
+        const perTeamCategoryLimit = category === "IDP" ? Number(config.categoryLimits?.IDP) : Number(config.positionLimits[category]);
+        const limit = category ? perTeamCategoryLimit * (config.teams - 1) : Infinity;
         if (category && opponentCategoryCounts[category] >= limit) continue;
-        const positionLimit = Number(config.positionLimits[position] ?? 0) * 11;
+        const positionLimit = Number(config.positionLimits[position] ?? 0) * (config.teams - 1);
         if (positionLimit > 0 && (opponentPositionCounts[position] ?? 0) >= positionLimit) continue;
         opponentIds.push(String(player.yahooId));
         if (category) opponentCategoryCounts[category] += 1;
@@ -88,7 +91,7 @@ export function runRealShadowAcceptance({ engine, boardData, settingsSnapshot, s
       }
     }
     const positionCounts = counts(picks);
-    const idpCount = ["D", "LB", "CB", "S"].reduce((sum, position) => sum + (positionCounts[position] ?? 0), 0);
+    const idpCount = idpPositions.reduce((sum, position) => sum + (positionCounts[position] ?? 0), 0);
     const maxMs = Math.max(...latencies);
     const legal = decision.validateCompletedRoster(picks, config) && idpCount <= 3 && (positionCounts.K ?? 0) <= 1 && (positionCounts.DEF ?? 0) <= 1;
     seatResults.push({

@@ -2,7 +2,7 @@
   "use strict";
 
   root.SKRODZKaiYahooMockBoard = Object.freeze({
-  "generatedAt": "2026-08-28T19:49:24.350Z",
+  "generatedAt": "2026-08-28T20:09:49.987Z",
   "source": "free-source board: raw projections scored under exact league rules and equal-weighted per independent source family; market/history are timing context only; injuries use source-specific freshness",
   "scoringModel": "2-minute-drillers-2026",
   "scoringSchemaHash": "f17298c6fa6e7cf8b4c3ada1228e7f318b6d6282f313e7c616691dc948fc7934",

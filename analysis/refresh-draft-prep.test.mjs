@@ -83,16 +83,25 @@ test("discovers only the newest prior PASS board and reports rank, projection, i
   const root = await mkdtemp(join(tmpdir(), "draft-prep-v14-prior-test-"));
   const failed = join(root, "draft-prep-v14-20260828T120000000Z");
   const passed = join(root, "draft-prep-v13-20260828T110000000Z");
-  await Promise.all([mkdir(failed), mkdir(passed)]);
+  const olderV14 = join(root, "draft-prep-v14-20260828T090000000Z");
+  await Promise.all([mkdir(failed), mkdir(passed), mkdir(olderV14)]);
   await Promise.all([
     writeFile(join(failed, "nightly-health.json"), JSON.stringify({ status:"FAIL" })),
     writeFile(join(failed, "player-board-v14.json"), JSON.stringify({ players:[{ yahooId:"bad" }] })),
     writeFile(join(passed, "nightly-health.json"), JSON.stringify({ status:"PASS", generatedAt:"2026-08-28T11:00:00Z" })),
-    writeFile(join(passed, "player-board-v13.json"), JSON.stringify({ players:[{ yahooId:"1", name:"Player", position:"RB", overallRank:10, consensusPoints:200, bye:7, automaticEligible:true, manualEligible:true, validationStatus:"EXECUTABLE", injury:{ status:"CLEAR", draftAction:"CLEAR" } }] })),
+    writeFile(join(passed, "player-board-v13.json"), JSON.stringify({ players:[
+      { yahooId:"1", name:"Player", position:"RB", overallRank:10, consensusPoints:200, bye:7, automaticEligible:true, manualEligible:true, validationStatus:"EXECUTABLE", injury:{ status:"CLEAR", draftAction:"CLEAR" } },
+      { yahooId:"2", name:"Unranked", position:"WR", consensusPoints:null, bye:8, automaticEligible:false, manualEligible:false, validationStatus:"UNRANKED", injury:{ status:"CLEAR", draftAction:"CLEAR" } },
+    ] })),
+    writeFile(join(olderV14, "nightly-health.json"), JSON.stringify({ status:"PASS", generatedAt:"2026-08-28T09:00:00Z" })),
+    writeFile(join(olderV14, "player-board-v14.json"), JSON.stringify({ players:[{ yahooId:"old" }] })),
   ]);
   const prior = await discoverPreviousPassingBoard(root);
   assert.match(prior.receipt.boardPath, /player-board-v13\.json$/);
-  const board = { generatedAt:"2026-08-28T12:00:00Z", injuryWatchlist:[{ yahooId:"1", status:"QUESTIONABLE", draftAction:"REVIEW", primarySourceId:"team-report" }], players:[{ yahooId:"1", name:"Player", position:"RB", overallRank:7, consensusPoints:210, bye:8, automaticEligible:false, manualEligible:true, validationStatus:"INJURY_REVIEW", injury:{ status:"QUESTIONABLE", draftAction:"REVIEW" } }] };
+  const board = { generatedAt:"2026-08-28T12:00:00Z", injuryWatchlist:[{ yahooId:"1", status:"QUESTIONABLE", draftAction:"REVIEW", primarySourceId:"team-report" }], players:[
+    { yahooId:"1", name:"Player", position:"RB", overallRank:7, consensusPoints:210, bye:8, automaticEligible:false, manualEligible:true, validationStatus:"INJURY_REVIEW", injury:{ status:"QUESTIONABLE", draftAction:"REVIEW" } },
+    { yahooId:"2", name:"Unranked", position:"WR", consensusPoints:null, bye:8, automaticEligible:false, manualEligible:false, validationStatus:"UNRANKED", injury:{ status:"CLEAR", draftAction:"CLEAR" } },
+  ] };
   const movement = boardMovers(board, prior.board, prior.receipt);
   assert.equal(movement.changedPlayers, 1);
   assert.equal(movement.changes[0].rankDelta, 3);

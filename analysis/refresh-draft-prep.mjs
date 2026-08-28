@@ -236,9 +236,10 @@ function yahooSourceHealth(receipt, asOf, label) {
 }
 
 function playerState(player) {
+  const numberOrNull = (value) => value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value)) ? Number(value) : null;
   return {
-    rank:Number(player.overallRank),
-    projection:Number(player.consensusPoints),
+    rank:numberOrNull(player.overallRank),
+    projection:numberOrNull(player.consensusPoints),
     injuryStatus:String(player.injury?.status ?? "UNKNOWN"),
     draftAction:String(player.injury?.draftAction ?? "UNKNOWN"),
     automaticEligible:player.automaticEligible === true,
@@ -264,7 +265,7 @@ export function boardMovers(currentBoard, priorBoard, priorReceipt = null) {
     }
     const rankDelta = Number.isFinite(before.state.rank) && Number.isFinite(after.rank) ? before.state.rank - after.rank : null;
     const projectionDelta = Number.isFinite(before.state.projection) && Number.isFinite(after.projection) ? after.projection - before.state.projection : null;
-    const changed = rankDelta !== 0 || Math.abs(projectionDelta ?? 0) >= 0.01 ||
+    const changed = (rankDelta ?? 0) !== 0 || Math.abs(projectionDelta ?? 0) >= 0.01 ||
       before.state.injuryStatus !== after.injuryStatus || before.state.draftAction !== after.draftAction ||
       before.state.automaticEligible !== after.automaticEligible || before.state.manualEligible !== after.manualEligible ||
       before.state.validationStatus !== after.validationStatus || before.state.bye !== after.bye;
@@ -282,7 +283,7 @@ export function boardMovers(currentBoard, priorBoard, priorReceipt = null) {
 }
 
 export function renderBoardMovementMarkdown(board, movement) {
-  const top = (board.players ?? []).filter((player) => Number.isFinite(Number(player.overallRank))).sort((left, right) => left.overallRank - right.overallRank).slice(0, 30);
+  const top = (board.players ?? []).filter((player) => player.overallRank !== null && player.overallRank !== undefined && player.overallRank !== "" && Number.isFinite(Number(player.overallRank))).sort((left, right) => left.overallRank - right.overallRank).slice(0, 30);
   const playerById = new Map((board.players ?? []).map((player) => [String(player.yahooId ?? player.playerId), player]));
   const watch = (board.injuryWatchlist ?? []).slice(0, 30).map((entry) => ({
     ...entry,
@@ -302,7 +303,12 @@ export function renderBoardMovementMarkdown(board, movement) {
 
 export async function discoverPreviousPassingBoard(outputParent, excludedFinalPath = null) {
   const entries = await readdir(outputParent, { withFileTypes:true });
-  const candidates = entries.filter((entry) => entry.isDirectory() && /^draft-prep-v(?:11|13|14)-/.test(entry.name)).map((entry) => entry.name).sort().reverse();
+  const candidates = entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => ({ name:entry.name, timestamp:entry.name.match(/^draft-prep-v(?:11|13|14)-(\d{8}T\d{9}Z)$/)?.[1] ?? null }))
+    .filter((entry) => entry.timestamp)
+    .sort((left, right) => right.timestamp.localeCompare(left.timestamp))
+    .map((entry) => entry.name);
   for (const name of candidates) {
     const directory = join(outputParent, name);
     if (directory === excludedFinalPath) continue;

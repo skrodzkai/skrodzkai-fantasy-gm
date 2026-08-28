@@ -51,12 +51,13 @@
   }
 
   function boardHealth(boardData, now = Date.now()) {
-    const generatedAt = Date.parse(boardData?.generatedAt);
-    const ageHours = (now - generatedAt) / 3_600_000;
+    const receipt = readers.boardHealthReceipt(boardData, now);
+    const error = readers.boardHealthGate(boardData, now);
     return {
-      ready: Number.isFinite(ageHours) && ageHours >= 0 && ageHours <= 24 && boardData?.injuryCoverage?.complete === true && boardData?.byeCoverage?.complete === true,
-      generatedAt: boardData?.generatedAt ?? null,
-      ageHours: Number.isFinite(ageHours) ? ageHours : null,
+      ready:error === null,
+      error,
+      generatedAt:receipt.generatedAt,
+      ageHours:Number.isFinite(receipt.ageMs) ? receipt.ageMs / 3_600_000 : null,
     };
   }
 
@@ -93,7 +94,7 @@
       warnings,
       events:[{ at:new Date(now).toISOString(), kind:"SHADOW", detail:`team ${TEAM_ID}; roster ${roster ? `${roster.filled}/${roster.total}` : "unreadable"}; available rows ${players.length}` }],
       latestText:"No Yahoo action taken.", ladderState:"READ ONLY", pinned:false, pinText:"Overrides are disabled in REAL SHADOW.", pinLabel:"DISABLED",
-      controls:{ arm:{ disabled:true, text:"ARM DISABLED" }, halt:{ disabled:true, text:"NO EXECUTION" }, export:{ disabled:false, text:"COPY SHADOW STATE" } },
+      controls:{ arm:{ disabled:true, text:"ARM DISABLED" }, halt:{ disabled:true, text:"NO EXECUTION" }, export:{ disabled:true, text:"EXPORT DISABLED" } },
       shadow:{ settingsVerified:verified, boardHealth:health, roster, availablePlayerCount:players.length, urlTeamId:draftClient ? room.seat : TEAM_ID, draftSlot },
     };
   }
@@ -112,26 +113,36 @@
 
   async function boot(environment = root) {
     const settingsPage = environment.location.pathname === `/f1/${LEAGUE_ID}/settings`;
-    if (settingsPage) {
-      const observed = parseSettings(environment.document, environment.location);
-      if (observed.ready) await environment.chrome.storage.session.set({ [SETTINGS_KEY]:settingsReceipt(observed) });
-    }
     const stored = await environment.chrome.storage.session.get(SETTINGS_KEY);
-    let snapshot = buildSnapshot({ documentRef:environment.document, locationRef:environment.location, settings:stored[SETTINGS_KEY], boardData:environment.SKRODZKaiYahooMockBoard });
+    let receipt = stored[SETTINGS_KEY] ?? null;
+    const refreshSettingsReceipt = async () => {
+      if (!settingsPage) return;
+      const observed = parseSettings(environment.document, environment.location);
+      if (observed.ready) {
+        if (!validSettingsReceipt(receipt)) {
+          receipt = settingsReceipt(observed);
+          await environment.chrome.storage.session.set({ [SETTINGS_KEY]:receipt });
+        }
+      } else if (receipt) {
+        receipt = null;
+        await environment.chrome.storage.session.remove(SETTINGS_KEY);
+      }
+    };
+    await refreshSettingsReceipt();
+    let snapshot = buildSnapshot({ documentRef:environment.document, locationRef:environment.location, settings:receipt, boardData:environment.SKRODZKaiYahooMockBoard });
     mount(snapshot, environment.document);
     const publish = () => environment.chrome.runtime.sendMessage({ type:"state", role:"shadow", at:Date.now(), snapshot }).catch(() => undefined);
     publish();
+    let refreshing = false;
     const timer = environment.setInterval(() => {
-      snapshot = buildSnapshot({ documentRef:environment.document, locationRef:environment.location, settings:stored[SETTINGS_KEY], boardData:environment.SKRODZKaiYahooMockBoard });
-      mount(snapshot, environment.document);
-      publish();
+      if (refreshing) return;
+      refreshing = true;
+      void refreshSettingsReceipt().then(() => {
+        snapshot = buildSnapshot({ documentRef:environment.document, locationRef:environment.location, settings:receipt, boardData:environment.SKRODZKaiYahooMockBoard });
+        mount(snapshot, environment.document);
+        publish();
+      }).finally(() => { refreshing = false; });
     }, 1000);
-    environment.chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-      if (message?.type !== "command") return false;
-      if (message.command === "export") sendResponse({ ok:true, payload:JSON.stringify(snapshot, null, 2) });
-      else sendResponse({ ok:false, error:"real_shadow_read_only" });
-      return false;
-    });
     return { stop:() => environment.clearInterval(timer), getSnapshot:() => snapshot };
   }
 

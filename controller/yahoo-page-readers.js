@@ -91,8 +91,35 @@
     };
   }
 
+  function boardHealthReceipt(boardData, now = Date.now(), maximumAgeMs = 24 * 60 * 60 * 1000) {
+    const generatedAtMs = Date.parse(boardData?.generatedAt);
+    const ageMs = Number.isFinite(generatedAtMs) ? now - generatedAtMs : null;
+    return {
+      generatedAt:boardData?.generatedAt ?? null,
+      ageMs,
+      maximumAgeMs,
+      injuryCoverageComplete:boardData?.injuryCoverage?.complete === true,
+      injuryPlayersChecked:Number(boardData?.injuryCoverage?.checkedPlayers ?? 0),
+      injuryPlayersTotal:Number(boardData?.injuryCoverage?.expectedPlayers ?? boardData?.injuryCoverage?.totalPlayers ?? boardData?.injuryCoverage?.playersTotal ?? 0),
+      byeCoverageComplete:boardData?.byeCoverage?.complete === true,
+      byePlayersWithBye:Number(boardData?.byeCoverage?.playersWithBye ?? 0),
+      byePlayersTotal:Number(boardData?.byeCoverage?.playersTotal ?? 0),
+    };
+  }
+
+  function boardHealthGate(boardData, now = Date.now(), { maximumAgeMs = 24 * 60 * 60 * 1000, futureToleranceMs = 15 * 60 * 1000 } = {}) {
+    if (!boardData || typeof boardData !== "object") return "draft_board_missing";
+    const health = boardHealthReceipt(boardData, now, maximumAgeMs);
+    if (!Number.isFinite(health.ageMs)) return "draft_board_timestamp_missing";
+    if (health.ageMs < -futureToleranceMs) return "draft_board_timestamp_in_future";
+    if (health.ageMs > maximumAgeMs) return "draft_board_stale_over_24h";
+    if (!health.injuryCoverageComplete || health.injuryPlayersTotal <= 0 || health.injuryPlayersChecked !== health.injuryPlayersTotal || health.injuryPlayersTotal !== health.byePlayersTotal) return "draft_board_injury_coverage_incomplete";
+    if (!health.byeCoverageComplete || health.byePlayersTotal <= 0 || health.byePlayersWithBye !== health.byePlayersTotal) return "draft_board_bye_coverage_incomplete";
+    return null;
+  }
+
   root.SKRODZKaiYahooPageReaders = Object.freeze({
     normalize, textLines, parseRoom, parseRosterCount, parseRosterSlots, readOwnedTurn,
-    buttonText, isAutodraftActive, isVisible, blockers, readPlayerRow,
+    buttonText, isAutodraftActive, isVisible, blockers, readPlayerRow, boardHealthReceipt, boardHealthGate,
   });
 })(globalThis);

@@ -25,6 +25,7 @@ function boardData() {
 }
 
 test("passes isolated 19-round real-roster decision stress at snake seats 1, 6, and 12", () => {
+  assert.deepEqual([...engine.decision.IDP_POSITIONS], ["D", "LB", "CB", "S"]);
   const result = runRealShadowAcceptance({ engine, boardData:boardData(), settingsSnapshot:{ ready:true }, decisionBudgetMs:2_000 });
   assert.equal(result.status, "PASS");
   assert.equal(result.execution, false);
