@@ -284,7 +284,7 @@ test("exports runner and controller receipts using distinct draft-slot and Yahoo
 test("manifest has only the two public-mock surfaces plus the exact verified test league and no broad permissions", async () => {
   const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "0.10.0");
+  assert.equal(manifest.version, "0.11.0");
   assert.deepEqual(manifest.permissions, ["storage"]);
   assert.equal(manifest.host_permissions, undefined);
   assert.deepEqual(manifest.background, { service_worker: "extension/command-center-background.js" });
@@ -402,7 +402,7 @@ test("bridge locks every action when Chrome invalidates the extension context", 
 });
 
 test("version handshake requires the current installed background version", async () => {
-  assert.equal(await helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.10.0" }) } } }), "0.10.0");
+  assert.equal(await helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.11.0" }) } } }), "0.11.0");
   await assert.rejects(
     helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.7.5" }) } } }),
     /extension_version_mismatch/,
@@ -411,8 +411,16 @@ test("version handshake requires the current installed background version", asyn
     helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage() { throw new Error("invalidated"); } } } }),
     /extension_context_invalidated/,
   );
-  assert.equal(backgroundHelpers.extensionVersion({ runtime:{ getManifest:() => ({ version:"0.10.0" }) } }), "0.10.0");
+  assert.equal(backgroundHelpers.extensionVersion({ runtime:{ getManifest:() => ({ version:"0.11.0" }) } }), "0.11.0");
   assert.doesNotMatch(backgroundSource, /identify_arm_surface|tabs\.query/);
+});
+
+test("recommendation hotkeys resolve only during an owned-turn decision window", () => {
+  const recommendations = [{ yahooId:"1" }, { yahooId:"2" }, { yahooId:"3" }];
+  assert.equal(helpers.recommendationHotkeyPlayer({ context:{ ownedTurn:false }, recommendations }, { key:"1", target:{} }), null);
+  assert.equal(helpers.recommendationHotkeyPlayer({ context:{ ownedTurn:true }, recommendations }, { key:"2", target:{} })?.yahooId, "2");
+  assert.equal(helpers.recommendationHotkeyPlayer({ context:{ ownedTurn:true }, recommendations }, { key:"1", target:{ tagName:"INPUT" } }), null);
+  assert.match(popupSource, /state\?\.context\?\.ownedTurn===true/);
 });
 
 test("war-room roster placement respects exact and flex slots rather than pick order", () => {

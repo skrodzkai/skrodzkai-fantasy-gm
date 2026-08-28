@@ -63,7 +63,7 @@ function validPayload() {
     empty:!entry.player,
   }));
   return {
-    extensionVersion: "0.10.0",
+    extensionVersion: "0.11.0",
     roomId,
     seat: draftSlot,
     urlSeat,
@@ -71,7 +71,7 @@ function validPayload() {
     status: { runId: runnerRunId, roomId, seat: draftSlot, urlSeat, state: "completed", picks: picks.map((pick) => ({ ...pick })) },
     runnerReceipts,
     controllerReceipts,
-    extensionReceipts: [{ at:iso(20_500), version:"0.10.0", roomId, seat:draftSlot, urlSeat, runId:runnerRunId, kind:"final_roster_readback", valid:true, finalRosterSlots }],
+    extensionReceipts: [{ at:iso(20_500), version:"0.11.0", roomId, seat:draftSlot, urlSeat, runId:runnerRunId, kind:"final_roster_readback", valid:true, finalRosterSlots }],
   };
 }
 
@@ -87,6 +87,33 @@ test("accepts one exact completed TEST draft without inventing counterfactuals",
 test("locks when a recorded decision does not reproduce the chosen player", () => {
   const payload = validPayload();
   payload.runnerReceipts.find((entry) => entry.kind === "runner_turn_resolved").decision.positionLeaders[0].player.yahooId = "99999";
+  const result = evaluateTestDraftExport(payload);
+  assert.equal(result.status, "LOCKED");
+  assert.ok(result.errors.includes("round_1_decision_replay_mismatch"));
+});
+
+test("acceptance replays a runtime fallback against static board rank rather than decision score", () => {
+  const payload = validPayload();
+  const decision = payload.runnerReceipts.find((entry) => entry.kind === "runner_turn_resolved").decision;
+  decision.fallbackUsed = true;
+  decision.positionLeaders = [
+    { player:{ yahooId:decision.chosenYahooId, rank:1 }, eligible:true, adjustedScore:5 },
+    { player:{ yahooId:"49998", rank:2 }, eligible:true, adjustedScore:500 },
+  ];
+  const result = evaluateTestDraftExport(payload);
+  assert.equal(result.status, "PASS", JSON.stringify(result.errors));
+  assert.equal(result.fallbackPicks, 1);
+  assert.equal(result.picks[0].replayMode, "STATIC_BOARD_FALLBACK");
+});
+
+test("fallback replay locks when the first static target does not match the confirmed choice", () => {
+  const payload = validPayload();
+  const decision = payload.runnerReceipts.find((entry) => entry.kind === "runner_turn_resolved").decision;
+  decision.fallbackUsed = true;
+  decision.positionLeaders = [
+    { player:{ yahooId:"49998", rank:1 }, eligible:true, adjustedScore:5 },
+    { player:{ yahooId:decision.chosenYahooId, rank:2 }, eligible:true, adjustedScore:500 },
+  ];
   const result = evaluateTestDraftExport(payload);
   assert.equal(result.status, "LOCKED");
   assert.ok(result.errors.includes("round_1_decision_replay_mismatch"));

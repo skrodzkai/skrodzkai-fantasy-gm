@@ -76,7 +76,7 @@ function compactSpecialist(player, positionOverride = null) {
 }
 
 function specialistHealthClear(player) {
-  return player.injury == null || (player.injury.draftAction === "CLEAR" && player.injury.conflict !== true);
+  return player.injury != null && player.injury.draftAction === "CLEAR" && player.injury.conflict !== true;
 }
 
 function specialistUsable(player) {
@@ -84,7 +84,8 @@ function specialistUsable(player) {
 }
 
 export function extensionBoardFromV5(board) {
-  const offense = (board?.boards?.offense ?? [])
+  const offenseSource = board?.boards?.offense ?? [];
+  const offense = offenseSource
     .filter((player) => player.manualEligible !== false)
     .filter((player) => finite(player.vorp))
     .map(compactOffense);
@@ -127,6 +128,26 @@ export function extensionBoardFromV5(board) {
   const players = [...playerByYahooId.values()];
   const byeEligible = players.filter((player) => player.automaticEligible || player.manualEligible);
   const playersWithBye = byeEligible.filter((player) => Number.isInteger(Number(player.bye)) && Number(player.bye) >= 1 && Number(player.bye) <= 17).length;
+  const sourceByYahooId = new Map();
+  for (const player of [offenseSource, ...Object.values(specialists)].flat()) {
+    const yahooId = String(player?.yahooId ?? "");
+    if (!yahooId) continue;
+    const existing = sourceByYahooId.get(yahooId);
+    if (!existing?.injury || player.injury) sourceByYahooId.set(yahooId, player);
+  }
+  const injuryChecked = byeEligible.filter((player) => {
+    const injury = sourceByYahooId.get(player.yahooId)?.injury;
+    return injury != null && Array.isArray(injury.evidence) && injury.evidence.some((entry) => entry?.fresh === true);
+  });
+  const injuryCheckedIds = new Set(injuryChecked.map((player) => player.yahooId));
+  const injuryCoverage = {
+    complete: byeEligible.length > 0 && injuryChecked.length === byeEligible.length,
+    checkedPlayers: injuryChecked.length,
+    expectedPlayers: byeEligible.length,
+    uncheckedPlayerIds: byeEligible.filter((player) => !injuryCheckedIds.has(player.yahooId)).map((player) => player.yahooId),
+    denominator: "automatic-or-manual-eligible players, including DEF",
+    sourceCoverage: board.injuryCoverage ?? null,
+  };
   const byeCoverage = {
     complete: byeEligible.length > 0 && playersWithBye === byeEligible.length,
     playersWithBye,
@@ -140,7 +161,7 @@ export function extensionBoardFromV5(board) {
     scoringSchemaHash: board.scoringSchemaHash ?? null,
     replacementBySlot: board.replacementBySlot ?? null,
     survivalCalibration: board.survivalCalibration ?? null,
-    injuryCoverage: board.injuryCoverage ?? null,
+    injuryCoverage,
     injuryFreshnessPolicy: board.injuryFreshnessPolicy ?? null,
     byeCoverage,
     players,

@@ -349,6 +349,17 @@ test("position runs change acquisition probability, never football projection or
   assert.ok(runEntry.pAvailableNext < calmEntry.pAvailableNext);
 });
 
+test("live position pressure comes from exact Yahoo IDs removed between owned turns and excludes our pick", () => {
+  const previous = [
+    player("WR", 1, 10), player("WR", 2, 11), player("WR", 3, 12), player("WR", 4, 13),
+    player("RB", 5, 14), player("RB", 6, 15),
+  ];
+  const current = [previous[3], previous[5]];
+  const pressure = helpers.runPressureFromAvailability(previous, current, [previous[0]]);
+  assert.equal(pressure.WR, 0.5);
+  assert.equal(pressure.RB, 0);
+});
+
 test("unified BPA plus one-turn alternatives returns five legal exact-ID targets", () => {
   const board = boardForConfig(mockConfig);
   const decision = helpers.buildDecisionLadder({
