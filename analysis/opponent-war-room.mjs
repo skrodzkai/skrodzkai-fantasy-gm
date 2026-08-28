@@ -48,19 +48,20 @@ export function buildOpponentWarRoom({
         throw new Error(`missing opponent probabilities for ${managerId || "unknown manager"}`);
       }
       return {
-        seat: Number(team.seat),
+        seat: Number.isInteger(Number(team.seat)) ? Number(team.seat) : null,
         teamId: team.teamId == null ? null : String(team.teamId),
         teamName: String(team.teamName ?? ""),
         managerId,
-        evidencePicks: counts.get(managerId) ?? 0,
-        model: hasProfile ? "HELD_OUT_CLEARED_MANAGER_TIEBREAK" : "ROOM_PHASE_FALLBACK",
+        sampleCount: counts.get(managerId) ?? 0,
+        modelLabel: hasProfile ? "HELD_OUT_CLEARED_MANAGER_DESCRIPTION" : "ROOM_PHASE_DESCRIPTION",
+        phaseDistribution: Object.fromEntries(PHASES.map((phase) => [phase, phaseProbabilities[phase]])),
         topByPhase: Object.fromEntries(PHASES.map((phase) => [phase, topPositions(phaseProbabilities[phase])])),
       };
     })
-    .sort((left, right) => left.seat - right.seat);
+    .sort((left, right) => (left.seat ?? 99) - (right.seat ?? 99) || left.teamId?.localeCompare(right.teamId ?? "") || 0);
   return Object.freeze({
     calibration: calibration.calibration,
-    policy: "position pressure may break a close value tier only; never predict an exact player",
+    policy: "display-only descriptive phase distributions; never alter BPA, VONA, survival, or Yahoo execution",
     cards,
   });
 }

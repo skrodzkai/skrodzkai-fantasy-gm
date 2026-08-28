@@ -74,6 +74,17 @@ test("validates offense only with two fresh independent projection families", ()
   assert.equal(board.players[0].validationStatus, "EXECUTABLE");
 });
 
+test("rejects identity or injury feeds as projection evidence", () => {
+  assert.throws(() => fixture({ projectionSnapshots: [{
+    manifest: {
+      snapshotId: "sleeper-test", sourceId: "sleeper", sourceFamily: "sleeper",
+      sourceAsOf: "2026-08-22T11:00:00Z", retrievedAt: "2026-08-22T11:10:00Z",
+      contentSha256: "c".repeat(64), gamesBasis: "identity", projectionPeriod: "2026", licenseUseNote: "test",
+    },
+    rows: [],
+  }] }), /cannot count as raw-stat projection evidence/);
+});
+
 test("K and DEF use current Yahoo preseason rank rather than projection order", () => {
   const board = fixture({
     baselineRows: [

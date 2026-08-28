@@ -39,7 +39,7 @@
         if (message.snapshot) update["skz.observerSnapshot"] = message.snapshot;
         if (!fresh(stored["skz.runnerSeenAt"]) && !fresh(stored["skz.armSeenAt"])) {
           update["skz.heartbeatAt"] = at;
-          update["skz.activeRole"] = "observer";
+          update["skz.activeRole"] = role === "shadow" ? "shadow" : "observer";
           const snapshot = message.snapshot ?? stored["skz.observerSnapshot"];
           if (snapshot) update["skz.snapshot"] = snapshot;
         }
@@ -78,6 +78,7 @@
   }
 
   function register(chromeApi) {
+    void chromeApi.storage.session.setAccessLevel({ accessLevel:"TRUSTED_AND_UNTRUSTED_CONTEXTS" });
     const router = createStateRouter(chromeApi.storage.session);
     let stateQueue = Promise.resolve();
     const enqueue = (task) => { stateQueue = stateQueue.then(task, task); return stateQueue; };
@@ -123,6 +124,6 @@
     });
   }
 
-  root.SKRODZKaiCommandCenterBackground = { HEARTBEAT_TTL_MS, createStateRouter, extensionVersion };
+  root.SKRODZKaiCommandCenterBackground = { HEARTBEAT_TTL_MS, createStateRouter, extensionVersion, register };
   if (root.chrome) register(root.chrome);
 })(globalThis);

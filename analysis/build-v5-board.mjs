@@ -241,6 +241,9 @@ export function assembleV5Board({
   const projectionHealth = validateSourceSnapshot(projectionSnapshots.map((snapshot) => snapshot.manifest), asOf);
   const externalProjectionSources = projectionSnapshots.map((snapshot, index) => {
     const policy = registryById.get(snapshot.manifest.sourceId);
+    if (policy?.evidenceKind !== "raw_stat_projection") {
+      throw new Error(`${snapshot.manifest.sourceId} cannot count as raw-stat projection evidence`);
+    }
     return {
       sourceId: snapshot.manifest.sourceId,
       family: policy.sourceFamily,
@@ -427,7 +430,7 @@ export function assembleV5Board({
     injuryCoverage: injuryBoard.coverage,
     injuryFreshnessPolicy: injuryBoard.freshnessPolicyHours,
     projectionModel: {
-      sourceNormalization: "equal weight per independent source family after local league scoring; market and history never count as projection evidence",
+      sourceNormalization: "Yahoo league projection plus independent raw-stat projection families scored locally; market, identity, injury, and history never count as projection evidence",
       fantasyWeeks: "1-17",
       weeklyBonuses: "weekly events; never season-thresholded",
       outcomeIntervals: "calibrated inputs only; source disagreement remains diagnostic",

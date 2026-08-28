@@ -6,6 +6,7 @@ import vm from "node:vm";
 const source = await readFile(new URL("./yahoo-mock-extension.js", import.meta.url), "utf8");
 const boardSource = await readFile(new URL("./yahoo-mock-board.js", import.meta.url), "utf8");
 const controllerSource = await readFile(new URL("../controller/yahoo-draft-controller.js", import.meta.url), "utf8");
+const readersSource = await readFile(new URL("../controller/yahoo-page-readers.js", import.meta.url), "utf8");
 const runnerSource = await readFile(new URL("../controller/yahoo-mock-runner.js", import.meta.url), "utf8");
 const popupSource = await readFile(new URL("./command-center.js", import.meta.url), "utf8");
 const popupCss = await readFile(new URL("./command-center.css", import.meta.url), "utf8");
@@ -18,6 +19,7 @@ const context = {
 };
 context.globalThis = context;
 vm.createContext(context);
+vm.runInContext(readersSource, context);
 vm.runInContext(runnerSource, context);
 vm.runInContext(source, context);
 vm.runInContext(boardSource, context);
@@ -286,7 +288,7 @@ test("exports runner and controller receipts using distinct draft-slot and Yahoo
 test("manifest has only the two public-mock surfaces plus the exact verified test league and no broad permissions", async () => {
   const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "0.11.0");
+  assert.equal(manifest.version, "0.12.0");
   assert.deepEqual(manifest.permissions, ["storage"]);
   assert.equal(manifest.host_permissions, undefined);
   assert.deepEqual(manifest.background, { service_worker: "extension/command-center-background.js" });
@@ -307,11 +309,28 @@ test("manifest has only the two public-mock surfaces plus the exact verified tes
   ]);
   assert.equal(manifest.content_scripts[0].world, undefined);
   assert.deepEqual(manifest.content_scripts[0].js, [
+    "controller/yahoo-page-readers.js",
     "controller/yahoo-draft-controller.js",
     "controller/yahoo-mock-runner.js",
     "extension/yahoo-mock-board.js",
     "extension/yahoo-mock-extension.js",
   ]);
+  assert.deepEqual(manifest.content_scripts[1].matches, [
+    "https://football.fantasysports.yahoo.com/f1/420010/settings*",
+    "https://football.fantasysports.yahoo.com/f1/420010/draft*",
+    "https://football.fantasysports.yahoo.com/f1/420010/7",
+    "https://football.fantasysports.yahoo.com/f1/420010/7/*",
+    "https://football.fantasysports.yahoo.com/draftclient/f1/420010/7",
+    "https://football.fantasysports.yahoo.com/draftclient/f1/420010/7/*",
+  ]);
+  assert.deepEqual(manifest.content_scripts[1].js, [
+    "controller/yahoo-page-readers.js",
+    "extension/yahoo-mock-board.js",
+    "extension/yahoo-real-shadow.js",
+  ]);
+  assert.equal(manifest.content_scripts[1].js.includes("controller/yahoo-mock-runner.js"), false);
+  assert.equal(manifest.content_scripts[1].js.includes("controller/yahoo-draft-controller.js"), false);
+  assert.equal(manifest.content_scripts[1].js.includes("extension/yahoo-mock-extension.js"), false);
 });
 
 test("popup command center uses the canonical blue SKRODZKai app language and a local relay", () => {
@@ -355,6 +374,38 @@ test("command-center relay can arm an exact live TEST runner when no overview ar
   const router = backgroundHelpers.createStateRouter(session, () => 100);
   await router.handleState({ role:"runner", at:100, snapshot:{ label:"READY TO ARM TEST" } }, { tab:{ id:22 } });
   assert.equal(await router.targetTab("arm"), 22);
+});
+
+test("REAL SHADOW can never receive mutation commands or overwrite the live board", async () => {
+  const session = memorySession({ "skz.board":[{ yahooId:"test" }] });
+  let now = 100;
+  const router = backgroundHelpers.createStateRouter(session, () => now);
+  await router.handleState({ role:"shadow", at:now, snapshot:{ mode:"REAL SHADOW", label:"READ ONLY" }, board:[{ yahooId:"real" }] }, { tab:{ id:33 } });
+  assert.deepEqual(session.value("skz.board"), [{ yahooId:"test" }]);
+  assert.equal(await router.targetTab("arm"), null);
+  assert.equal(await router.targetTab("pin"), null);
+  assert.equal(await router.targetTab("kill"), null);
+  assert.equal(await router.targetTab("export"), null);
+  now = 101;
+  await router.handleState({ role:"runner", at:now, snapshot:{ label:"RUNNING" }, board:[{ yahooId:"test-2" }] }, { tab:{ id:22 } });
+  now = 102;
+  await router.handleState({ role:"shadow", at:now, snapshot:{ mode:"REAL SHADOW", label:"READ ONLY" } }, { tab:{ id:33 } });
+  assert.equal(session.value("skz.snapshot").label, "RUNNING");
+  assert.equal(await router.targetTab("export"), 22);
+});
+
+test("background exposes session storage to isolated content scripts", () => {
+  const access = [];
+  const session = { ...memorySession(), setAccessLevel(options) { access.push(options); return Promise.resolve(); } };
+  const chromeApi = {
+    storage:{ session },
+    runtime:{ getManifest:() => ({ version:"0.12.0" }), getURL:(value) => value, onMessage:{ addListener() {} } },
+    windows:{ onRemoved:{ addListener() {} }, update:async () => {}, create:async () => ({ id:1 }) },
+    tabs:{ onRemoved:{ addListener() {} }, sendMessage:async () => ({ ok:true }) },
+  };
+  backgroundHelpers.register(chromeApi);
+  assert.equal(access.length, 1);
+  assert.equal(access[0].accessLevel, "TRUSTED_AND_UNTRUSTED_CONTEXTS");
 });
 
 test("command-center bridge sends content changes separately from its stable heartbeat", () => {
@@ -404,7 +455,7 @@ test("bridge locks every action when Chrome invalidates the extension context", 
 });
 
 test("version handshake requires the current installed background version", async () => {
-  assert.equal(await helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.11.0" }) } } }), "0.11.0");
+  assert.equal(await helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.12.0" }) } } }), "0.12.0");
   await assert.rejects(
     helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.7.5" }) } } }),
     /extension_version_mismatch/,
@@ -413,7 +464,7 @@ test("version handshake requires the current installed background version", asyn
     helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage() { throw new Error("invalidated"); } } } }),
     /extension_context_invalidated/,
   );
-  assert.equal(backgroundHelpers.extensionVersion({ runtime:{ getManifest:() => ({ version:"0.11.0" }) } }), "0.11.0");
+  assert.equal(backgroundHelpers.extensionVersion({ runtime:{ getManifest:() => ({ version:"0.12.0" }) } }), "0.12.0");
   assert.doesNotMatch(backgroundSource, /identify_arm_surface|tabs\.query/);
 });
 

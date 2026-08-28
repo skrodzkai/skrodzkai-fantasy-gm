@@ -5,6 +5,7 @@
   const GLOBAL_KEY = "__skrodzkaiYahooMockRunnerV1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-runner-receipts-v1";
   const OFFENSE = ["QB", "RB", "WR", "TE"];
+  const IDP_POSITIONS = Object.freeze(["D", "LB", "CB", "S"]);
   const TEST_SPECIALISTS = ["K", "DEF", "D", "LB", "CB", "S"];
   const FILTER_LABELS = Object.freeze({
     K: "Kickers",
@@ -64,6 +65,7 @@
       ]),
       offenseStarters: Object.freeze({ QB: 1, RB: 2, WR: 3, TE: 1, FLEX: 1 }),
       positionLimits: Object.freeze({ QB: 2, RB: 6, WR: 7, TE: 3, K: 1, DEF: 1, D: 3, LB: 3, CB: 3, S: 3 }),
+      categoryLimits: Object.freeze({ IDP: 3 }),
       qualification: "unverified-real-room",
     }),
   });
@@ -153,13 +155,13 @@
     if (occupied.some((entry) => !pickById.has(entry.yahooId))) return false;
     if (expectedPicks.some((pick) => !occupied.some((entry) => entry.yahooId === String(pick.yahooId)))) return false;
 
-    for (const slot of ["D", "LB", "CB", "S"]) {
+    for (const slot of IDP_POSITIONS) {
       const entry = observed.find((candidate) => candidate.slot === slot);
       const pick = pickById.get(entry?.yahooId ?? "");
       if (!entry || entry.empty || !normalizedRosterSlotAccepts(playerEligibility(pick), slot)) return false;
     }
     const specialistIds = new Set(expectedPicks
-      .filter((pick) => ["D", "LB", "CB", "S"].includes(normalize(pick.position)))
+      .filter((pick) => IDP_POSITIONS.includes(normalize(pick.position)))
       .map((pick) => String(pick.yahooId)));
     return !observed.some((entry) => entry.slot === "BN" && specialistIds.has(entry.yahooId));
   }
@@ -504,7 +506,7 @@
     const position = normalize(player.position);
     const limit = config.positionLimits[position];
     if (limit == null || (counts[position] ?? 0) >= limit) return false;
-    const category = position === "K" ? "K" : position === "DEF" ? "DEF" : ["D", "LB", "CB", "S"].includes(position) ? "IDP" : null;
+    const category = position === "K" ? "K" : position === "DEF" ? "DEF" : IDP_POSITIONS.includes(position) ? "IDP" : null;
     if (!category) return true;
     const categorySlots = starterSlots(config).filter((slot) => category === "IDP"
       ? ["D", "DB", "LB", "CB", "S"].includes(slot)
@@ -512,8 +514,10 @@
     );
     const categoryPicks = Array.from(picks ?? []).filter((pick) => {
       const drafted = normalize(pick.position);
-      return category === "IDP" ? ["D", "LB", "CB", "S"].includes(drafted) : drafted === category;
+      return category === "IDP" ? IDP_POSITIONS.includes(drafted) : drafted === category;
     });
+    const categoryLimit = Number(config.categoryLimits?.[category]);
+    if (Number.isFinite(categoryLimit) && categoryPicks.length >= categoryLimit) return false;
     const before = maximumAssignment(categoryPicks, categorySlots, () => 1).count;
     const after = maximumAssignment([...categoryPicks, player], categorySlots, () => 1).count;
     return after === before + 1;
@@ -1005,10 +1009,12 @@
 
   function validateCompletedRoster(picks, config = CONFIGS.public_mock_15) {
     const counts = positionCounts(picks);
+    const idpCount = IDP_POSITIONS.reduce((sum, position) => sum + (counts[position] ?? 0), 0);
     return (
       picks.length === config.rounds &&
       maximumFilledStarterSlots(picks, config) === starterSlots(config).length &&
-      Object.entries(config.positionLimits).every(([position, limit]) => (counts[position] ?? 0) <= limit)
+      Object.entries(config.positionLimits).every(([position, limit]) => (counts[position] ?? 0) <= limit) &&
+      (config.categoryLimits?.IDP == null || idpCount <= config.categoryLimits.IDP)
     );
   }
 
@@ -1488,11 +1494,25 @@
     return api;
   }
 
+  const decision = Object.freeze({
+    IDP_POSITIONS,
+    validateBoard,
+    buildDecisionLadder,
+    scoreCandidates,
+    applyManualOverride,
+    canCompleteRoster,
+    validateCompletedRoster,
+    allocateRosterSlots,
+    overallPick,
+    turnWindow,
+  });
+
   root.SKRODZKaiYahooMockRunner = {
     version: VERSION,
     configs: CONFIGS,
     create,
     receiptKey: RECEIPT_KEY,
+    decision,
     _test: {
       normalizeSlots,
       sameSlots,

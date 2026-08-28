@@ -1,7 +1,7 @@
 (function installYahooMockExtension(root) {
   "use strict";
 
-  const VERSION = "0.11.0";
+  const VERSION = "0.12.0";
   const GLOBAL_KEY = "__skrodzkaiYahooMockExtensionV1";
   const PREFLIGHT_KEY = "skrodzkai-yahoo-mock-extension-preflight-v1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-extension-receipts-v1";
@@ -93,30 +93,11 @@
   }
 
   function boardHealthReceipt(boardData, now = Date.now()) {
-    const generatedAtMs = Date.parse(boardData?.generatedAt);
-    const ageMs = Number.isFinite(generatedAtMs) ? now - generatedAtMs : null;
-    return {
-      generatedAt: boardData?.generatedAt ?? null,
-      ageMs,
-      maximumAgeMs: BOARD_MAX_AGE_MS,
-      injuryCoverageComplete: boardData?.injuryCoverage?.complete === true,
-      injuryPlayersChecked: Number(boardData?.injuryCoverage?.checkedPlayers ?? 0),
-      injuryPlayersTotal: Number(boardData?.injuryCoverage?.expectedPlayers ?? boardData?.injuryCoverage?.totalPlayers ?? boardData?.injuryCoverage?.playersTotal ?? 0),
-      byeCoverageComplete: boardData?.byeCoverage?.complete === true,
-      byePlayersWithBye: Number(boardData?.byeCoverage?.playersWithBye ?? 0),
-      byePlayersTotal: Number(boardData?.byeCoverage?.playersTotal ?? 0),
-    };
+    return root.SKRODZKaiYahooPageReaders.boardHealthReceipt(boardData, now, BOARD_MAX_AGE_MS);
   }
 
   function boardHealthGate(boardData, now = Date.now()) {
-    if (!boardData || typeof boardData !== "object") return "draft_board_missing";
-    const health = boardHealthReceipt(boardData, now);
-    if (!Number.isFinite(health.ageMs)) return "draft_board_timestamp_missing";
-    if (health.ageMs < -BOARD_FUTURE_TOLERANCE_MS) return "draft_board_timestamp_in_future";
-    if (health.ageMs > BOARD_MAX_AGE_MS) return "draft_board_stale_over_24h";
-    if (!health.injuryCoverageComplete || health.injuryPlayersTotal <= 0 || health.injuryPlayersChecked !== health.injuryPlayersTotal || health.injuryPlayersTotal !== health.byePlayersTotal) return "draft_board_injury_coverage_incomplete";
-    if (!health.byeCoverageComplete || health.byePlayersTotal <= 0 || health.byePlayersWithBye !== health.byePlayersTotal) return "draft_board_bye_coverage_incomplete";
-    return null;
+    return root.SKRODZKaiYahooPageReaders.boardHealthGate(boardData, now, { maximumAgeMs:BOARD_MAX_AGE_MS, futureToleranceMs:BOARD_FUTURE_TOLERANCE_MS });
   }
 
   function requiredTestFilterLabels(environment = root) {
