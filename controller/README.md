@@ -107,10 +107,17 @@ click path:
 - `weekly-roster-utility.mjs` creates the 17-week availability and scoring
   profiles used by the live optimizer while keeping source disagreement
   separate from calibrated player outcome intervals.
-- `test-draft-acceptance.mjs` grades one exported TEST-league draft against the
-  existing runner and roster contracts. It replays recorded choices and marks
-  counterfactual scoring unavailable when the compact receipt did not preserve
-  unchosen outcomes.
+- `test-draft-acceptance.mjs` keeps two explicit, non-interchangeable receipt
+  contracts. The default `retained_test_19_idp` contract grades the retained
+  TEST league and requires Yahoo's independent final-roster readback. The
+  `public_mock_15` contract grades only public-room execution evidence, reports
+  `PUBLIC_MOCK_PASS`, and records that no final-roster page exists on that
+  surface. Public evidence never substitutes for retained TEST or real-room
+  acceptance. Both contracts replay recorded choices and mark counterfactual
+  scoring unavailable when compact receipts did not preserve unchosen outcomes.
+  Downstream retained-TEST gates must require both `status === "PASS"` and
+  `contract === "retained_test_19_idp"`; the generic `valid` field and process
+  exit code also cover public-only evidence and are not sufficient.
 - `build-v5-readiness-report.mjs` and `run-v5-rehearsals.mjs` produce the
   sanitized history, specialist-survival, 12-seat roster, concentration, and
   chaos receipts stored outside the repository.
