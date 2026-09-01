@@ -53,15 +53,15 @@ There is no position-by-round script, RB/WR floor, specialist phase, QB/TE timin
 
 The compact per-turn receipt records the snake window, marginal utility, expected next-turn utility, cost of waiting, continuous availability probability, chosen Yahoo ID, and five target IDs. A recompute over 100 ms falls back to the static verified value order. The on-clock chooser exposes the same three leading targets plus searchable exact-ID selection, keeps all five baseline fallbacks, and starts the page-local click controller synchronously. The exact-row click contract and non-navigating failure behavior remain unchanged.
 
-The exact `test_league_19_idp` lane is bound to retained team 12 in Yahoo league 18599. It separates the URL team ID from the snake draft slot and requires the observed 12-team, 19-slot roster. K, DEF, D, LB, CB, and S compete in the same value pool as offense while roster feasibility guarantees the final legal shape. Dual-role offense/IDP players remain manual-only until Yahoo scoring credit is verified. The separate `real_league_19_idp` configuration remains unverified and non-executable; real league 420010 is hard-disabled.
+The exact `test_league_19_idp` lane is bound to `SKRODZKai`, team 3 in Yahoo League Two (`542830`). It separates the URL team ID from the snake draft slot and binds the actual 10–12 team field observed when Yahoo publishes the order. The 19-slot shape is QB, three WR, two RB, TE, two W/R/T, K, DEF, two generic D, and six bench slots. K, DEF, D, LB, CB, and S compete in the same value pool as offense while roster feasibility guarantees two IDP starters and no IDP bench stash. Dual-role offense/IDP players remain manual-only until Yahoo scoring credit is verified. The separate `real_league_19_idp` configuration remains non-executable; real league 420010 is hard-disabled.
 
 The runner exposes a one-way `halt()` kill switch. A halted runner cannot resume; a new, explicitly armed runner is required.
 
 ## Local Chrome extension
 
-The repository root is also a dependency-free Manifest V3 extension. Load the repository directory as an unpacked extension in Chrome. It requests no general extension permissions and runs MOCK/TEST execution only on Yahoo's public mock waiting room and exact league-18599 surfaces. Version `0.12.0` adds an isolated read-only observer on exact real-league 420010 / team 7 surfaces; that content-script set contains no runner, controller, or mutation path. After every unpacked-extension reload, hard-refresh every open Yahoo tab. The installed background version is verified at boot, arm, and immediately before TEST runner start; stale or mismatched contexts disable every command and require a hard refresh.
+The repository root is also a dependency-free Manifest V3 extension. Load the repository directory as an unpacked extension in Chrome. It requests no general extension permissions and runs MOCK/TEST execution only on Yahoo's public mock waiting room and exact League Two surfaces. Version `0.13.0` keeps an isolated read-only observer on exact real-league 420010 / team 7 surfaces; that content-script set contains no runner, controller, or mutation path. After every unpacked-extension reload, hard-refresh every open Yahoo tab. The installed background version is verified at boot, arm, and immediately before TEST runner start; stale or mismatched contexts disable every command and require a hard refresh.
 
-The expandable `SKRODZKai` command center arms public mocks from `/f1/mock_waiting`. The test lane first parses `/f1/18599/settings` for the exact 12-team, 19-active-slot plus three-IR roster and 75-second clock. It can then arm from `/f1/18599/draft` only after Yahoo publishes the snake slot and the page still exposes `SKRODZKai` team 12 plus the exact league summary. Each tab-scoped token binds the observed room, URL team, snake slot, team count, and roster shape. The draftclient refuses to start without the matching token, and league 420010 is excluded at the manifest and runtime layers.
+The expandable `SKRODZKai` command center arms public mocks from `/f1/mock_waiting`. The test lane first parses `/f1/542830/settings` for the exact 19-active-slot plus three-IR roster, 12-team maximum, half-PPR scoring, and 60-second clock. It can then arm from `/f1/542830/draft` only after Yahoo publishes the snake slot and the page still exposes `SKRODZKai` team 3 plus the actual 10–12 team league summary. Each tab-scoped token binds the observed room, URL team, snake slot, actual team count, and roster shape. The draftclient cannot create a replacement token: it refuses to start without the matching draft-home token, and league 420010 is excluded at the manifest and runtime layers.
 
 On the matching draftclient page the extension:
 
@@ -71,11 +71,11 @@ On the matching draftclient page the extension:
 4. Displays the owned roster, resolved decision ladder, exact snake horizon, live availability pressure, warnings, and room-scoped receipts in one page-attached operations surface.
 5. Accepts a conditional next-pick pin only before the owned turn. The pin binds the exact room, snake slot, and next round; the runner applies it only when the Yahoo ID is still available and position-legal. Otherwise it records the rejection and immediately executes the unchanged five-target baseline ladder.
 6. Exposes a one-way `HALT` control and a JSON `EXPORT` containing room-scoped extension, runner, and controller receipts. Export requires an explicit owner attestation: `NONE`, or `INTERVENTION:` plus a brief description when the owner prevented or replaced a Yahoo automatic selection. Missing or intervention evidence locks TEST acceptance.
-7. On the exact TEST team page, reads Yahoo's rendered starter and bench rows and records one final-roster receipt. Acceptance requires dedicated D/LB/CB/S occupancy, the drafted generic-D player in `D`, and no drafted IDP starter on `BN`.
+7. On the exact TEST team page, reads Yahoo's rendered starter and bench rows and records one final-roster receipt. Acceptance requires both generic D slots to contain Yahoo-eligible IDPs and no drafted IDP on `BN`.
 
 The TEST-room opponent panel uses only the observed snake window and the live decision ladder. It explicitly withholds 2 Minute Drillers manager-history projections because those owner identities do not participate in the retained test league.
 
-The extension permits public mocks and the exact retained test league only. The real 19-round IDP configuration remains non-executable, and this package grants no real-league authority.
+The extension permits public mocks and exact League Two TEST execution only. The real 19-round IDP configuration remains non-executable, and this package grants no real-league authority.
 
 ## Draft-night analysis
 
@@ -108,15 +108,15 @@ click path:
   profiles used by the live optimizer while keeping source disagreement
   separate from calibrated player outcome intervals.
 - `test-draft-acceptance.mjs` keeps two explicit, non-interchangeable receipt
-  contracts. The default `retained_test_19_idp` contract grades the retained
-  TEST league and requires Yahoo's independent final-roster readback. The
+  contracts. The default `league_two_test_19_idp` contract grades League Two
+  TEST execution and requires Yahoo's independent final-roster readback. The
   `public_mock_15` contract grades only public-room execution evidence, reports
   `PUBLIC_MOCK_PASS`, and records that no final-roster page exists on that
   surface. Public evidence never substitutes for retained TEST or real-room
   acceptance. Both contracts replay recorded choices and mark counterfactual
   scoring unavailable when compact receipts did not preserve unchosen outcomes.
-  Downstream retained-TEST gates must require both `status === "PASS"` and
-  `contract === "retained_test_19_idp"`; the generic `valid` field and process
+  Downstream League Two TEST gates must require both `status === "PASS"` and
+  `contract === "league_two_test_19_idp"`; the generic `valid` field and process
   exit code also cover public-only evidence and are not sufficient.
 - `build-v5-readiness-report.mjs` and `run-v5-rehearsals.mjs` produce the
   sanitized history, specialist-survival, 12-seat roster, concentration, and

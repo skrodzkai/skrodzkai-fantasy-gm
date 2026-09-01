@@ -85,8 +85,10 @@ async function waitFor(predicate, timeoutMs = 1000) {
 
 test("keeps the real league unqualified and hard-separate from TEST", () => {
   assert.equal(api.configs.real_league_19_idp.qualification, "unverified-real-room");
-  assert.equal(testConfig.leagueId, "18599");
-  assert.equal(testConfig.urlTeamId, 12);
+  assert.equal(testConfig.leagueId, "542830");
+  assert.equal(testConfig.urlTeamId, 3);
+  assert.equal(testConfig.minimumTeams, 10);
+  assert.equal(testConfig.maximumTeams, 12);
   assert.equal(testConfig.rounds, 19);
   assert.equal(api.configs.real_league_19_idp.positionLimits.K, 1);
   const board = boardForConfig(testConfig);
@@ -213,8 +215,8 @@ test("the two Travis Hunter Yahoo identities cannot occupy the same roster", () 
   ]);
   assert.equal(helpers.canCompleteRoster({ player:defense, picks:[offense], config:testConfig }), false);
   const override = helpers.applyManualOverride({
-    stage:{ roomId:"18599", seat:6, expectedRound:2, targets:[{ yahooId:"99002" }] },
-    roomId:"18599", seat:6, round:2, board:[offense, defense], availablePlayers:[defense],
+    stage:{ roomId:"542830", seat:6, expectedRound:2, targets:[{ yahooId:"99002" }] },
+    roomId:"542830", seat:6, round:2, board:[offense, defense], availablePlayers:[defense],
     baselineTargets:Array.from({ length:5 }, (_, index) => ({ yahooId:`fallback-${index}` })),
     picks:[offense], config:testConfig,
   });
@@ -485,18 +487,17 @@ test("manual override may choose a visible dual-role player while automatic BPA 
 test("observed TEST roster validation rejects a specialist displaced to the bench", () => {
   const picks = [
     player("QB",1,1), player("RB",1,2), player("RB",2,3), player("WR",1,4), player("WR",2,5), player("WR",3,6), player("TE",1,7),
-    player("K",1,8), player("DEF",1,9), player("D",1,10), player("LB",1,11), player("CB",1,12), player("S",1,13),
-    player("RB",3,14), player("RB",4,15), player("WR",4,16), player("WR",5,17), player("TE",2,18), player("QB",2,19),
+    player("RB",3,8), player("WR",4,9), player("K",1,10), player("DEF",1,11), player("D",1,12), player("LB",1,13),
+    player("QB",2,14), player("RB",4,15), player("WR",5,16), player("TE",2,17), player("RB",5,18), player("WR",6,19),
   ];
   const clean = helpers.allocateRosterSlots(picks, testConfig.rosterSlots).map((entry) => ({ slot:entry.slot, yahooId:entry.player?.yahooId ?? null, empty:!entry.player }));
   assert.equal(helpers.validateObservedTestRoster(clean, picks), true);
   const bad = clean.map((entry) => ({ ...entry }));
   const d = bad.find((entry) => entry.slot === "D");
-  const s = bad.find((entry) => entry.slot === "S");
   const benchSlot = bad.find((entry) => entry.slot === "BN");
-  d.yahooId = picks.find((pick) => pick.position === "S").yahooId;
-  s.yahooId = null; s.empty = true;
-  benchSlot.yahooId = picks.find((pick) => pick.position === "D").yahooId; benchSlot.empty = false;
+  const displaced = d.yahooId;
+  d.yahooId = benchSlot.yahooId;
+  benchSlot.yahooId = displaced;
   assert.equal(helpers.validateObservedTestRoster(bad, picks), false);
 });
 

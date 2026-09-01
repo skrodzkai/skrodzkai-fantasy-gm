@@ -128,6 +128,22 @@ test("Yahoo injury markers block automatic use even when projection evidence is 
   assert.equal(board.players[0].injury.conflict, true);
 });
 
+test("uses the baseline Sleeper ID when the current Sleeper record omits its Yahoo ID", () => {
+  const board = fixture({
+    baselineRows: [{
+      yahoo_id:"", sleeper_id:"s1", name:"Quarterback", team:"BUF", position:"QB",
+      payload_json:JSON.stringify({ eligible:["QB"] }),
+    }],
+    sleeperPlayers: {
+      s1: { player_id:"s1", yahoo_id:null, status:"Active", injury_status:"Questionable", injury_body_part:"Knee" },
+    },
+  });
+  assert.equal(board.players[0].injury.status, "QUESTIONABLE");
+  assert.equal(board.players[0].injury.evidence.some((entry) => entry.sourceId === "sleeper-player-map"), true);
+  assert.equal(board.players[0].injury.bodyParts.includes("Knee"), true);
+  assert.equal(board.players[0].automaticEligible, false);
+});
+
 test("filter membership preserves dual-role Yahoo eligibility evidence", () => {
   const board = fixture({
     specialistSnapshot: {

@@ -154,7 +154,7 @@ test("board health is a single fail-closed arm gate with visible freshness and c
   assert.deepEqual(rendered.find((entry) => entry.render)?.render, ["bad", "BOARD HEALTH LOCKED", "draft_board_timestamp_in_future"]);
   assert.deepEqual(events.at(-1), ["arm refused", "draft_board_timestamp_in_future"]);
   assert.equal((source.match(/kind: "mock_arm_refused"/g) ?? []).length, 1);
-  assert.equal((source.match(/kind: "test_arm_refused"/g) ?? []).length, 2);
+  assert.equal((source.match(/kind: "test_arm_refused"/g) ?? []).length, 1);
   assert.match(source, /const preflightError = validateDraftPreflight\([\s\S]*kind: "extension_locked"[\s\S]*failure: preflightError/);
   const warnings = helpers.buildUiWarnings({
     room:{ roomId:"9391926", seat:7 }, armRecord:null, autodraft:false, roster:{ total:15 }, board:board.players, boardData:board, expectedRosterTotal:15, now,
@@ -164,35 +164,45 @@ test("board health is a single fail-closed arm gate with visible freshness and c
   assert.ok(warnings.some((warning) => /Bye coverage: COMPLETE · 872\/872/.test(warning.text)));
 });
 
-test("binds the verified test league to team 12 while keeping the snake draft slot separate", () => {
+test("binds League Two team 3 while keeping its live field size and snake slot separate", () => {
   const settingsDocument = {
     body: {
-      innerText: "League Name:\tHORSE COLLAR #2\nDraft Type:\tLive Standard Draft\nMax Teams:\t12\nLive Draft Pick Time:\t1 Minute, 15 Seconds\nPassing Touchdowns\t4\nReceptions Yahoo Default\t1\t0.5\nRoster\u00a0Positions:\tQB, WR, WR, RB, RB, W/R, W/R/T, K, DEF, D, LB, CB, S, BN, BN, BN, BN, BN, BN, IR, IR, IR",
+      innerText: "League Name:\tLeague Two\nDraft Type:\tLive Standard Draft\nMax Teams:\t12\nLive Draft Pick Time:\t1 Minute\nPassing Touchdowns\t4\nReceptions Yahoo Default\t1\t0.5\nRoster\u00a0Positions:\tQB, WR, WR, WR, RB, RB, TE, W/R/T, W/R/T, K, DEF, D, D, BN, BN, BN, BN, BN, BN, IR, IR, IR",
     },
   };
-  const settingsSnapshot = helpers.parseTestSettings(settingsDocument, { pathname: "/f1/18599/settings" });
+  const settingsSnapshot = helpers.parseTestSettings(settingsDocument, { pathname: "/f1/542830/settings" });
   assert.equal(settingsSnapshot.ready, true);
+  assert.equal(
+    helpers.parseTestSettings({ body: { innerText: settingsDocument.body.innerText.replace("1 Minute\n", "1 Minute, 15 Seconds\n") } }, { pathname: "/f1/542830/settings" }).errors.includes("verified_test_clock_mismatch"),
+    true,
+  );
   const settingsReceipt = helpers.makeTestSettingsReceipt(settingsSnapshot, 1_000);
   assert.equal(helpers.validTestSettingsReceipt(settingsReceipt, 1_001), true);
   const document = {
     body: {
-      innerText: "SKRODZKai\nHORSE COLLAR #2 · 12 Teams · 19 Rounds · 1 minute 15 seconds\nYour Draft Position: 4th",
+      innerText: "SKRODZKai\nLeague Two · 10 Teams · 19 Rounds · 1 minute\nYour Draft Position: 4th",
     },
   };
-  const location = { pathname: "/f1/18599/draft" };
+  const location = { pathname: "/f1/542830/draft" };
   const snapshot = helpers.parseTestDraftHome(document, location, settingsReceipt, 1_001);
   assert.equal(snapshot.ready, true);
-  assert.equal(snapshot.urlSeat, 12);
+  assert.equal(snapshot.urlSeat, 3);
+  assert.equal(snapshot.teamCount, 10);
   assert.equal(snapshot.seat, 4);
+  assert.equal(
+    helpers.parseTestDraftHome({ body: { innerText: document.body.innerText.replace("1 minute\n", "1 minute 15 seconds\n") } }, location, settingsReceipt, 1_001).errors.includes("verified_test_summary_mismatch"),
+    true,
+  );
   assert.equal(helpers.parseTestDraftHome({ body: { innerText: document.body.innerText.replace("SKRODZKai", "Chef Joe") } }, location, settingsReceipt, 1_001).ready, false);
   assert.deepEqual([...snapshot.rosterSlots], [...helpers.testRosterSlots]);
   const board = healthyBoard();
   const preflight = helpers.makeTestPreflight(snapshot, 1_000, board);
   assert.equal(preflight.seat, 4);
-  assert.equal(preflight.urlSeat, 12);
+  assert.equal(preflight.urlSeat, 3);
+  assert.equal(preflight.observedTeamCount, 10);
   assert.equal(preflight.expiresAt, 14_401_000);
-  assert.equal(helpers.validateDraftPreflight(preflight, { roomId: "18599", seat: 12 }, 1_001, board), null);
-  assert.equal(helpers.validateDraftPreflight(preflight, { roomId: "18599", seat: 4 }, 1_001, board), "draft_room_or_url_team_changed");
+  assert.equal(helpers.validateDraftPreflight(preflight, { roomId: "542830", seat: 3 }, 1_001, board), null);
+  assert.equal(helpers.validateDraftPreflight(preflight, { roomId: "542830", seat: 4 }, 1_001, board), "draft_room_or_url_team_changed");
   assert.equal(
     helpers.parseTestDraftHome({ body: { innerText: document.body.innerText.replace("Your Draft Position: 4th", "Draft position pending") } }, location, settingsReceipt, 1_001).ready,
     false,
@@ -204,35 +214,11 @@ test("binds the verified test league to team 12 while keeping the snake draft sl
   );
 });
 
-test("arms the exact TEST draftclient from its live slot while preserving Yahoo team identity", () => {
-  const options = ["All Positions", "Kickers", "Team Defenses", "Defensive Players", "Linebackers", "Defensive Backs"]
-    .map((textContent) => ({ textContent, value: textContent }));
-  const select = { options };
-  const document = {
-    body: { innerText: "YAHOO FANTASY FOOTBALL DRAFT\nHORSE COLLAR #2\nYOUR TURN - 3RD PICK\nYOUR TURN - 22ND PICK\nYOUR TEAM (0/19)" },
-    querySelectorAll(selector) { return selector === "select" ? [select] : []; },
-  };
-  const settingsReceipt = {
-    roomId: "18599",
-    observedTeamCount: 12,
-    observedRosterSlots: [...helpers.testRosterSlots],
-    observedFullRosterSlots: [...helpers.testRosterSlots, "IR", "IR", "IR"],
-    expiresAt: 10_000,
-  };
-  const snapshot = helpers.parseTestDraftClient(document, { pathname: "/draftclient/f1/18599/12" }, settingsReceipt, 1_000);
-  assert.equal(snapshot.ready, true);
-  assert.equal(snapshot.seat, 3);
-  assert.equal(snapshot.urlSeat, 12);
-  assert.equal(snapshot.rosterSlots.length, 19);
-  assert.deepEqual([...snapshot.missingFilters], []);
+test("requires the draft-home arm token before TEST draftclient execution", () => {
   assert.deepEqual([...helpers.requiredTestFilterLabels()], ["All Positions", "Kickers", "Team Defenses", "Defensive Players", "Linebackers", "Defensive Backs"]);
-  assert.equal(helpers.makeTestPreflight(snapshot, 1_000, healthyBoard()).seat, 3);
-  assert.equal(helpers.parseTestDraftClient(document, { pathname: "/draftclient/f1/420010/12" }, settingsReceipt, 1_000).ready, false);
-  assert.equal(helpers.parseTestDraftClient({ ...document, body: { innerText: document.body.innerText.replace("0/19", "1/19") } }, { pathname: "/draftclient/f1/18599/12" }, settingsReceipt, 1_000).ready, false);
-  const sevenPicked = helpers.parseTestDraftClient({ ...document, body: { innerText: document.body.innerText.replace("0/19", "7/19").replace("YOUR TURN - 3RD PICK", "WAITING FOR PICK") } }, { pathname: "/draftclient/f1/18599/12" }, settingsReceipt, 1_000);
-  assert.equal(sevenPicked.ready, false);
-  assert.equal(sevenPicked.errors.includes("test_draft_slot_missing"), true);
-  assert.equal(sevenPicked.errors.includes("test_draft_roster_not_empty"), true);
+  assert.equal(source.includes("test_armed_from_draftclient"), false);
+  assert.equal(source.includes("parseTestDraftClient"), false);
+  assert.match(source, /verified_test_draft_home_arm_required/);
 });
 
 test("attaches current Yahoo defense IDs only to exact ranked teams", () => {
@@ -288,7 +274,7 @@ test("exports runner and controller receipts using distinct draft-slot and Yahoo
 test("manifest has only the two public-mock surfaces plus the exact verified test league and no broad permissions", async () => {
   const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "0.12.0");
+  assert.equal(manifest.version, "0.13.0");
   assert.deepEqual(manifest.permissions, ["storage"]);
   assert.equal(manifest.host_permissions, undefined);
   assert.deepEqual(manifest.background, { service_worker: "extension/command-center-background.js" });
@@ -298,10 +284,10 @@ test("manifest has only the two public-mock surfaces plus the exact verified tes
   }]);
   assert.deepEqual(manifest.content_scripts[0].matches, [
     "https://football.fantasysports.yahoo.com/f1/mock_waiting*",
-    "https://football.fantasysports.yahoo.com/f1/18599/settings*",
-    "https://football.fantasysports.yahoo.com/f1/18599/draft*",
-    "https://football.fantasysports.yahoo.com/f1/18599/12",
-    "https://football.fantasysports.yahoo.com/f1/18599/12/*",
+    "https://football.fantasysports.yahoo.com/f1/542830/settings*",
+    "https://football.fantasysports.yahoo.com/f1/542830/draft*",
+    "https://football.fantasysports.yahoo.com/f1/542830/3",
+    "https://football.fantasysports.yahoo.com/f1/542830/3/*",
     "https://football.fantasysports.yahoo.com/draftclient/f1/*",
   ]);
   assert.deepEqual(manifest.content_scripts[0].exclude_matches, [
@@ -399,7 +385,7 @@ test("background exposes session storage to isolated content scripts", () => {
   const session = { ...memorySession(), setAccessLevel(options) { access.push(options); return Promise.resolve(); } };
   const chromeApi = {
     storage:{ session },
-    runtime:{ getManifest:() => ({ version:"0.12.0" }), getURL:(value) => value, onMessage:{ addListener() {} } },
+    runtime:{ getManifest:() => ({ version:"0.13.0" }), getURL:(value) => value, onMessage:{ addListener() {} } },
     windows:{ onRemoved:{ addListener() {} }, update:async () => {}, create:async () => ({ id:1 }) },
     tabs:{ onRemoved:{ addListener() {} }, sendMessage:async () => ({ ok:true }) },
   };
@@ -416,7 +402,7 @@ test("command-center bridge sends content changes separately from its stable hea
   helpers.attachCommandCenterBridge({ chrome:{ runtime }, location:{ pathname:"/draftclient/f1/123/4" }, setInterval(callback) { tick = callback; return 1; }, clearInterval() {} }, rail);
   assert.equal(helpers.commandCenterRole("/draftclient/f1/123/4"), "runner");
   assert.equal(helpers.commandCenterRole("/f1/mock_waiting"), "arm-owner");
-  assert.equal(helpers.commandCenterRole("/f1/18599/12"), "arm-owner");
+  assert.equal(helpers.commandCenterRole("/f1/542830/3"), "arm-owner");
   assert.equal(messages[0].role, "runner");
   assert.equal(messages[0].snapshot.label, "RUNNING");
   tick();
@@ -440,7 +426,7 @@ test("bridge locks every action when Chrome invalidates the extension context", 
   };
   const environment = {
     chrome:{ runtime },
-    location:{ pathname:"/draftclient/f1/18599/12" },
+    location:{ pathname:"/draftclient/f1/542830/3" },
     localStorage:{ getItem:() => null, setItem() {} },
     setInterval() { throw new Error("invalid bridge must not start a timer"); },
     clearInterval() {},
@@ -455,7 +441,7 @@ test("bridge locks every action when Chrome invalidates the extension context", 
 });
 
 test("version handshake requires the current installed background version", async () => {
-  assert.equal(await helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.12.0" }) } } }), "0.12.0");
+  assert.equal(await helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.13.0" }) } } }), "0.13.0");
   await assert.rejects(
     helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.7.5" }) } } }),
     /extension_version_mismatch/,
@@ -464,7 +450,7 @@ test("version handshake requires the current installed background version", asyn
     helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage() { throw new Error("invalidated"); } } } }),
     /extension_context_invalidated/,
   );
-  assert.equal(backgroundHelpers.extensionVersion({ runtime:{ getManifest:() => ({ version:"0.12.0" }) } }), "0.12.0");
+  assert.equal(backgroundHelpers.extensionVersion({ runtime:{ getManifest:() => ({ version:"0.13.0" }) } }), "0.13.0");
   assert.doesNotMatch(backgroundSource, /identify_arm_surface|tabs\.query/);
 });
 
@@ -484,11 +470,13 @@ test("war-room roster placement respects exact and flex slots rather than pick o
   const roster = helpers.buildUiRoster([
     { yahooId: "r", name: "Runner", position: "RB" },
     { yahooId: "q", name: "Quarterback", position: "QB" },
-    { yahooId: "t", name: "Tight End", position: "TE" },
+    { yahooId: "t1", name: "Tight End One", position: "TE" },
+    { yahooId: "t2", name: "Tight End Two", position: "TE" },
   ], helpers.testRosterSlots);
   assert.equal(roster.find((entry) => entry.slot === "QB")?.player?.yahooId, "q");
   assert.equal(roster.find((entry) => entry.slot === "RB")?.player?.yahooId, "r");
-  assert.equal(roster.find((entry) => entry.slot === "W/R/T")?.player?.yahooId, "t");
+  assert.equal(roster.find((entry) => entry.slot === "TE")?.player?.yahooId, "t1");
+  assert.equal(roster.find((entry) => entry.slot === "W/R/T")?.player?.yahooId, "t2");
 });
 
 test("war-room roster placement reproduces Yahoo generic-D priority", () => {
@@ -498,9 +486,9 @@ test("war-room roster placement reproduces Yahoo generic-D priority", () => {
     { yahooId:"lb", name:"Linebacker", position:"LB" },
     { yahooId:"cb", name:"Corner", position:"CB" },
   ], helpers.testRosterSlots);
-  assert.equal(roster.find((entry) => entry.slot === "D")?.player?.yahooId, "s");
-  assert.equal(roster.find((entry) => entry.slot === "S")?.player, null);
-  assert.equal(roster.find((entry) => entry.slot === "BN")?.player?.yahooId, "d");
+  const defensiveSlots = roster.filter((entry) => entry.slot === "D");
+  assert.deepEqual(Array.from(defensiveSlots, (entry) => entry.player?.yahooId), ["s", "d"]);
+  assert.deepEqual(Array.from(roster.filter((entry) => entry.slot === "BN" && entry.player), (entry) => entry.player.yahooId), ["lb", "cb"]);
 });
 
 test("final Yahoo roster parser records the observed slot and exact drafted player", () => {
@@ -515,12 +503,12 @@ test("final Yahoo roster parser records the observed slot and exact drafted play
   });
   const observed = helpers.parseFinalRosterDocument({ querySelectorAll:() => [
     row("D", "Xavier Watts", "41883"),
-    row("S", "", "", ["empty-position"]),
+    row("D", "", "", ["empty-position"]),
     row("BN", "Aidan Hutchinson", "33957"),
   ] }, picks);
   assert.deepEqual(JSON.parse(JSON.stringify(observed)), [
     { slot:"D", yahooId:"41883", name:"Xavier Watts", empty:false },
-    { slot:"S", yahooId:null, name:null, empty:true },
+    { slot:"D", yahooId:null, name:null, empty:true },
     { slot:"BN", yahooId:"33957", name:"Aidan Hutchinson", empty:false },
   ]);
 });
