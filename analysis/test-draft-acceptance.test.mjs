@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { evaluateTestDraftExport } from "./test-draft-acceptance.mjs";
+import { evaluatePublicMockExport, evaluateTestDraftExport } from "./test-draft-acceptance.mjs";
 import "../controller/yahoo-mock-runner.js";
 
 const TEST_ALLOCATOR = globalThis.SKRODZKaiYahooMockRunner._test.allocateRosterSlots;
@@ -9,6 +9,7 @@ const RUNNER_HELPERS = globalThis.SKRODZKaiYahooMockRunner._test;
 const TEST_CONFIG = globalThis.SKRODZKaiYahooMockRunner.configs.test_league_19_idp;
 
 const POSITIONS = ["QB", "QB", "RB", "RB", "RB", "RB", "RB", "WR", "WR", "WR", "WR", "WR", "TE", "K", "DEF", "D", "LB", "CB", "S"];
+const PUBLIC_POSITIONS = ["RB", "WR", "QB", "WR", "RB", "DEF", "TE", "WR", "K", "RB", "WR", "WR", "WR", "RB", "RB"];
 
 function iso(offsetMs) {
   return new Date(Date.parse("2026-08-23T19:00:00Z") + offsetMs).toISOString();
@@ -77,6 +78,62 @@ function validPayload() {
   };
 }
 
+function validPublicPayload() {
+  const roomId = "10085328";
+  const seat = 4;
+  const runId = "public-runner-1";
+  const rosterSlots = ["QB", "WR", "WR", "RB", "RB", "TE", "W/R/T", "K", "DEF", "BN", "BN", "BN", "BN", "BN", "BN"];
+  const runnerReceipts = [{
+    at:iso(0), runId, roomId, seat, urlSeat:seat, kind:"runner_started",
+    configName:"public_mock_15", expectedRoomId:roomId, expectedSeat:seat, expectedUrlSeat:seat,
+    observedTeamCount:12, observedRosterSlots:rosterSlots,
+  }];
+  const controllerReceipts = [];
+  const picks = [];
+  for (let index = 0; index < PUBLIC_POSITIONS.length; index += 1) {
+    const round = index + 1;
+    const yahooId = String(60_000 + round);
+    const turn = `R${round}P${overallPick(round, seat)}`;
+    const pick = { yahooId, name:`Public Player ${round}`, position:PUBLIC_POSITIONS[index], team:"BUF", turn, detectionToClickMs:80, clickToConfirmationMs:120 };
+    picks.push(pick);
+    runnerReceipts.push({
+      at:iso(round * 1_000 - 200), runId, roomId, seat, urlSeat:seat, kind:"runner_turn_resolved", turn,
+      decision:{
+        chosenYahooId:yahooId,
+        targetYahooIds:[yahooId, String(70_000 + round), String(80_000 + round), String(90_000 + round), String(100_000 + round)],
+        positionLeaders:[{ player:{ yahooId, rank:round }, eligible:true, adjustedScore:10 }],
+        ...(round === 2 ? { manualOverride:{ status:"applied", chosenYahooId:yahooId } } : {}),
+      },
+    });
+    runnerReceipts.push({ at:iso(round * 1_000), runId, roomId, seat, urlSeat:seat, kind:"runner_pick_confirmed", round, pick });
+    const sessionId = `public-controller-${round}`;
+    controllerReceipts.push({
+      at:iso(round * 1_000 - 100), sessionId, roomId, seat, kind:"draft_click", turn, yahooId,
+      rosterBefore:{ filled:index, total:15 }, detectionToClickMs:80,
+    });
+    controllerReceipts.push({
+      at:iso(round * 1_000), sessionId, roomId, seat, kind:"pick_confirmed", turn, yahooId,
+      rosterBefore:{ filled:index, total:15 }, rosterAfter:{ filled:round, total:15 }, clickToConfirmationMs:120,
+    });
+  }
+  const counts = PUBLIC_POSITIONS.reduce((result, position) => ({ ...result, [position]:(result[position] ?? 0) + 1 }), {});
+  runnerReceipts.push({ at:iso(16_000), runId, roomId, seat, urlSeat:seat, kind:"runner_completed", picks:15, counts });
+  return {
+    extensionVersion:"0.12.0",
+    roomId,
+    seat,
+    urlSeat:seat,
+    operatorAttestation:{ status:"none", source:"operator_attested", attestedAt:iso(17_000), interventions:[] },
+    status:{ runId, roomId, seat, urlSeat:seat, state:"completed", picks:picks.map((pick) => ({ ...pick })) },
+    runnerReceipts,
+    controllerReceipts,
+    extensionReceipts:[
+      { at:iso(1_000), version:"0.12.0", roomId, seat, kind:"manual_pin_staged", expectedRound:2, targetYahooIds:[picks[1].yahooId] },
+      { at:iso(2_000), version:"0.12.0", roomId, seat, kind:"manual_pin_applied", expectedRound:2, chosenYahooId:picks[1].yahooId, failure:null },
+    ],
+  };
+}
+
 function runtimeFallbackDecision() {
   const positions = ["RB", "WR", "QB", "TE", "RB", "WR"];
   const ids = ["40001", "50001", "60001", "70001", "80001", "90001"];
@@ -112,6 +169,70 @@ test("accepts one exact completed TEST draft without inventing counterfactuals",
   assert.equal(result.maxObservedLatencyMs, 200);
   assert.equal(result.counterfactualScoring, "not_available_from_compact_receipts");
   assert.equal(result.picks.every((pick) => pick.decisionReplay === "MATCH" && pick.counterfactual === "not_available"), true);
+});
+
+test("accepts a public mock only under the explicit public contract", () => {
+  const result = evaluatePublicMockExport(validPublicPayload(), { requireManualOverride:true });
+  assert.equal(result.status, "PUBLIC_MOCK_PASS", JSON.stringify(result.errors));
+  assert.equal(result.acceptanceScope, "PUBLIC_MOCK_EXECUTION_ONLY");
+  assert.equal(result.confirmedPicks, 15);
+  assert.equal(result.finalRosterReadback, "NOT_AVAILABLE_ON_PUBLIC_MOCK_SURFACE");
+  assert.deepEqual(result.manualOverride, { required:true, claimedDecisions:1, stagedReceipts:1, appliedReceipts:1 });
+});
+
+test("retained TEST acceptance stays strict for a public mock export", () => {
+  const result = evaluateTestDraftExport(validPublicPayload());
+  assert.equal(result.status, "LOCKED");
+  assert.ok(result.errors.includes("test_room_identity_mismatch"));
+  assert.ok(result.errors.includes("final_roster_readback_missing"));
+});
+
+test("public mock acceptance requires the requested manual-override evidence", () => {
+  const payload = validPublicPayload();
+  payload.extensionReceipts = [];
+  const result = evaluatePublicMockExport(payload, { requireManualOverride:true });
+  assert.equal(result.status, "LOCKED");
+  assert.ok(result.errors.includes("manual_override_staged_receipt_contract_failed"));
+  assert.ok(result.errors.includes("manual_override_applied_receipt_contract_failed"));
+});
+
+test("public mock acceptance derives receipt requirements from an applied override claim", () => {
+  const payload = validPublicPayload();
+  payload.extensionReceipts = [];
+  const result = evaluatePublicMockExport(payload);
+  assert.equal(result.status, "LOCKED");
+  assert.ok(result.errors.includes("manual_override_staged_receipt_contract_failed"));
+  assert.ok(result.errors.includes("manual_override_applied_receipt_contract_failed"));
+});
+
+test("public mock acceptance does not bind stale manual receipts to the selected run", () => {
+  const payload = validPublicPayload();
+  for (const receipt of payload.extensionReceipts) receipt.at = iso(-1_000);
+  const result = evaluatePublicMockExport(payload);
+  assert.equal(result.status, "LOCKED");
+  assert.ok(result.errors.includes("manual_override_staged_receipt_contract_failed"));
+  assert.ok(result.errors.includes("manual_override_applied_receipt_contract_failed"));
+});
+
+test("public mock acceptance rejects fabricated final-roster readback evidence", () => {
+  const payload = validPublicPayload();
+  payload.extensionReceipts.push({
+    at:iso(16_500), version:"0.12.0", roomId:payload.roomId, seat:payload.seat,
+    runId:"different-run", kind:"final_roster_readback", valid:true, finalRosterSlots:[],
+  });
+  const result = evaluatePublicMockExport(payload, { requireManualOverride:true });
+  assert.equal(result.status, "LOCKED");
+  assert.ok(result.errors.includes("unexpected_public_mock_final_roster_readback"));
+});
+
+test("public mock acceptance rejects the real league identity", () => {
+  const payload = validPublicPayload();
+  payload.roomId = "420010";
+  for (const receipt of [...payload.runnerReceipts, ...payload.controllerReceipts, ...payload.extensionReceipts]) receipt.roomId = "420010";
+  payload.status.roomId = "420010";
+  const result = evaluatePublicMockExport(payload, { requireManualOverride:true });
+  assert.equal(result.status, "LOCKED");
+  assert.ok(result.errors.includes("public_mock_room_identity_invalid"));
 });
 
 test("locks when a recorded decision does not reproduce the chosen player", () => {

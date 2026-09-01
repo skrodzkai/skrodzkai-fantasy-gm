@@ -5,10 +5,30 @@ import { rehearseExactRoster } from "./draft-readiness.mjs";
 import "../controller/yahoo-mock-runner.js";
 
 const TEST_CONFIG = globalThis.SKRODZKaiYahooMockRunner.configs.test_league_19_idp;
-const TEST_VALIDATOR = globalThis.SKRODZKaiYahooMockRunner._test.validateCompletedRoster;
+const PUBLIC_CONFIG = globalThis.SKRODZKaiYahooMockRunner.configs.public_mock_15;
+const ROSTER_VALIDATOR = globalThis.SKRODZKaiYahooMockRunner._test.validateCompletedRoster;
 const TEST_OVERALL_PICK = globalThis.SKRODZKaiYahooMockRunner._test.overallPick;
 const TEST_SAME_SLOTS = globalThis.SKRODZKaiYahooMockRunner._test.sameSlots;
 const TEST_OBSERVED_ROSTER_VALIDATOR = globalThis.SKRODZKaiYahooMockRunner._test.validateObservedTestRoster;
+
+const CONTRACTS = Object.freeze({
+  retained_test_19_idp: Object.freeze({
+    name: "retained_test_19_idp",
+    config: TEST_CONFIG,
+    expectedRoomId: String(TEST_CONFIG.leagueId),
+    expectedUrlSeat: Number(TEST_CONFIG.urlTeamId),
+    requireFinalRosterReadback: true,
+    passStatus: "PASS",
+    scope: "RETAINED_TEST_ACCEPTANCE",
+  }),
+  public_mock_15: Object.freeze({
+    name: "public_mock_15",
+    config: PUBLIC_CONFIG,
+    requireFinalRosterReadback: false,
+    passStatus: "PUBLIC_MOCK_PASS",
+    scope: "PUBLIC_MOCK_EXECUTION_ONLY",
+  }),
+});
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -29,6 +49,32 @@ function sameCounts(left, right) {
   if (!left || typeof left !== "object" || !right || typeof right !== "object") return false;
   const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
   return [...keys].every((key) => Number(left[key] ?? 0) === Number(right[key] ?? 0));
+}
+
+function auditPublicMockPicks(picks, latencyBudgetMs) {
+  const errors = [];
+  const seen = new Set();
+  for (let index = 0; index < picks.length; index += 1) {
+    const round = index + 1;
+    const pick = picks[index];
+    if (!pick.yahooId || seen.has(pick.yahooId)) errors.push(`round_${round}_duplicate_or_missing_player`);
+    else seen.add(pick.yahooId);
+    if (!Number.isFinite(pick.latencyMs) || pick.latencyMs < 0 || pick.latencyMs > latencyBudgetMs) {
+      errors.push(`round_${round}_latency_budget_missed`);
+    }
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+function acceptanceContract(payload, requested = "retained_test_19_idp") {
+  const base = CONTRACTS[requested];
+  if (!base) throw new Error(`unknown acceptance contract: ${requested}`);
+  if (base.name !== "public_mock_15") return base;
+  return {
+    ...base,
+    expectedRoomId: String(payload?.roomId ?? ""),
+    expectedUrlSeat: Number(payload?.seat),
+  };
 }
 
 function normalizedReceiptCounts(counts) {
@@ -118,22 +164,32 @@ function controllerPairs(receipts, startedAt, completedAt) {
     );
 }
 
-export function evaluateTestDraftExport(payload, options = {}) {
-  const expectedRoomId = String(TEST_CONFIG.leagueId);
-  const expectedUrlSeat = Number(TEST_CONFIG.urlTeamId);
+function evaluateDraftExport(payload, options = {}) {
+  const contract = acceptanceContract(payload, options.contract);
+  const config = contract.config;
+  const expectedRoomId = contract.expectedRoomId;
+  const expectedUrlSeat = contract.expectedUrlSeat;
+  const publicMock = contract.name === "public_mock_15";
   const latencyBudgetMs = Number(options.latencyBudgetMs ?? 15_000);
   const errors = [];
   const runnerReceipts = asArray(payload?.runnerReceipts);
   const controllerReceipts = asArray(payload?.controllerReceipts);
   const extensionReceipts = asArray(payload?.extensionReceipts);
 
-  if (String(payload?.roomId ?? "") !== expectedRoomId) errors.push("test_room_identity_mismatch");
-  if (Number(payload?.urlSeat) !== expectedUrlSeat) errors.push("test_url_team_identity_mismatch");
-  if (!Number.isInteger(Number(payload?.seat)) || Number(payload.seat) < 1 || Number(payload.seat) > TEST_CONFIG.teams) {
-    errors.push("test_draft_slot_invalid");
+  if (publicMock) {
+    if (!/^\d+$/.test(expectedRoomId) || [String(TEST_CONFIG.leagueId), "420010"].includes(expectedRoomId)) {
+      errors.push("public_mock_room_identity_invalid");
+    }
+    if (Number(payload?.urlSeat) !== Number(payload?.seat)) errors.push("public_mock_url_seat_mismatch");
+  } else {
+    if (String(payload?.roomId ?? "") !== expectedRoomId) errors.push("test_room_identity_mismatch");
+    if (Number(payload?.urlSeat) !== expectedUrlSeat) errors.push("test_url_team_identity_mismatch");
+  }
+  if (!Number.isInteger(Number(payload?.seat)) || Number(payload.seat) < 1 || Number(payload.seat) > config.teams) {
+    errors.push(publicMock ? "public_mock_draft_slot_invalid" : "test_draft_slot_invalid");
   }
   if (payload?.status?.state !== "completed") errors.push("exported_runner_status_not_completed");
-  if (asArray(payload?.status?.picks).length !== TEST_CONFIG.rounds) errors.push("exported_status_pick_count_mismatch");
+  if (asArray(payload?.status?.picks).length !== config.rounds) errors.push("exported_status_pick_count_mismatch");
   if (payload?.extensionVersion !== "0.12.0") errors.push("extension_version_mismatch");
   const operatorAttestation = payload?.operatorAttestation;
   if (operatorAttestation?.status === "intervention") {
@@ -158,20 +214,20 @@ export function evaluateTestDraftExport(payload, options = {}) {
   const completed = runReceipts.filter((entry) => entry.kind === "runner_completed");
   const failures = runReceipts.filter((entry) => ["runner_failed", "runner_halted", "runner_stopped"].includes(entry.kind));
   if (started.length !== 1) errors.push("runner_started_receipt_contract_failed");
-  if (completed.length !== 1 || Number(completed[0]?.picks) !== TEST_CONFIG.rounds) errors.push("runner_completed_receipt_contract_failed");
+  if (completed.length !== 1 || Number(completed[0]?.picks) !== config.rounds) errors.push("runner_completed_receipt_contract_failed");
   if (runReceipts.some((entry) =>
     String(entry.roomId) !== expectedRoomId ||
     Number(entry.seat) !== Number(payload?.seat) ||
     Number(entry.urlSeat) !== expectedUrlSeat
   )) errors.push("runner_receipt_identity_mismatch");
   if (
-    started[0]?.configName !== TEST_CONFIG.name ||
+    started[0]?.configName !== config.name ||
     String(started[0]?.expectedRoomId) !== expectedRoomId ||
     Number(started[0]?.expectedSeat) !== Number(payload?.seat) ||
     Number(started[0]?.expectedUrlSeat) !== expectedUrlSeat ||
-    Number(started[0]?.observedTeamCount) !== TEST_CONFIG.teams ||
-    !TEST_SAME_SLOTS(started[0]?.observedRosterSlots, TEST_CONFIG.rosterSlots)
-  ) errors.push("runner_started_test_config_mismatch");
+    Number(started[0]?.observedTeamCount) !== config.teams ||
+    !TEST_SAME_SLOTS(started[0]?.observedRosterSlots, config.rosterSlots)
+  ) errors.push(publicMock ? "runner_started_public_mock_config_mismatch" : "runner_started_test_config_mismatch");
   if (
     payload?.status?.runId !== selectedRun.runId ||
     String(payload?.status?.roomId) !== expectedRoomId ||
@@ -190,8 +246,8 @@ export function evaluateTestDraftExport(payload, options = {}) {
     if (decisionsByTurn.has(turn)) errors.push(`duplicate_runner_decision:${turn}`);
     decisionsByTurn.set(turn, entry.decision);
   }
-  if (pickReceipts.length !== TEST_CONFIG.rounds) errors.push("exactly_19_runner_pick_receipts_required");
-  if (decisionsByTurn.size !== TEST_CONFIG.rounds) errors.push("exactly_19_runner_decisions_required");
+  if (pickReceipts.length !== config.rounds) errors.push(`exactly_${config.rounds}_runner_pick_receipts_required`);
+  if (decisionsByTurn.size !== config.rounds) errors.push(`exactly_${config.rounds}_runner_decisions_required`);
 
   const picks = pickReceipts.map((receipt) => ({
     round: Number(receipt.round),
@@ -207,30 +263,34 @@ export function evaluateTestDraftExport(payload, options = {}) {
   picks.forEach((pick, index) => {
     const round = index + 1;
     if (pick.round !== round) errors.push(`round_${round}_runner_round_mismatch`);
-    const expectedTurn = `R${round}P${TEST_OVERALL_PICK(round, Number(payload?.seat), TEST_CONFIG.teams)}`;
+    const expectedTurn = `R${round}P${TEST_OVERALL_PICK(round, Number(payload?.seat), config.teams)}`;
     if (pick.turn !== expectedTurn) errors.push(`round_${round}_snake_turn_mismatch`);
   });
   const statusPickIds = asArray(payload?.status?.picks).map((pick) => String(pick?.yahooId ?? ""));
   if (statusPickIds.some((yahooId, index) => yahooId !== picks[index]?.yahooId)) errors.push("exported_status_runner_pick_mismatch");
-  const rehearsal = rehearseExactRoster({
-    picks,
-    rosterShape: normalizedReceiptCounts(completed[0]?.counts),
-    latencyBudgetMs,
-  });
+  const rosterShape = normalizedReceiptCounts(completed[0]?.counts);
+  const rehearsal = publicMock
+    ? auditPublicMockPicks(picks, latencyBudgetMs)
+    : rehearseExactRoster({ picks, rosterShape, latencyBudgetMs });
   if (!rehearsal.valid) errors.push(...rehearsal.errors);
-  if (!TEST_VALIDATOR(picks, TEST_CONFIG)) errors.push("test_roster_policy_failed");
+  if (!ROSTER_VALIDATOR(picks, config)) errors.push(publicMock ? "public_mock_roster_policy_failed" : "test_roster_policy_failed");
   if (!sameCounts(completed[0]?.counts, countsByPosition(picks))) errors.push("runner_completed_counts_mismatch");
 
-  const finalRosterReceipts = extensionReceipts.filter((entry) =>
+  const allFinalRosterReceipts = extensionReceipts.filter((entry) => entry.kind === "final_roster_readback");
+  const finalRosterReceipts = allFinalRosterReceipts.filter((entry) =>
     entry.kind === "final_roster_readback" && entry.runId === selectedRun.runId
   );
-  if (finalRosterReceipts.length !== 1) {
-    errors.push(finalRosterReceipts.length ? "ambiguous_final_roster_readback" : "final_roster_readback_missing");
-  } else if (
-    finalRosterReceipts[0].valid !== true ||
-    !TEST_OBSERVED_ROSTER_VALIDATOR(finalRosterReceipts[0].finalRosterSlots, picks)
-  ) {
-    errors.push("final_roster_slot_occupancy_failed");
+  if (contract.requireFinalRosterReadback) {
+    if (finalRosterReceipts.length !== 1) {
+      errors.push(finalRosterReceipts.length ? "ambiguous_final_roster_readback" : "final_roster_readback_missing");
+    } else if (
+      finalRosterReceipts[0].valid !== true ||
+      !TEST_OBSERVED_ROSTER_VALIDATOR(finalRosterReceipts[0].finalRosterSlots, picks)
+    ) {
+      errors.push("final_roster_slot_occupancy_failed");
+    }
+  } else if (allFinalRosterReceipts.length) {
+    errors.push("unexpected_public_mock_final_roster_readback");
   }
 
   const replays = picks.map((pick, index) => {
@@ -245,10 +305,45 @@ export function evaluateTestDraftExport(payload, options = {}) {
   const startTime = timestamp(started[0]?.at);
   const completionTime = timestamp(completed[0]?.at);
   if (startTime === null || completionTime === null || completionTime < startTime) errors.push("runner_time_window_invalid");
+  const inSelectedRun = (entry) => {
+    const at = timestamp(entry?.at);
+    return startTime !== null && completionTime !== null && at !== null && at >= startTime && at <= completionTime;
+  };
+  const stagedPins = extensionReceipts.filter((entry) => entry.kind === "manual_pin_staged" && inSelectedRun(entry));
+  const appliedPins = extensionReceipts.filter((entry) => entry.kind === "manual_pin_applied" && inSelectedRun(entry));
+  const overrideClaims = publicMock ? picks.filter((pick) => pick.decision?.manualOverride?.status === "applied") : [];
+  const manualEvidenceRequired = publicMock && (
+    options.requireManualOverride === true || overrideClaims.length > 0 || stagedPins.length > 0 || appliedPins.length > 0
+  );
+  if (manualEvidenceRequired) {
+    if (options.requireManualOverride === true && overrideClaims.length !== 1) errors.push("manual_override_decision_contract_failed");
+    if (stagedPins.length !== overrideClaims.length) errors.push("manual_override_staged_receipt_contract_failed");
+    if (appliedPins.length !== overrideClaims.length) errors.push("manual_override_applied_receipt_contract_failed");
+    for (const pick of overrideClaims) {
+      const round = Number(pick.round);
+      const yahooId = pick.yahooId;
+      const staged = stagedPins.filter((entry) =>
+        Number(entry.expectedRound) === round && String(entry.targetYahooIds?.[0] ?? "") === yahooId
+      );
+      const applied = appliedPins.filter((entry) =>
+        Number(entry.expectedRound) === round && String(entry.chosenYahooId ?? "") === yahooId
+      );
+      if (staged.length !== 1 || applied.length !== 1) {
+        errors.push("manual_override_receipt_identity_mismatch");
+        continue;
+      }
+      if (
+        String(staged[0].roomId) !== expectedRoomId || Number(staged[0].seat) !== Number(payload?.seat) ||
+        String(applied[0].roomId) !== expectedRoomId || Number(applied[0].seat) !== Number(payload?.seat) ||
+        applied[0].failure != null || String(pick.decision.manualOverride.chosenYahooId ?? "") !== yahooId
+      ) errors.push("manual_override_receipt_identity_mismatch");
+    }
+  }
+
   const pairs = startTime === null || completionTime === null
     ? []
     : controllerPairs(controllerReceipts, startTime, completionTime);
-  if (pairs.length !== TEST_CONFIG.rounds) errors.push("exactly_19_controller_pick_runs_required");
+  if (pairs.length !== config.rounds) errors.push(`exactly_${config.rounds}_controller_pick_runs_required`);
   if (controllerReceipts.some((entry) => /autodraft/i.test(`${entry.kind} ${entry.code ?? ""}`))) errors.push("controller_autodraft_event_observed");
   for (let index = 0; index < Math.min(pairs.length, picks.length); index += 1) {
     const pair = pairs[index];
@@ -268,7 +363,9 @@ export function evaluateTestDraftExport(payload, options = {}) {
 
   return {
     schemaVersion: 1,
-    status: errors.length ? "LOCKED" : "PASS",
+    contract: contract.name,
+    acceptanceScope: contract.scope,
+    status: errors.length ? "LOCKED" : contract.passStatus,
     valid: errors.length === 0,
     errors: [...new Set(errors)],
     roomId: String(payload?.roomId ?? ""),
@@ -282,6 +379,15 @@ export function evaluateTestDraftExport(payload, options = {}) {
     maxObservedLatencyMs: picks.length ? Math.max(...picks.map((pick) => pick.latencyMs)) : null,
     fallbackPicks: replays.filter((replay) => replay.fallbackUsed && !replay.manualOverride).length,
     fallbackDecisions: replays.filter((replay) => replay.fallbackUsed).length,
+    finalRosterReadback: contract.requireFinalRosterReadback
+      ? finalRosterReceipts.length === 1 ? "VERIFIED" : "MISSING_OR_AMBIGUOUS"
+      : "NOT_AVAILABLE_ON_PUBLIC_MOCK_SURFACE",
+    manualOverride: {
+      required: options.requireManualOverride === true,
+      claimedDecisions: overrideClaims.length,
+      stagedReceipts: stagedPins.length,
+      appliedReceipts: appliedPins.length,
+    },
     counterfactualScoring: "not_available_from_compact_receipts",
     finalCounts: countsByPosition(picks),
     picks: picks.map((pick, index) => ({
@@ -300,15 +406,30 @@ export function evaluateTestDraftExport(payload, options = {}) {
   };
 }
 
+export function evaluateTestDraftExport(payload, options = {}) {
+  return evaluateDraftExport(payload, { ...options, contract: "retained_test_19_idp" });
+}
+
+export function evaluatePublicMockExport(payload, options = {}) {
+  return evaluateDraftExport(payload, { ...options, contract: "public_mock_15" });
+}
+
 async function main() {
   const args = Object.fromEntries(process.argv.slice(2).map((entry) => {
     const [key, ...value] = entry.split("=");
     return [key.replace(/^--/, ""), value.join("=")];
   }));
-  if (!args.input || !args.output) throw new Error("usage: node analysis/test-draft-acceptance.mjs --input=export.json --output=report.json");
+  if (!args.input || !args.output) throw new Error("usage: node analysis/test-draft-acceptance.mjs --input=export.json --output=report.json [--contract=retained_test_19_idp|public_mock_15] [--require-manual-override=true|false]");
+  const contract = args.contract ?? "retained_test_19_idp";
+  if (!CONTRACTS[contract]) throw new Error(`unknown acceptance contract: ${contract}`);
+  if (args["require-manual-override"] != null && !["true", "false"].includes(args["require-manual-override"])) {
+    throw new Error("--require-manual-override must be true or false");
+  }
   const payload = JSON.parse(await readFile(args.input, "utf8"));
-  const result = evaluateTestDraftExport(payload, {
+  const result = evaluateDraftExport(payload, {
+    contract,
     latencyBudgetMs: args["latency-budget-ms"] == null ? undefined : Number(args["latency-budget-ms"]),
+    requireManualOverride: args["require-manual-override"] === "true",
   });
   await writeFile(args.output, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
   process.stdout.write(`${JSON.stringify({ output: args.output, status: result.status, picks: result.confirmedPicks })}\n`);
