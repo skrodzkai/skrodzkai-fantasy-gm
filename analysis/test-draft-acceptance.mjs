@@ -191,7 +191,7 @@ function evaluateDraftExport(payload, options = {}) {
   }
   if (payload?.status?.state !== "completed") errors.push("exported_runner_status_not_completed");
   if (asArray(payload?.status?.picks).length !== config.rounds) errors.push("exported_status_pick_count_mismatch");
-  if (payload?.extensionVersion !== "0.14.0") errors.push("extension_version_mismatch");
+  if (payload?.extensionVersion !== "0.14.1") errors.push("extension_version_mismatch");
   const operatorAttestation = payload?.operatorAttestation;
   if (operatorAttestation?.status === "intervention") {
     if (
