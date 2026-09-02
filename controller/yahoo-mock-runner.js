@@ -1,7 +1,7 @@
 (function installYahooMockRunner(root) {
   "use strict";
 
-  const VERSION = "2.1.0";
+  const VERSION = "2.2.0";
   const GLOBAL_KEY = "__skrodzkaiYahooMockRunnerV1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-runner-receipts-v1";
   const OFFENSE = ["QB", "RB", "WR", "TE"];
@@ -40,17 +40,19 @@
     }),
     test_league_19_idp: Object.freeze({
       name: "test_league_19_idp",
-      leagueId: "18599",
-      urlTeamId: 12,
-      teams: 12,
+      leagueId: "542830",
+      urlTeamId: 3,
+      minimumTeams: 10,
+      maximumTeams: 12,
       rounds: 19,
       rosterTotal: 19,
       rosterSlots: Object.freeze([
-        "QB", "WR", "WR", "RB", "RB", "W/R", "W/R/T", "K", "DEF",
-        "D", "LB", "CB", "S", "BN", "BN", "BN", "BN", "BN", "BN",
+        "QB", "WR", "WR", "WR", "RB", "RB", "TE", "W/R/T", "W/R/T",
+        "K", "DEF", "D", "D", "BN", "BN", "BN", "BN", "BN", "BN",
       ]),
-      offenseStarters: Object.freeze({ QB: 1, RB: 2, WR: 2, TE: 0, FLEX: 2 }),
-      positionLimits: Object.freeze({ QB: 2, RB: 6, WR: 6, TE: 2, K: 1, DEF: 1, D: 4, LB: 4, CB: 4, S: 4 }),
+      offenseStarters: Object.freeze({ QB: 1, RB: 2, WR: 3, TE: 1, FLEX: 2 }),
+      positionLimits: Object.freeze({ QB: 2, RB: 6, WR: 7, TE: 3, K: 1, DEF: 1, D: 2, LB: 2, CB: 2, S: 2 }),
+      categoryLimits: Object.freeze({ IDP: 2 }),
       specialistPositions: Object.freeze(TEST_SPECIALISTS),
       qualification: "verified-test-room",
     }),
@@ -155,10 +157,11 @@
     if (occupied.some((entry) => !pickById.has(entry.yahooId))) return false;
     if (expectedPicks.some((pick) => !occupied.some((entry) => entry.yahooId === String(pick.yahooId)))) return false;
 
-    for (const slot of IDP_POSITIONS) {
-      const entry = observed.find((candidate) => candidate.slot === slot);
+    const defensiveSlots = observed.filter((candidate) => candidate.slot === "D");
+    if (defensiveSlots.length !== 2) return false;
+    for (const entry of defensiveSlots) {
       const pick = pickById.get(entry?.yahooId ?? "");
-      if (!entry || entry.empty || !normalizedRosterSlotAccepts(playerEligibility(pick), slot)) return false;
+      if (entry.empty || !normalizedRosterSlotAccepts(playerEligibility(pick), "D")) return false;
     }
     const specialistIds = new Set(expectedPicks
       .filter((pick) => IDP_POSITIONS.includes(normalize(pick.position)))
@@ -1030,11 +1033,11 @@
       throw new Error("another Yahoo mock runner is already active");
     }
 
-    const config = CONFIGS[options.configName ?? "public_mock_15"];
-    if (!config) throw new Error("unknown roster configuration");
+    const baseConfig = CONFIGS[options.configName ?? "public_mock_15"];
+    if (!baseConfig) throw new Error("unknown roster configuration");
     const executionMode = String(options.executionMode ?? "MOCK").toUpperCase();
-    const qualified = config.qualification === "public-mock-only" && executionMode === "MOCK" ||
-      config.qualification === "verified-test-room" && executionMode === "TEST";
+    const qualified = baseConfig.qualification === "public-mock-only" && executionMode === "MOCK" ||
+      baseConfig.qualification === "verified-test-room" && executionMode === "TEST";
     if (!qualified) {
       throw new Error("draft configuration is not qualified for this execution mode");
     }
@@ -1042,6 +1045,15 @@
     const expectedSeat = Number(options.expectedSeat);
     const expectedUrlSeat = Number(options.expectedUrlSeat ?? expectedSeat);
     const observedTeamCount = Number(options.observedTeamCount);
+    const variableTeamCount = Number.isInteger(baseConfig.minimumTeams) && Number.isInteger(baseConfig.maximumTeams);
+    if (variableTeamCount) {
+      if (!Number.isInteger(observedTeamCount) || observedTeamCount < baseConfig.minimumTeams || observedTeamCount > baseConfig.maximumTeams) {
+        throw new Error(`draft room must contain ${baseConfig.minimumTeams}-${baseConfig.maximumTeams} teams`);
+      }
+    } else if (observedTeamCount !== baseConfig.teams) {
+      throw new Error(`draft room must contain exactly ${baseConfig.teams} teams`);
+    }
+    const config = variableTeamCount ? Object.freeze({ ...baseConfig, teams: observedTeamCount }) : baseConfig;
     const observedRosterSlots = normalizeSlots(options.observedRosterSlots);
     const minimumFallbacks = Number(options.minimumFallbacks ?? 5);
     const pollMs = Number(options.pollMs ?? 25);
@@ -1059,7 +1071,6 @@
     if (!Number.isInteger(expectedUrlSeat) || expectedUrlSeat < 1) throw new Error("expected URL seat is required");
     if (config.leagueId && expectedRoomId !== config.leagueId) throw new Error("test league ID does not match verified configuration");
     if (config.urlTeamId && expectedUrlSeat !== config.urlTeamId) throw new Error("test team ID does not match verified configuration");
-    if (observedTeamCount !== config.teams) throw new Error("draft room must contain exactly 12 teams");
     if (!sameSlots(observedRosterSlots, config.rosterSlots)) throw new Error(`draft roster shape does not match ${config.name}`);
     if (!Number.isInteger(minimumFallbacks) || minimumFallbacks < 5) throw new Error("minimumFallbacks must be at least 5");
     if (pollMs < 25 || filterDeadlineMs <= 0 || selectionHoldMs < 0 || selectionHoldMs > 1500) {

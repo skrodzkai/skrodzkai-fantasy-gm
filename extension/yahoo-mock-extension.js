@@ -1,7 +1,7 @@
 (function installYahooMockExtension(root) {
   "use strict";
 
-  const VERSION = "0.12.0";
+  const VERSION = "0.13.0";
   const GLOBAL_KEY = "__skrodzkaiYahooMockExtensionV1";
   const PREFLIGHT_KEY = "skrodzkai-yahoo-mock-extension-preflight-v1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-extension-receipts-v1";
@@ -13,16 +13,18 @@
   const BOARD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
   const BOARD_FUTURE_TOLERANCE_MS = 15 * 60 * 1000;
   const DISABLED_LEAGUE_ID = "420010";
-  const TEST_LEAGUE_ID = "18599";
-  const TEST_TEAM_ID = 12;
+  const TEST_LEAGUE_ID = "542830";
+  const TEST_TEAM_ID = 3;
+  const TEST_MINIMUM_TEAMS = 10;
+  const TEST_MAXIMUM_TEAMS = 12;
   const PUBLIC_ROSTER_SLOTS = Object.freeze([
     "QB", "WR", "WR", "RB", "RB", "TE", "W/R/T", "K", "DEF",
     "BN", "BN", "BN", "BN", "BN", "BN",
   ]);
   const STARTER_SLOTS = Object.freeze(PUBLIC_ROSTER_SLOTS.slice(0, 9));
   const TEST_ROSTER_SLOTS = Object.freeze([
-    "QB", "WR", "WR", "RB", "RB", "W/R", "W/R/T", "K", "DEF",
-    "D", "LB", "CB", "S", "BN", "BN", "BN", "BN", "BN", "BN",
+    "QB", "WR", "WR", "WR", "RB", "RB", "TE", "W/R/T", "W/R/T",
+    "K", "DEF", "D", "D", "BN", "BN", "BN", "BN", "BN", "BN",
   ]);
   const TEST_SETTINGS_ROSTER_SLOTS = Object.freeze([...TEST_ROSTER_SLOTS, "IR", "IR", "IR"]);
 
@@ -133,18 +135,18 @@
 
   function parseTestSettings(documentRef, locationRef) {
     const body = String(documentRef?.body?.innerText ?? "");
-    const teamCount = Number(body.match(/Max Teams:\s*(\d+)/i)?.[1] ?? 0);
+    const maximumTeams = Number(body.match(/Max Teams:\s*(\d+)/i)?.[1] ?? 0);
     const rosterSlots = parseRosterSlots(body);
     const errors = [];
     if (String(locationRef?.pathname ?? "") !== `/f1/${TEST_LEAGUE_ID}/settings`) errors.push("not_verified_test_settings");
-    if (!body.includes("League Name:\tHORSE COLLAR #2")) errors.push("verified_test_league_missing");
+    if (!body.includes("League Name:\tLeague Two")) errors.push("verified_test_league_missing");
     if (!body.includes("Draft Type:\tLive Standard Draft")) errors.push("verified_test_draft_type_mismatch");
-    if (!body.includes("Live Draft Pick Time:\t1 Minute, 15 Seconds")) errors.push("verified_test_clock_mismatch");
+    if (!/^Live Draft Pick Time:\s*1 Minute\s*$/im.test(body)) errors.push("verified_test_clock_mismatch");
     if (!/Passing Touchdowns\s+4\b/i.test(body)) errors.push("verified_test_passing_td_mismatch");
-    if (!/Receptions(?:\s+Yahoo Default)?\s+1(?:\s|$)/i.test(body)) errors.push("verified_test_ppr_mismatch");
-    if (teamCount !== 12) errors.push("test_team_count_not_12");
+    if (!/Receptions(?:\s+Yahoo Default)?(?:\s+1)?\s+0\.5(?:\s|$)/i.test(body)) errors.push("verified_test_ppr_mismatch");
+    if (maximumTeams !== TEST_MAXIMUM_TEAMS) errors.push("test_maximum_team_count_not_12");
     if (!sameSlots(rosterSlots, TEST_SETTINGS_ROSTER_SLOTS)) errors.push("test_roster_shape_mismatch");
-    return { roomId: TEST_LEAGUE_ID, teamCount, rosterSlots, activeRosterSlots: rosterSlots.slice(0, TEST_ROSTER_SLOTS.length), errors, ready: errors.length === 0 };
+    return { roomId: TEST_LEAGUE_ID, maximumTeams, rosterSlots, activeRosterSlots: rosterSlots.slice(0, TEST_ROSTER_SLOTS.length), errors, ready: errors.length === 0 };
   }
 
   function makeTestSettingsReceipt(snapshot, now = Date.now()) {
@@ -152,7 +154,7 @@
     return {
       version: VERSION,
       roomId: TEST_LEAGUE_ID,
-      observedTeamCount: snapshot.teamCount,
+      observedMaximumTeams: snapshot.maximumTeams,
       observedRosterSlots: [...snapshot.activeRosterSlots],
       observedFullRosterSlots: [...snapshot.rosterSlots],
       verifiedAt: now,
@@ -164,7 +166,7 @@
     return Boolean(
       receipt &&
       receipt.roomId === TEST_LEAGUE_ID &&
-      Number(receipt.observedTeamCount) === 12 &&
+      Number(receipt.observedMaximumTeams) === TEST_MAXIMUM_TEAMS &&
       Number(receipt.expiresAt) > now &&
       sameSlots(receipt.observedRosterSlots, TEST_ROSTER_SLOTS) &&
       sameSlots(receipt.observedFullRosterSlots, TEST_SETTINGS_ROSTER_SLOTS)
@@ -211,13 +213,13 @@
     const body = String(documentRef?.body?.innerText ?? "");
     const seatMatch = body.match(/^Your Draft Position:\s*(\d{1,2})(?:st|nd|rd|th)\s*$/im);
     const seat = seatMatch ? Number(seatMatch[1]) : null;
-    const teamCount = Number(body.match(/HORSE COLLAR #2\s*·\s*(\d+) Teams\s*·\s*19 Rounds\s*·\s*1 minute 15 seconds/i)?.[1] ?? 0);
+    const teamCount = Number(body.match(/^League Two\s*·\s*(\d+) Teams\s*·\s*19 Rounds\s*·\s*1 minute\s*$/im)?.[1] ?? 0);
     const errors = [];
     if (String(locationRef?.pathname ?? "") !== `/f1/${TEST_LEAGUE_ID}/draft`) errors.push("not_verified_test_draft_home");
-    if (teamCount !== 12) errors.push("verified_test_summary_mismatch");
+    if (!Number.isInteger(teamCount) || teamCount < TEST_MINIMUM_TEAMS || teamCount > TEST_MAXIMUM_TEAMS) errors.push("verified_test_summary_mismatch");
     if (!/^SKRODZKai$/m.test(body)) errors.push("verified_test_team_missing");
     if (!validTestSettingsReceipt(settingsReceipt, now)) errors.push("verified_test_settings_preflight_required");
-    if (!Number.isInteger(seat) || seat < 1 || seat > 12) errors.push("test_draft_slot_pending");
+    if (!Number.isInteger(seat) || seat < 1 || seat > teamCount) errors.push("test_draft_slot_pending");
     return {
       roomId: TEST_LEAGUE_ID,
       urlSeat: TEST_TEAM_ID,
@@ -248,35 +250,6 @@
     return armRecord;
   }
 
-  function parseTestDraftClient(documentRef, locationRef, settingsReceipt = null, now = Date.now()) {
-    const body = String(documentRef?.body?.innerText ?? "");
-    const path = String(locationRef?.pathname ?? "");
-    const pathMatch = path.match(/^\/draftclient\/f1\/(\d+)\/(\d+)\/?$/);
-    const seatMatch = body.match(/YOUR TURN\s*-\s*(\d+)(?:ST|ND|RD|TH)\s+PICK/i);
-    const rosterMatch = body.match(/YOUR TEAM\s*\(\s*(\d+)\s*\/\s*(\d+)\s*\)/i);
-    const seat = seatMatch ? Number(seatMatch[1]) : null;
-    const filled = rosterMatch ? Number(rosterMatch[1]) : null;
-    const total = rosterMatch ? Number(rosterMatch[2]) : null;
-    const missingFilters = requiredTestFilterLabels().filter((label) => !findFilter(documentRef, label));
-    const errors = [];
-    if (!pathMatch || pathMatch[1] !== TEST_LEAGUE_ID || Number(pathMatch[2]) !== TEST_TEAM_ID) errors.push("test_draftclient_identity_mismatch");
-    if (!/HORSE COLLAR #2/i.test(body)) errors.push("verified_test_league_missing");
-    if (!validTestSettingsReceipt(settingsReceipt, now)) errors.push("verified_test_settings_preflight_required");
-    if (!Number.isInteger(seat) || seat < 1 || seat > 12) errors.push("test_draft_slot_missing");
-    if (filled !== 0 || total !== TEST_ROSTER_SLOTS.length) errors.push("test_draft_roster_not_empty");
-    if (missingFilters.length) errors.push(`test_specialist_filters_missing:${missingFilters.join(",")}`);
-    return {
-      roomId: TEST_LEAGUE_ID,
-      urlSeat: TEST_TEAM_ID,
-      seat,
-      teamCount: validTestSettingsReceipt(settingsReceipt, now) ? Number(settingsReceipt.observedTeamCount) : 0,
-      rosterSlots: validTestSettingsReceipt(settingsReceipt, now) ? [...settingsReceipt.observedRosterSlots] : [],
-      missingFilters,
-      errors,
-      ready: errors.length === 0,
-    };
-  }
-
   function validateDraftPreflight(token, room, now = Date.now(), boardData = root.SKRODZKaiYahooMockBoard) {
     if (!token || !["public_mock_15", "test_league_19_idp"].includes(token.mode)) return "approved_draft_arm_required";
     if (token.version !== VERSION) return "draft_arm_version_mismatch";
@@ -288,8 +261,12 @@
     if (!room || String(token.roomId) !== String(room.roomId) || expectedUrlSeat !== Number(room.seat)) {
       return "draft_room_or_url_team_changed";
     }
-    if (!Number.isInteger(Number(token.seat)) || Number(token.seat) < 1 || Number(token.seat) > 12) return "draft_slot_invalid";
-    if (Number(token.observedTeamCount) !== 12) return "draft_team_count_not_12";
+    const observedTeamCount = Number(token.observedTeamCount);
+    const validTeamCount = token.mode === "test_league_19_idp"
+      ? Number.isInteger(observedTeamCount) && observedTeamCount >= TEST_MINIMUM_TEAMS && observedTeamCount <= TEST_MAXIMUM_TEAMS
+      : observedTeamCount === 12;
+    if (!validTeamCount) return token.mode === "test_league_19_idp" ? "draft_team_count_out_of_range" : "draft_team_count_not_12";
+    if (!Number.isInteger(Number(token.seat)) || Number(token.seat) < 1 || Number(token.seat) > observedTeamCount) return "draft_slot_invalid";
     const expectedRoster = token.mode === "test_league_19_idp" ? TEST_ROSTER_SLOTS : PUBLIC_ROSTER_SLOTS;
     if (!sameSlots(token.observedRosterSlots, expectedRoster)) return "draft_roster_shape_mismatch";
     if (token.mode === "test_league_19_idp" && (String(token.roomId) !== TEST_LEAGUE_ID || Number(token.urlSeat) !== TEST_TEAM_ID)) return "test_identity_mismatch";
@@ -1063,7 +1040,7 @@
       const snapshot = parseTestDraftHome(environment.document, environment.location, settingsReceipt);
       const armed = readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
       const active = armed?.mode === "test_league_19_idp" && !validateDraftPreflight(armed, { roomId: TEST_LEAGUE_ID, seat: TEST_TEAM_ID });
-      rail.setContext({ roomId: TEST_LEAGUE_ID, seat: snapshot.seat, league: "HORSE COLLAR #2", armed: Boolean(active), autodraft: false, kill: false });
+      rail.setContext({ roomId: TEST_LEAGUE_ID, seat: snapshot.seat, league: "League Two", armed: Boolean(active), autodraft: false, kill: false });
       rail.setWarnings(snapshot.errors.map((reason) => ({
         severity: reason === "test_draft_slot_pending" ? "" : "danger",
         text: reason === "test_draft_slot_pending" ? "Draft slot publishes 30 minutes before start; execution remains locked." : reason,
@@ -1074,7 +1051,7 @@
         rail.controls.arm.textContent = "ARM TEST";
         return false;
       }
-      rail.render(active ? "ok" : "", active ? "TEST ARMED" : "READY TO ARM TEST", `League ${TEST_LEAGUE_ID} · draft slot ${snapshot.seat} · 12 teams · 19 rounds`);
+      rail.render(active ? "ok" : "", active ? "TEST ARMED" : "READY TO ARM TEST", `League ${TEST_LEAGUE_ID} · draft slot ${snapshot.seat} · ${snapshot.teamCount} teams · 19 rounds`);
       rail.controls.arm.disabled = false;
       rail.controls.arm.textContent = active ? "DISARM" : "ARM TEST";
       return true;
@@ -1125,9 +1102,9 @@
       }
       const receipt = makeTestSettingsReceipt(snapshot);
       environment.localStorage.setItem(TEST_SETTINGS_KEY, JSON.stringify(receipt));
-      rail.setContext({ roomId: TEST_LEAGUE_ID, league: "HORSE COLLAR #2", armed: false, autodraft: false, kill: false });
+      rail.setContext({ roomId: TEST_LEAGUE_ID, league: "League Two", armed: false, autodraft: false, kill: false });
       rail.setWarnings([]);
-      rail.render("ok", "TEST SETTINGS VERIFIED", "12 teams · 19 active roster slots · 3 IR · 75-second clock");
+      rail.render("ok", "TEST SETTINGS VERIFIED", "10-12 teams · 19 active roster slots · 3 IR · 60-second clock");
       rail.addEvent("test settings verified", `league ${TEST_LEAGUE_ID} · ${snapshot.rosterSlots.length} settings slots`);
       return true;
     };
@@ -1191,9 +1168,9 @@
       }
       const pickById = new Map(run.picks.map((pick) => [String(pick.yahooId), pick]));
       rail.setRoster(finalRosterSlots.map((entry) => ({ slot:entry.slot, player:entry.empty ? null : pickById.get(entry.yahooId) ?? null })));
-      rail.setContext({ roomId:TEST_LEAGUE_ID, seat:Number(run.completed.seat), league:"HORSE COLLAR #2", armed:false, autodraft:false, kill:false });
+      rail.setContext({ roomId:TEST_LEAGUE_ID, seat:Number(run.completed.seat), league:"League Two", armed:false, autodraft:false, kill:false });
       rail.setWarnings(valid ? [] : [{ severity:"danger", text:"Yahoo final slot occupancy does not satisfy the TEST roster contract." }]);
-      rail.render(valid ? "complete" : "bad", valid ? "FINAL ROSTER VERIFIED" : "FINAL ROSTER LOCKED", valid ? "Observed Yahoo starter and bench slots match all 19 confirmed picks." : "Dedicated D/LB/CB/S occupancy or bench placement failed validation.");
+      rail.render(valid ? "complete" : "bad", valid ? "FINAL ROSTER VERIFIED" : "FINAL ROSTER LOCKED", valid ? "Observed Yahoo starter and bench slots match all 19 confirmed picks." : "Both generic D slots or IDP bench placement failed validation.");
       enableExport(environment, rail, { roomId:TEST_LEAGUE_ID, seat:Number(run.completed.seat), urlSeat:TEST_TEAM_ID });
       return true;
     };
@@ -1211,60 +1188,16 @@
     if (!controllerApi || !runnerApi || !boardData) throw new Error("extension_dependencies_missing");
     const room = controllerApi.runtime.parseRoom(environment.location.pathname);
     if (!room) throw new Error("draft_room_missing");
-    let armRecord = readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
+    const armRecord = readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
     if (!armRecord && room.roomId === TEST_LEAGUE_ID && Number(room.seat) === TEST_TEAM_ID) {
       rail.setMode("TEST");
       rail.setExpanded(true);
       rail.setRoster(TEST_ROSTER_SLOTS.map((slot) => ({ slot })));
       rail.setBetweenTurns(buildUiOpponentWindow(null, "TEST"));
-      const update = () => {
-        if (rail.isLocked()) return false;
-        const settingsReceipt = readJson(environment.localStorage, TEST_SETTINGS_KEY, null);
-        const snapshot = parseTestDraftClient(environment.document, environment.location, settingsReceipt);
-        const autodraft = controllerApi.runtime.isAutodraftActive(environment.document);
-        rail.setContext({ roomId: TEST_LEAGUE_ID, seat: snapshot.seat, league: "HORSE COLLAR #2", armed: false, autodraft, kill: false });
-        rail.setWarnings([
-          ...snapshot.errors.map((text) => ({ severity: "danger", text })),
-          ...(autodraft ? [{ severity: "danger", text: "Autodraft is active: execution is fail-closed." }] : []),
-        ]);
-        rail.controls.arm.textContent = "ARM TEST";
-        if (!snapshot.ready || autodraft) {
-          rail.render("bad", "TEST PREFLIGHT LOCKED", [...snapshot.errors, ...(autodraft ? ["autodraft_active"] : [])].join(" · "));
-          rail.controls.arm.disabled = true;
-          return false;
-        }
-        rail.render("ok", "READY TO ARM TEST", `League ${TEST_LEAGUE_ID} · draft slot ${snapshot.seat} · 12 teams · 19 rounds`);
-        rail.controls.arm.disabled = false;
-        return true;
-      };
-      rail.controls.arm.addEventListener("click", async () => {
-        if (!await verifyCurrentExtensionVersion(environment, rail)) return;
-        const fresh = parseTestDraftClient(environment.document, environment.location, readJson(environment.localStorage, TEST_SETTINGS_KEY, null));
-        const currentAutodraft = controllerApi.runtime.isAutodraftActive(environment.document);
-        if (!fresh.ready || currentAutodraft) {
-          rail.setWarnings([
-            ...fresh.errors.map((text) => ({ severity: "danger", text })),
-            ...(currentAutodraft ? [{ severity: "danger", text: "Autodraft is active: execution is fail-closed." }] : []),
-          ]);
-          rail.render("bad", "TEST PREFLIGHT LOCKED", [...fresh.errors, ...(currentAutodraft ? ["autodraft_active"] : [])].join(" · "));
-          return;
-        }
-        try {
-          armRecord = makeTestPreflight(fresh, Date.now(), environment.SKRODZKaiYahooMockBoard);
-        } catch (error) {
-          refuseArmForBoardHealth(environment, rail, { kind: "test_arm_refused", roomId: TEST_LEAGUE_ID, seat: fresh.seat, urlSeat: TEST_TEAM_ID, expectedRosterTotal: 19 }, error);
-          return;
-        }
-        environment.sessionStorage.setItem(PREFLIGHT_KEY, JSON.stringify(armRecord));
-        writeReceipt(environment.localStorage, { kind: "test_armed_from_draftclient", roomId: TEST_LEAGUE_ID, seat: fresh.seat, urlSeat: TEST_TEAM_ID, expiresAt: armRecord.expiresAt });
-        rail.addEvent("test armed", `league ${TEST_LEAGUE_ID} · draft slot ${fresh.seat}`);
-        environment.location.reload();
-      });
-      if (!update() && environment.MutationObserver) {
-        const observer = new environment.MutationObserver(() => { if (update()) observer.disconnect(); });
-        rail.trackObserver(observer);
-        observer.observe(environment.document.body, { childList: true, subtree: true, characterData: true });
-      }
+      rail.setContext({ roomId: TEST_LEAGUE_ID, league: "League Two", armed: false, autodraft: controllerApi.runtime.isAutodraftActive(environment.document), kill: false });
+      rail.controls.arm.disabled = true;
+      rail.lock("Arm from the verified League Two draft-home page so the token binds Yahoo's exact live field size and snake slot.", "TEST PREFLIGHT LOCKED");
+      writeReceipt(environment.localStorage, { kind: "extension_locked", roomId: TEST_LEAGUE_ID, seat: TEST_TEAM_ID, failure: "verified_test_draft_home_arm_required" });
       return;
     }
     const executionMode = armRecord?.mode === "test_league_19_idp" ? "TEST" : "MOCK";
@@ -1273,7 +1206,7 @@
     const configName = executionMode === "TEST" ? "test_league_19_idp" : "public_mock_15";
     const expectedRosterTotal = executionMode === "TEST" ? 19 : 15;
     const rosterSlots = executionMode === "TEST" ? TEST_ROSTER_SLOTS : PUBLIC_ROSTER_SLOTS;
-    const leagueLabel = executionMode === "TEST" ? "HORSE COLLAR #2" : room.roomId === DISABLED_LEAGUE_ID ? "420010 BLOCKED" : "PUBLIC";
+    const leagueLabel = executionMode === "TEST" ? "League Two" : room.roomId === DISABLED_LEAGUE_ID ? "420010 BLOCKED" : "PUBLIC";
     const receiptRoom = { roomId: room.roomId, seat: draftSeat, urlSeat: room.seat };
     rail.setMode(executionMode);
     rail.setExpanded(true);
@@ -1471,7 +1404,6 @@
       makeTestSettingsReceipt,
       validTestSettingsReceipt,
       parseTestDraftHome,
-      parseTestDraftClient,
       requiredTestFilterLabels,
       parseFinalRosterDocument,
       makeTestPreflight,

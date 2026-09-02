@@ -8,7 +8,7 @@ const TEST_ALLOCATOR = globalThis.SKRODZKaiYahooMockRunner._test.allocateRosterS
 const RUNNER_HELPERS = globalThis.SKRODZKaiYahooMockRunner._test;
 const TEST_CONFIG = globalThis.SKRODZKaiYahooMockRunner.configs.test_league_19_idp;
 
-const POSITIONS = ["QB", "QB", "RB", "RB", "RB", "RB", "RB", "WR", "WR", "WR", "WR", "WR", "TE", "K", "DEF", "D", "LB", "CB", "S"];
+const POSITIONS = ["QB", "QB", "RB", "RB", "RB", "RB", "RB", "WR", "WR", "WR", "WR", "WR", "WR", "TE", "TE", "K", "DEF", "D", "LB"];
 const PUBLIC_POSITIONS = ["RB", "WR", "QB", "WR", "RB", "DEF", "TE", "WR", "K", "RB", "WR", "WR", "WR", "RB", "RB"];
 
 function iso(offsetMs) {
@@ -20,22 +20,23 @@ function overallPick(round, seat, teams = 12) {
 }
 
 function validPayload() {
-  const roomId = "18599";
+  const roomId = "542830";
   const draftSlot = 6;
-  const urlSeat = 12;
+  const urlSeat = 3;
+  const teamCount = 10;
   const runnerRunId = "runner-1";
-  const rosterSlots = ["QB", "WR", "WR", "RB", "RB", "W/R", "W/R/T", "K", "DEF", "D", "LB", "CB", "S", "BN", "BN", "BN", "BN", "BN", "BN"];
+  const rosterSlots = ["QB", "WR", "WR", "WR", "RB", "RB", "TE", "W/R/T", "W/R/T", "K", "DEF", "D", "D", "BN", "BN", "BN", "BN", "BN", "BN"];
   const runnerReceipts = [{
     at: iso(0), runId: runnerRunId, roomId, seat: draftSlot, urlSeat, kind: "runner_started",
     configName: "test_league_19_idp", expectedRoomId: roomId, expectedSeat: draftSlot, expectedUrlSeat: urlSeat,
-    observedTeamCount: 12, observedRosterSlots: rosterSlots,
+    observedTeamCount: teamCount, observedRosterSlots: rosterSlots,
   }];
   const controllerReceipts = [];
   const picks = [];
   for (let index = 0; index < 19; index += 1) {
     const round = index + 1;
     const yahooId = String(40_000 + round);
-    const turn = `R${round}P${overallPick(round, draftSlot)}`;
+    const turn = `R${round}P${overallPick(round, draftSlot, teamCount)}`;
     const pick = { yahooId, name: `Player ${round}`, position: POSITIONS[index], team: "BUF", turn, detectionToClickMs: 80, clickToConfirmationMs: 120 };
     picks.push(pick);
     runnerReceipts.push({
@@ -66,7 +67,7 @@ function validPayload() {
     empty:!entry.player,
   }));
   return {
-    extensionVersion: "0.12.0",
+    extensionVersion: "0.13.0",
     roomId,
     seat: draftSlot,
     urlSeat,
@@ -74,7 +75,7 @@ function validPayload() {
     status: { runId: runnerRunId, roomId, seat: draftSlot, urlSeat, state: "completed", picks: picks.map((pick) => ({ ...pick })) },
     runnerReceipts,
     controllerReceipts,
-    extensionReceipts: [{ at:iso(20_500), version:"0.12.0", roomId, seat:draftSlot, urlSeat, runId:runnerRunId, kind:"final_roster_readback", valid:true, finalRosterSlots }],
+    extensionReceipts: [{ at:iso(20_500), version:"0.13.0", roomId, seat:draftSlot, urlSeat, runId:runnerRunId, kind:"final_roster_readback", valid:true, finalRosterSlots }],
   };
 }
 
@@ -119,7 +120,7 @@ function validPublicPayload() {
   const counts = PUBLIC_POSITIONS.reduce((result, position) => ({ ...result, [position]:(result[position] ?? 0) + 1 }), {});
   runnerReceipts.push({ at:iso(16_000), runId, roomId, seat, urlSeat:seat, kind:"runner_completed", picks:15, counts });
   return {
-    extensionVersion:"0.12.0",
+    extensionVersion:"0.13.0",
     roomId,
     seat,
     urlSeat:seat,
@@ -128,8 +129,8 @@ function validPublicPayload() {
     runnerReceipts,
     controllerReceipts,
     extensionReceipts:[
-      { at:iso(1_000), version:"0.12.0", roomId, seat, kind:"manual_pin_staged", expectedRound:2, targetYahooIds:[picks[1].yahooId] },
-      { at:iso(2_000), version:"0.12.0", roomId, seat, kind:"manual_pin_applied", expectedRound:2, chosenYahooId:picks[1].yahooId, failure:null },
+      { at:iso(1_000), version:"0.13.0", roomId, seat, kind:"manual_pin_staged", expectedRound:2, targetYahooIds:[picks[1].yahooId] },
+      { at:iso(2_000), version:"0.13.0", roomId, seat, kind:"manual_pin_applied", expectedRound:2, chosenYahooId:picks[1].yahooId, failure:null },
     ],
   };
 }
@@ -156,7 +157,7 @@ function runtimeFallbackDecision() {
     board,
     availablePlayers:board,
     minimum:5,
-    config:TEST_CONFIG,
+    config:{ ...TEST_CONFIG, teams:10 },
     replacementBySlot:{ QB:200, RB:100, WR:100, TE:80, K:70, DEF:60, D:50, LB:48, DB:45, CB:45, S:45 },
     recomputeBudgetMs:-1,
   }).decision;
@@ -180,7 +181,7 @@ test("accepts a public mock only under the explicit public contract", () => {
   assert.deepEqual(result.manualOverride, { required:true, claimedDecisions:1, stagedReceipts:1, appliedReceipts:1 });
 });
 
-test("retained TEST acceptance stays strict for a public mock export", () => {
+test("League Two TEST acceptance stays strict for a public mock export", () => {
   const result = evaluateTestDraftExport(validPublicPayload());
   assert.equal(result.status, "LOCKED");
   assert.ok(result.errors.includes("test_room_identity_mismatch"));
@@ -217,7 +218,7 @@ test("public mock acceptance does not bind stale manual receipts to the selected
 test("public mock acceptance rejects fabricated final-roster readback evidence", () => {
   const payload = validPublicPayload();
   payload.extensionReceipts.push({
-    at:iso(16_500), version:"0.12.0", roomId:payload.roomId, seat:payload.seat,
+    at:iso(16_500), version:"0.13.0", roomId:payload.roomId, seat:payload.seat,
     runId:"different-run", kind:"final_roster_readback", valid:true, finalRosterSlots:[],
   });
   const result = evaluatePublicMockExport(payload, { requireManualOverride:true });
@@ -316,10 +317,18 @@ test("locks on the controller URL-team identity or receipt-pair contract", () =>
   assert.ok(result.errors.some((error) => error.includes("controller_receipt_contract_failed")));
 });
 
+test("locks instead of throwing when the draft slot exceeds the observed field", () => {
+  const payload = validPayload();
+  payload.seat = 11;
+  const result = evaluateTestDraftExport(payload);
+  assert.equal(result.status, "LOCKED");
+  assert.ok(result.errors.includes("test_draft_slot_exceeds_observed_team_count"));
+});
+
 test("locks on any runner failure, HALT, or Autodraft evidence", () => {
   const payload = validPayload();
   payload.runnerReceipts.splice(-1, 0, {
-    at: iso(19_500), runId: "runner-1", roomId: "18599", seat: 6, urlSeat: 12,
+    at: iso(19_500), runId: "runner-1", roomId: "542830", seat: 6, urlSeat: 3,
     kind: "runner_failed", code: "autodraft_active_at_start",
   });
   const result = evaluateTestDraftExport(payload);
@@ -349,22 +358,16 @@ test("locks when owner-intervention evidence is missing", () => {
   assert.ok(result.errors.includes("owner_intervention_evidence_missing"));
 });
 
-test("locks the exact Watts-in-D and Hutchinson-on-bench final occupancy", () => {
+test("locks an IDP displaced from a generic D slot to the bench", () => {
   const payload = validPayload();
   const receipt = payload.extensionReceipts[0];
   const dPick = payload.status.picks.find((pick) => pick.position === "D");
-  const sPick = payload.status.picks.find((pick) => pick.position === "S");
-  const dSlot = receipt.finalRosterSlots.find((entry) => entry.slot === "D");
-  const sSlot = receipt.finalRosterSlots.find((entry) => entry.slot === "S");
+  const dSlot = receipt.finalRosterSlots.find((entry) => entry.slot === "D" && entry.yahooId === dPick.yahooId);
   const bench = receipt.finalRosterSlots.find((entry) => entry.slot === "BN");
-  dSlot.yahooId = sPick.yahooId;
-  dSlot.name = sPick.name;
-  sSlot.yahooId = null;
-  sSlot.name = null;
-  sSlot.empty = true;
+  dSlot.yahooId = bench.yahooId;
+  dSlot.name = bench.name;
   bench.yahooId = dPick.yahooId;
   bench.name = dPick.name;
-  bench.empty = false;
   receipt.valid = false;
   const result = evaluateTestDraftExport(payload);
   assert.equal(result.status, "LOCKED");

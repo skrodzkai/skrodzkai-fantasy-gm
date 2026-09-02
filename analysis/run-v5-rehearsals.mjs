@@ -177,8 +177,8 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     .flatMap((seat) => seeds.map((seed) => simulateOne({ board, helpers, config, replacementBySlot, survivalCalibration, seat, seed })));
   const reference = simulations[0];
   const identityChaos = reconcileSettingsAndYahoo({
-    settings: { leagueKey: "18599", teamKey: "12", seat: reference.seat, requireReadOnly: true },
-    yahoo: { leagueKey: "18599", teamKey: "wrong", seat: reference.seat, readOnly: true, eligiblePlayerIds: [] },
+    settings: { leagueKey: "542830", teamKey: "3", seat: reference.seat, requireReadOnly: true },
+    yahoo: { leagueKey: "542830", teamKey: "wrong", seat: reference.seat, readOnly: true, eligiblePlayerIds: [] },
   });
   const duplicateProbeBoard = helpers.validateBoard(board);
   const duplicateProbe = helpers.buildDecisionLadder({
@@ -284,6 +284,7 @@ async function waitFor(predicate, timeoutMs = 15_000) {
 
 function runnerLoopEnvironment(runtime, seat) {
   const config = runtime.runner.configs.test_league_19_idp;
+  const teamCount = 10;
   const validated = runtime.runner._test.validateBoard(runtime.board);
   const state = { filled: 0, unavailable:new Set(), opponentRunApplied:false };
   const select = { value: "all", options: [{ value: "all", textContent: "All Positions" }], dispatchEvent() {} };
@@ -301,13 +302,13 @@ function runnerLoopEnvironment(runtime, seat) {
     },
   };
   const runtimeHooks = {
-    parseRoom: () => ({ roomId: "18599", seat: 12 }),
+    parseRoom: () => ({ roomId: "542830", seat: 3 }),
     parseRosterCount: () => ({ filled: state.filled, total: config.rosterTotal }),
     isAutodraftActive: () => false,
     readOwnedTurn: () => {
       if (state.filled >= config.rounds) return null;
       const round = state.filled + 1;
-      const pick = runtime.runner._test.overallPick(round, seat, config.teams);
+      const pick = runtime.runner._test.overallPick(round, seat, teamCount);
       return { label: `R${round}P${pick}`, round, pick };
     },
     readPlayerRow: (row) => row.player,
@@ -353,24 +354,24 @@ function runnerLoopEnvironment(runtime, seat) {
     clearInterval,
     crypto,
     document,
-    location: { pathname: "/draftclient/f1/18599/12" },
+    location: { pathname: "/draftclient/f1/542830/3" },
     localStorage: memoryStorage(),
     setInterval,
     setTimeout,
     SKRODZKaiYahooDraftController: controllerApi,
   };
-  return { config, environment, poolSize: rows.length };
+  return { config, environment, poolSize: rows.length, teamCount };
 }
 
 function createReplayRunner(runtime, seat, selectionHoldMs) {
-  const { config, environment, poolSize } = runnerLoopEnvironment(runtime, seat);
+  const { config, environment, poolSize, teamCount } = runnerLoopEnvironment(runtime, seat);
   const runner = runtime.runner.create({
     configName: "test_league_19_idp",
     executionMode: "TEST",
-    expectedRoomId: "18599",
+    expectedRoomId: "542830",
     expectedSeat: seat,
-    expectedUrlSeat: 12,
-    observedTeamCount: 12,
+    expectedUrlSeat: 3,
+    observedTeamCount: teamCount,
     observedRosterSlots: config.rosterSlots,
     minimumFallbacks: 5,
     pollMs: 25,
@@ -430,7 +431,7 @@ export async function replayRunnerLoop({ boardSource, runnerSource, seat = 6 }) 
     clockBasis: "real-league 30s assumption stressed through the TEST 19-round runner contract",
     yahooLiveDraft: false,
     yahooTestLeagueCleanAutomationPass: false,
-    roomIdentityUsedByHarness: { leagueId: "18599", yahooTeamId: 12, draftSeat: seat },
+    roomIdentityUsedByHarness: { leagueId: "542830", yahooTeamId: 3, observedTeamCount: 10, draftSeat: seat },
     accepted: Object.values(acceptance).every(Boolean),
     acceptance,
     completion: {

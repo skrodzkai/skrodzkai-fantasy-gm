@@ -103,12 +103,25 @@ function flattenYahooRows(offenseSnapshot, specialistSnapshot, eligibilitySnapsh
   };
 }
 
-function buildSleeperByYahooId(sleeperPlayers) {
+function buildSleeperByYahooId(sleeperPlayers, baselineRows, yahooRows) {
   const byYahooId = new Map();
-  for (const player of Object.values(sleeperPlayers ?? {})) {
-    if (player?.yahoo_id !== null && player?.yahoo_id !== undefined) {
-      byYahooId.set(String(player.yahoo_id), player);
-    }
+  const yahooIdsByIdentity = new Map();
+  for (const row of yahooRows ?? []) {
+    const key = identityKey(row.name, row.team);
+    const ids = yahooIdsByIdentity.get(key) ?? new Set();
+    ids.add(String(row.yahooId));
+    yahooIdsByIdentity.set(key, ids);
+  }
+  const yahooBySleeperId = new Map();
+  for (const row of baselineRows ?? []) {
+    if (!row?.sleeper_id) continue;
+    const identityIds = yahooIdsByIdentity.get(identityKey(row.name, row.team));
+    const yahooId = row.yahoo_id || (identityIds?.size === 1 ? [...identityIds][0] : null);
+    if (yahooId) yahooBySleeperId.set(String(row.sleeper_id), String(yahooId));
+  }
+  for (const [recordId, player] of Object.entries(sleeperPlayers ?? {})) {
+    const yahooId = player?.yahoo_id ?? yahooBySleeperId.get(String(player?.player_id ?? recordId));
+    if (yahooId !== null && yahooId !== undefined) byYahooId.set(String(yahooId), player);
   }
   return byYahooId;
 }
@@ -151,7 +164,7 @@ export function assembleV5Board({
   const eligibilityByYahooId = new Map(
     (eligibilitySnapshot?.players ?? []).map((player) => [String(player.yahooId), player]),
   );
-  const sleeperByYahooId = buildSleeperByYahooId(sleeperPlayers);
+  const sleeperByYahooId = buildSleeperByYahooId(sleeperPlayers, baselineRows, yahooRows);
   const offenseIds = new Set((offenseSnapshot.players ?? []).map((player) => String(player.yahooId)));
   const specialistIds = new Set(
     Object.values(specialistSnapshot.positions ?? {}).flat().map((player) => String(player.yahooId)),

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SKRODZKai Yahoo Mock Draft Control",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "SKRODZKai command center for MOCK/TEST execution and isolated read-only REAL SHADOW observation.",
   "background": {
     "service_worker": "extension/command-center-background.js"
@@ -13,10 +13,10 @@
     {
       "matches": [
         "https://football.fantasysports.yahoo.com/f1/mock_waiting*",
-        "https://football.fantasysports.yahoo.com/f1/18599/settings*",
-        "https://football.fantasysports.yahoo.com/f1/18599/draft*",
-        "https://football.fantasysports.yahoo.com/f1/18599/12",
-        "https://football.fantasysports.yahoo.com/f1/18599/12/*",
+        "https://football.fantasysports.yahoo.com/f1/542830/settings*",
+        "https://football.fantasysports.yahoo.com/f1/542830/draft*",
+        "https://football.fantasysports.yahoo.com/f1/542830/3",
+        "https://football.fantasysports.yahoo.com/f1/542830/3/*",
         "https://football.fantasysports.yahoo.com/draftclient/f1/*"
       ],
       "exclude_matches": [

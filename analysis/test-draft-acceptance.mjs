@@ -12,14 +12,14 @@ const TEST_SAME_SLOTS = globalThis.SKRODZKaiYahooMockRunner._test.sameSlots;
 const TEST_OBSERVED_ROSTER_VALIDATOR = globalThis.SKRODZKaiYahooMockRunner._test.validateObservedTestRoster;
 
 const CONTRACTS = Object.freeze({
-  retained_test_19_idp: Object.freeze({
-    name: "retained_test_19_idp",
+  league_two_test_19_idp: Object.freeze({
+    name: "league_two_test_19_idp",
     config: TEST_CONFIG,
     expectedRoomId: String(TEST_CONFIG.leagueId),
     expectedUrlSeat: Number(TEST_CONFIG.urlTeamId),
     requireFinalRosterReadback: true,
     passStatus: "PASS",
-    scope: "RETAINED_TEST_ACCEPTANCE",
+    scope: "LEAGUE_TWO_TEST_ACCEPTANCE",
   }),
   public_mock_15: Object.freeze({
     name: "public_mock_15",
@@ -66,7 +66,7 @@ function auditPublicMockPicks(picks, latencyBudgetMs) {
   return { valid: errors.length === 0, errors };
 }
 
-function acceptanceContract(payload, requested = "retained_test_19_idp") {
+function acceptanceContract(payload, requested = "league_two_test_19_idp") {
   const base = CONTRACTS[requested];
   if (!base) throw new Error(`unknown acceptance contract: ${requested}`);
   if (base.name !== "public_mock_15") return base;
@@ -185,12 +185,13 @@ function evaluateDraftExport(payload, options = {}) {
     if (String(payload?.roomId ?? "") !== expectedRoomId) errors.push("test_room_identity_mismatch");
     if (Number(payload?.urlSeat) !== expectedUrlSeat) errors.push("test_url_team_identity_mismatch");
   }
-  if (!Number.isInteger(Number(payload?.seat)) || Number(payload.seat) < 1 || Number(payload.seat) > config.teams) {
+  const maximumTeams = publicMock ? config.teams : config.maximumTeams;
+  if (!Number.isInteger(Number(payload?.seat)) || Number(payload.seat) < 1 || Number(payload.seat) > maximumTeams) {
     errors.push(publicMock ? "public_mock_draft_slot_invalid" : "test_draft_slot_invalid");
   }
   if (payload?.status?.state !== "completed") errors.push("exported_runner_status_not_completed");
   if (asArray(payload?.status?.picks).length !== config.rounds) errors.push("exported_status_pick_count_mismatch");
-  if (payload?.extensionVersion !== "0.12.0") errors.push("extension_version_mismatch");
+  if (payload?.extensionVersion !== "0.13.0") errors.push("extension_version_mismatch");
   const operatorAttestation = payload?.operatorAttestation;
   if (operatorAttestation?.status === "intervention") {
     if (
@@ -220,12 +221,18 @@ function evaluateDraftExport(payload, options = {}) {
     Number(entry.seat) !== Number(payload?.seat) ||
     Number(entry.urlSeat) !== expectedUrlSeat
   )) errors.push("runner_receipt_identity_mismatch");
+  const observedTeamCount = Number(started[0]?.observedTeamCount);
+  const validObservedTeamCount = publicMock
+    ? observedTeamCount === config.teams
+    : Number.isInteger(observedTeamCount) && observedTeamCount >= config.minimumTeams && observedTeamCount <= config.maximumTeams;
+  const seatFitsObservedField = validObservedTeamCount && Number.isInteger(Number(payload?.seat)) && Number(payload.seat) >= 1 && Number(payload.seat) <= observedTeamCount;
+  if (!seatFitsObservedField) errors.push(publicMock ? "public_mock_seat_exceeds_observed_team_count" : "test_draft_slot_exceeds_observed_team_count");
   if (
     started[0]?.configName !== config.name ||
     String(started[0]?.expectedRoomId) !== expectedRoomId ||
     Number(started[0]?.expectedSeat) !== Number(payload?.seat) ||
     Number(started[0]?.expectedUrlSeat) !== expectedUrlSeat ||
-    Number(started[0]?.observedTeamCount) !== config.teams ||
+    !validObservedTeamCount ||
     !TEST_SAME_SLOTS(started[0]?.observedRosterSlots, config.rosterSlots)
   ) errors.push(publicMock ? "runner_started_public_mock_config_mismatch" : "runner_started_test_config_mismatch");
   if (
@@ -263,8 +270,10 @@ function evaluateDraftExport(payload, options = {}) {
   picks.forEach((pick, index) => {
     const round = index + 1;
     if (pick.round !== round) errors.push(`round_${round}_runner_round_mismatch`);
-    const expectedTurn = `R${round}P${TEST_OVERALL_PICK(round, Number(payload?.seat), config.teams)}`;
-    if (pick.turn !== expectedTurn) errors.push(`round_${round}_snake_turn_mismatch`);
+    if (seatFitsObservedField) {
+      const expectedTurn = `R${round}P${TEST_OVERALL_PICK(round, Number(payload?.seat), observedTeamCount)}`;
+      if (pick.turn !== expectedTurn) errors.push(`round_${round}_snake_turn_mismatch`);
+    }
   });
   const statusPickIds = asArray(payload?.status?.picks).map((pick) => String(pick?.yahooId ?? ""));
   if (statusPickIds.some((yahooId, index) => yahooId !== picks[index]?.yahooId)) errors.push("exported_status_runner_pick_mismatch");
@@ -371,6 +380,7 @@ function evaluateDraftExport(payload, options = {}) {
     roomId: String(payload?.roomId ?? ""),
     draftSlot: Number(payload?.seat),
     urlTeamId: Number(payload?.urlSeat),
+    observedTeamCount,
     extensionVersion: payload?.extensionVersion ?? null,
     operatorAttestation: operatorAttestation?.status ?? "missing",
     runnerRunId: selectedRun.runId,
@@ -407,7 +417,7 @@ function evaluateDraftExport(payload, options = {}) {
 }
 
 export function evaluateTestDraftExport(payload, options = {}) {
-  return evaluateDraftExport(payload, { ...options, contract: "retained_test_19_idp" });
+  return evaluateDraftExport(payload, { ...options, contract: "league_two_test_19_idp" });
 }
 
 export function evaluatePublicMockExport(payload, options = {}) {
@@ -419,8 +429,8 @@ async function main() {
     const [key, ...value] = entry.split("=");
     return [key.replace(/^--/, ""), value.join("=")];
   }));
-  if (!args.input || !args.output) throw new Error("usage: node analysis/test-draft-acceptance.mjs --input=export.json --output=report.json [--contract=retained_test_19_idp|public_mock_15] [--require-manual-override=true|false]");
-  const contract = args.contract ?? "retained_test_19_idp";
+  if (!args.input || !args.output) throw new Error("usage: node analysis/test-draft-acceptance.mjs --input=export.json --output=report.json [--contract=league_two_test_19_idp|public_mock_15] [--require-manual-override=true|false]");
+  const contract = args.contract ?? "league_two_test_19_idp";
   if (!CONTRACTS[contract]) throw new Error(`unknown acceptance contract: ${contract}`);
   if (args["require-manual-override"] != null && !["true", "false"].includes(args["require-manual-override"])) {
     throw new Error("--require-manual-override must be true or false");
