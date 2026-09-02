@@ -67,7 +67,7 @@ function validPayload() {
     empty:!entry.player,
   }));
   return {
-    extensionVersion: "0.14.0",
+    extensionVersion: "0.14.1",
     roomId,
     seat: draftSlot,
     urlSeat,
@@ -75,7 +75,7 @@ function validPayload() {
     status: { runId: runnerRunId, roomId, seat: draftSlot, urlSeat, state: "completed", picks: picks.map((pick) => ({ ...pick })) },
     runnerReceipts,
     controllerReceipts,
-    extensionReceipts: [{ at:iso(20_500), version:"0.14.0", roomId, seat:draftSlot, urlSeat, runId:runnerRunId, kind:"final_roster_readback", valid:true, finalRosterSlots }],
+    extensionReceipts: [{ at:iso(20_500), version:"0.14.1", roomId, seat:draftSlot, urlSeat, runId:runnerRunId, kind:"final_roster_readback", valid:true, finalRosterSlots }],
   };
 }
 
@@ -120,7 +120,7 @@ function validPublicPayload() {
   const counts = PUBLIC_POSITIONS.reduce((result, position) => ({ ...result, [position]:(result[position] ?? 0) + 1 }), {});
   runnerReceipts.push({ at:iso(16_000), runId, roomId, seat, urlSeat:seat, kind:"runner_completed", picks:15, counts });
   return {
-    extensionVersion:"0.14.0",
+    extensionVersion:"0.14.1",
     roomId,
     seat,
     urlSeat:seat,
@@ -129,8 +129,8 @@ function validPublicPayload() {
     runnerReceipts,
     controllerReceipts,
     extensionReceipts:[
-      { at:iso(1_000), version:"0.14.0", roomId, seat, kind:"manual_pin_staged", expectedRound:2, targetYahooIds:[picks[1].yahooId] },
-      { at:iso(2_000), version:"0.14.0", roomId, seat, kind:"manual_pin_applied", expectedRound:2, chosenYahooId:picks[1].yahooId, failure:null },
+      { at:iso(1_000), version:"0.14.1", roomId, seat, kind:"manual_pin_staged", expectedRound:2, targetYahooIds:[picks[1].yahooId] },
+      { at:iso(2_000), version:"0.14.1", roomId, seat, kind:"manual_pin_applied", expectedRound:2, chosenYahooId:picks[1].yahooId, failure:null },
     ],
   };
 }
@@ -218,7 +218,7 @@ test("public mock acceptance does not bind stale manual receipts to the selected
 test("public mock acceptance rejects fabricated final-roster readback evidence", () => {
   const payload = validPublicPayload();
   payload.extensionReceipts.push({
-    at:iso(16_500), version:"0.14.0", roomId:payload.roomId, seat:payload.seat,
+    at:iso(16_500), version:"0.14.1", roomId:payload.roomId, seat:payload.seat,
     runId:"different-run", kind:"final_roster_readback", valid:true, finalRosterSlots:[],
   });
   const result = evaluatePublicMockExport(payload, { requireManualOverride:true });

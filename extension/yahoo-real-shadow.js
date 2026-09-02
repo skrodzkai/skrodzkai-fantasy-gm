@@ -1,7 +1,7 @@
 (function installYahooRealShadow(root) {
   "use strict";
 
-  const VERSION = "0.14.0";
+  const VERSION = "0.14.1";
   const LEAGUE_ID = "420010";
   const TEAM_ID = 7;
   const SETTINGS_KEY = "skz.realShadowSettings";
@@ -11,6 +11,25 @@
   ]);
   const readers = root.SKRODZKaiYahooPageReaders;
   if (!readers) throw new Error("real shadow readers must load first");
+
+  function validRuntimeAttestation(attestation) {
+    return Boolean(
+      attestation?.ok === true
+      && String(attestation.version) === VERSION
+      && /^[a-f0-9]{64}$/.test(String(attestation.digest ?? ""))
+      && String(attestation.bootId ?? "").length >= 8
+      && Number.isFinite(Number(attestation.bootedAt)),
+    );
+  }
+
+  async function readRuntimeAttestation(environment) {
+    try {
+      const response = await environment.chrome.runtime.sendMessage({ type:"version_handshake", version:VERSION });
+      return validRuntimeAttestation(response) ? response : null;
+    } catch {
+      return null;
+    }
+  }
 
   function same(left, right) {
     return left.length === right.length && left.every((value, index) => value === right[index]);
@@ -61,7 +80,7 @@
     };
   }
 
-  function buildSnapshot({ documentRef, locationRef, settings, boardData, now = Date.now() }) {
+  function buildSnapshot({ documentRef, locationRef, settings, boardData, attestation = null, now = Date.now() }) {
     const body = String(documentRef?.body?.innerText ?? "");
     const pathname = String(locationRef?.pathname ?? "");
     const room = readers.parseRoom(pathname);
@@ -78,13 +97,15 @@
     const warnings = [
       !verified && { severity:"danger", text:"REAL settings are not verified in this extension session." },
       !health.ready && { severity:"danger", text:"Player board is stale or missing injury/bye coverage." },
+      !validRuntimeAttestation(attestation) && { severity:"danger", text:"Runtime attestation is unavailable; shadow remains locked." },
       autodraft && { severity:"danger", text:"Yahoo Autodraft appears active; shadow remains read-only." },
       draftClient && !roster && { severity:"danger", text:"Yahoo roster count is unreadable." },
       { severity:"info", text:"REAL SHADOW cannot arm, pin, filter, draft, or mutate Yahoo." },
     ].filter(Boolean);
-    const ready = (settingsPage || draftHome || draftClient || pathname === `/f1/${LEAGUE_ID}/${TEAM_ID}`) && verified && health.ready;
+    const ready = (settingsPage || draftHome || draftClient || pathname === `/f1/${LEAGUE_ID}/${TEAM_ID}`) && verified && health.ready && validRuntimeAttestation(attestation);
     return {
       version:VERSION,
+      attestation:validRuntimeAttestation(attestation) ? { ...attestation } : null,
       mode:"REAL SHADOW",
       kind:ready ? "neutral" : "bad",
       label:ready ? "REAL SHADOW · READ ONLY" : "REAL SHADOW LOCKED",
@@ -108,7 +129,10 @@
       documentRef.body?.append(rail);
     }
     const warningText = snapshot.warnings.map((warning) => warning.text).join("\n");
-    rail.textContent = `SKRODZKai · REAL SHADOW\n${snapshot.label}\nTeam ${TEAM_ID} · draft slot ${snapshot.context.seat}\nSettings ${snapshot.shadow.settingsVerified ? "VERIFIED" : "LOCKED"} · Board ${snapshot.shadow.boardHealth.ready ? "FRESH" : "LOCKED"}\nRoster ${snapshot.shadow.roster ? `${snapshot.shadow.roster.filled}/${snapshot.shadow.roster.total}` : "—"} · Available ${snapshot.shadow.availablePlayerCount}\n\n${warningText}`;
+    const runtimeText = snapshot.attestation
+      ? `v${snapshot.attestation.version} · SHA ${snapshot.attestation.digest.slice(0, 12)} · LOAD ${new Date(Number(snapshot.attestation.bootedAt)).toISOString()}`
+      : `v${VERSION} · SHA UNAVAILABLE · LOAD UNVERIFIED`;
+    rail.textContent = `SKRODZKai · REAL SHADOW\n${snapshot.label}\nRuntime ${runtimeText}\nTeam ${TEAM_ID} · draft slot ${snapshot.context.seat}\nSettings ${snapshot.shadow.settingsVerified ? "VERIFIED" : "LOCKED"} · Board ${snapshot.shadow.boardHealth.ready ? "FRESH" : "LOCKED"}\nRoster ${snapshot.shadow.roster ? `${snapshot.shadow.roster.filled}/${snapshot.shadow.roster.total}` : "—"} · Available ${snapshot.shadow.availablePlayerCount}\n\n${warningText}`;
   }
 
   async function boot(environment = root) {
@@ -129,7 +153,8 @@
       }
     };
     await refreshSettingsReceipt();
-    let snapshot = buildSnapshot({ documentRef:environment.document, locationRef:environment.location, settings:receipt, boardData:environment.SKRODZKaiYahooMockBoard });
+    let attestation = await readRuntimeAttestation(environment);
+    let snapshot = buildSnapshot({ documentRef:environment.document, locationRef:environment.location, settings:receipt, boardData:environment.SKRODZKaiYahooMockBoard, attestation });
     mount(snapshot, environment.document);
     const publish = () => environment.chrome.runtime.sendMessage({ type:"state", role:"shadow", at:Date.now(), snapshot }).catch(() => undefined);
     publish();
@@ -137,8 +162,9 @@
     const timer = environment.setInterval(() => {
       if (refreshing) return;
       refreshing = true;
-      void refreshSettingsReceipt().then(() => {
-        snapshot = buildSnapshot({ documentRef:environment.document, locationRef:environment.location, settings:receipt, boardData:environment.SKRODZKaiYahooMockBoard });
+      void Promise.all([refreshSettingsReceipt(), readRuntimeAttestation(environment)]).then(([, nextAttestation]) => {
+        attestation = nextAttestation;
+        snapshot = buildSnapshot({ documentRef:environment.document, locationRef:environment.location, settings:receipt, boardData:environment.SKRODZKaiYahooMockBoard, attestation });
         mount(snapshot, environment.document);
         publish();
       }).finally(() => { refreshing = false; });
@@ -146,6 +172,6 @@
     return { stop:() => environment.clearInterval(timer), getSnapshot:() => snapshot };
   }
 
-  root.SKRODZKaiYahooRealShadow = { version:VERSION, boot, _test:{ parseSettings, parseDraftSlot, availablePlayers, settingsReceipt, validSettingsReceipt, boardHealth, buildSnapshot, expectedRoster:[...EXPECTED_ROSTER] } };
+  root.SKRODZKaiYahooRealShadow = { version:VERSION, boot, _test:{ parseSettings, parseDraftSlot, availablePlayers, settingsReceipt, validSettingsReceipt, boardHealth, buildSnapshot, validRuntimeAttestation, readRuntimeAttestation, expectedRoster:[...EXPECTED_ROSTER] } };
   if (root.document && root.location && root.chrome) void boot(root);
 })(globalThis);

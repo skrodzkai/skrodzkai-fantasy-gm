@@ -1,7 +1,7 @@
 (function installYahooMockExtension(root) {
   "use strict";
 
-  const VERSION = "0.14.0";
+  const VERSION = "0.14.1";
   const GLOBAL_KEY = "__skrodzkaiYahooMockExtensionV1";
   const PREFLIGHT_KEY = "skrodzkai-yahoo-mock-extension-preflight-v1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-extension-receipts-v1";
@@ -9,6 +9,9 @@
   const CONTROLLER_RECEIPT_KEY = "skrodzkai-yahoo-draft-controller-receipts-v1";
   const MANUAL_STAGE_KEY = "skrodzkai-yahoo-mock-manual-stage-v1";
   const TEST_SETTINGS_KEY = "skrodzkai-yahoo-test-settings-v1";
+  const RELOAD_MARKER_KEY = "skrodzkai-runtime-reload-marker-v1";
+  const RELOAD_MARKER_TTL_MS = 15000;
+  const RELOAD_PAGE_DELAY_MS = 1500;
   const PREFLIGHT_TTL_MS = 30 * 60 * 1000;
   const BOARD_MAX_AGE_MS = 24 * 60 * 60 * 1000;
   const BOARD_FUTURE_TOLERANCE_MS = 15 * 60 * 1000;
@@ -282,6 +285,43 @@
     }
   }
 
+  function validRuntimeAttestation(attestation) {
+    return Boolean(
+      attestation?.ok === true
+      && String(attestation.version) === VERSION
+      && /^[a-f0-9]{64}$/.test(String(attestation.digest ?? ""))
+      && String(attestation.bootId ?? "").length >= 8
+      && Number.isFinite(Number(attestation.bootedAt)),
+    );
+  }
+
+  function makeReloadMarker(attestation, now = Date.now()) {
+    if (!validRuntimeAttestation(attestation)) throw new Error("runtime_attestation_unavailable");
+    return {
+      requestedAt:now,
+      expiresAt:now + RELOAD_MARKER_TTL_MS,
+      version:attestation.version,
+      digest:attestation.digest,
+      bootId:attestation.bootId,
+    };
+  }
+
+  function evaluateReloadMarker(marker, attestation, now = Date.now()) {
+    if (!marker) return { status:"none" };
+    if (!Number.isFinite(Number(marker.expiresAt)) || Number(marker.expiresAt) < now) return { status:"failed", reason:"previous Reload & Verify never completed" };
+    if (!validRuntimeAttestation(attestation)) return { status:"failed", reason:"runtime attestation unavailable after reload" };
+    if (String(marker.bootId ?? "") === String(attestation.bootId)) return { status:"failed", reason:"extension boot identity did not change" };
+    return { status:"passed", reason:`v${attestation.version} · SHA ${attestation.digest.slice(0, 12)} · new load verified` };
+  }
+
+  function reloadRefusal(snapshot = {}) {
+    const context = snapshot.context ?? {};
+    if (context.armed) return "reload_refused_while_armed";
+    if (context.ownedTurn) return "reload_refused_during_owned_turn";
+    if (context.autodraft) return "reload_refused_while_autodraft_active";
+    return null;
+  }
+
   function writeReceipt(storage, details) {
     const receipts = readJson(storage, RECEIPT_KEY, []);
     const entry = { at: new Date().toISOString(), version: VERSION, ...details };
@@ -494,6 +534,7 @@
         .dock-readout { min-width:0; }
         .dock-readout strong { display:block; overflow:hidden; color:var(--cyan); font:700 14px/1.15 "SF Mono",ui-monospace,monospace; text-overflow:ellipsis; white-space:nowrap; }
         .dock-readout span { display:block; margin-top:4px; overflow:hidden; color:var(--muted); font:700 11px/1.2 "SF Mono",ui-monospace,monospace; text-overflow:ellipsis; white-space:nowrap; }
+        .dock-readout .runtime-attestation { color:var(--cyan); font-size:8px; letter-spacing:.03em; }
         .dock-actions { display:grid; gap:6px; }
         .dock-actions button { min-width:70px; padding:7px 6px; font-size:10px; }
         .globe { position: relative; width: 34px; height: 34px; flex: 0 0 34px; border: 2px solid var(--cyan); border-radius: 50%; box-shadow: 0 0 18px rgba(69,230,223,.24); overflow: hidden; }
@@ -585,8 +626,8 @@
       <section class="rail">
         <header class="cap">
           <div class="brand-lockup"><img class="brand-image" src="${root.chrome?.runtime?.getURL?.("extension/assets/skrodzkai-globe-mark.png") ?? ""}" alt="SKRODZKai" /></div>
-          <div class="dock-readout"><strong data-dock-primary>SAFE · --:--</strong><span data-compact-status>MOCK · ROOM — · SEAT —</span><span data-dock-target>Waiting for Yahoo availability</span></div>
-          <div class="dock-actions"><button class="expand" type="button">Open Center</button><button class="dock-kill danger" type="button" disabled>Kill</button></div>
+          <div class="dock-readout"><strong data-dock-primary>SAFE · --:--</strong><span data-compact-status>MOCK · ROOM — · SEAT —</span><span data-dock-target>Waiting for Yahoo availability</span><span class="runtime-attestation" data-runtime-attestation>v${VERSION} · SHA PENDING · LOAD PENDING</span></div>
+          <div class="dock-actions"><button class="reload" type="button" disabled>Reload & Verify</button><button class="expand" type="button">Open Center</button><button class="dock-kill danger" type="button" disabled>Kill</button></div>
         </header>
         <div class="mode-strip"><span class="mode-chip active">MOCK</span><span class="mode-chip">TEST</span><span class="mode-chip blocked">REAL ⛔</span></div>
         <div class="body">
@@ -621,13 +662,13 @@
       status: Object.fromEntries([...shadow.querySelectorAll("[data-status]")].map((node) => [node.dataset.status, node])),
       roster: shadow.querySelector("[data-roster]"), rosterCount: shadow.querySelector("[data-roster-count]"), composition: shadow.querySelector("[data-composition]"), latestPick: shadow.querySelector("[data-latest-pick]"),
       board: shadow.querySelector("[data-board]"), between: shadow.querySelector("[data-between]"), warnings: shadow.querySelector("[data-warnings]"), warningCount: shadow.querySelector("[data-warning-count]"), events: shadow.querySelector("[data-events]"), disagreement: shadow.querySelector("[data-disagreement]"),
-      stageCount: shadow.querySelector("[data-stage-count]"), pinState: shadow.querySelector("[data-pin-state]"), search: shadow.querySelector("[data-search]"), manualList: shadow.querySelector("[data-manual-list]"), clearPin: shadow.querySelector("[data-clear-pin]"), confirm: shadow.querySelector("[data-confirm]"), compact: shadow.querySelector("[data-compact-status]"), dockPrimary: shadow.querySelector("[data-dock-primary]"), dockTarget: shadow.querySelector("[data-dock-target]"), modeLabel: shadow.querySelector(".mode"), modeChips: [...shadow.querySelectorAll(".mode-chip")],
+      stageCount: shadow.querySelector("[data-stage-count]"), pinState: shadow.querySelector("[data-pin-state]"), search: shadow.querySelector("[data-search]"), manualList: shadow.querySelector("[data-manual-list]"), clearPin: shadow.querySelector("[data-clear-pin]"), confirm: shadow.querySelector("[data-confirm]"), compact: shadow.querySelector("[data-compact-status]"), dockPrimary: shadow.querySelector("[data-dock-primary]"), dockTarget: shadow.querySelector("[data-dock-target]"), runtimeAttestation: shadow.querySelector("[data-runtime-attestation]"), modeLabel: shadow.querySelector(".mode"), modeChips: [...shadow.querySelectorAll(".mode-chip")],
     };
-    const controls = { arm: shadow.querySelector(".arm"), halt: shadow.querySelector(".halt"), export: shadow.querySelector(".export"), dock: shadow.querySelector(".dock-kill"), expand: shadow.querySelector(".expand") };
-    const ui = { mode:"MOCK", kind:"", label:"LOCKED", detail:"Waiting for a verified draft room.", context:{}, roster:[], recommendations:[], board:[], between:{}, warnings:[], staged:[], pinned:null, pinOutcome:null, pinText:"No pin staged. Five verified fallbacks remain active.", pinLabel:"BASELINE", ladderState:"BASELINE READY", latestText:"No confirmed selection yet.", events:[], latestPickId:"", onManualConfirm:null, onManualClear:null, onOpen:null, locked:false, observers:[] };
+    const controls = { arm: shadow.querySelector(".arm"), halt: shadow.querySelector(".halt"), export: shadow.querySelector(".export"), dock: shadow.querySelector(".dock-kill"), expand: shadow.querySelector(".expand"), reload:shadow.querySelector(".reload") };
+    const ui = { mode:"MOCK", kind:"", label:"LOCKED", detail:"Waiting for a verified draft room.", context:{}, roster:[], recommendations:[], board:[], between:{}, warnings:[], staged:[], pinned:null, pinOutcome:null, pinText:"No pin staged. Five verified fallbacks remain active.", pinLabel:"BASELINE", ladderState:"BASELINE READY", latestText:"No confirmed selection yet.", events:[], latestPickId:"", attestation:null, onManualConfirm:null, onManualClear:null, onOpen:null, onReload:null, locked:false, observers:[] };
     const redrawManual = () => {
       if (ui.locked) {
-        data.manualList.innerHTML = `<div class="event">Hard-refresh Yahoo to restore extension controls.</div>`;
+        data.manualList.innerHTML = `<div class="event">Use Reload & Verify to restore extension controls.</div>`;
         data.confirm.disabled = true;
         data.clearPin.disabled = true;
         data.search.disabled = true;
@@ -672,10 +713,20 @@
     data.clearPin.addEventListener("click", () => { if (typeof ui.onManualClear === "function" && ui.onManualClear() !== false) { ui.pinned = null; ui.pinOutcome = { status:"cleared", expectedRound:null, reason:"deterministic baseline active" }; redrawManual(); } });
     controls.expand.addEventListener("click", () => ui.onOpen?.());
     controls.dock.addEventListener("click", () => controls.halt.click());
+    controls.reload.addEventListener("click", () => ui.onReload?.());
     const setStatus = (key, value, kind = "") => { if (!data.status[key]) return; data.status[key].textContent = value; data.status[key].className = `value ${kind}`.trim(); };
     const api = {
       controls,
       setMode(mode) { ui.mode = String(mode ?? "MOCK").toUpperCase(); if (data.modeLabel) data.modeLabel.textContent = `${ui.mode} / LOCAL`; for (const chip of data.modeChips) { const chipMode = String(chip.textContent ?? "").replace("⛔", "").trim(); chip.classList.toggle("active", chipMode === ui.mode); } },
+      setAttestation(attestation = null) {
+        ui.attestation = validRuntimeAttestation(attestation) ? { ...attestation } : null;
+        data.runtimeAttestation.textContent = ui.attestation
+          ? `v${ui.attestation.version} · SHA ${ui.attestation.digest.slice(0, 12)} · LOAD ${new Date(Number(ui.attestation.bootedAt)).toISOString()}`
+          : `v${VERSION} · SHA UNAVAILABLE · LOAD UNVERIFIED`;
+        controls.reload.disabled = !ui.attestation;
+      },
+      setReloadHandler(handler) { ui.onReload = typeof handler === "function" ? handler : null; controls.reload.disabled = !ui.attestation || !ui.onReload; },
+      setReloadPending(pending) { controls.reload.disabled = Boolean(pending) || !ui.attestation || !ui.onReload; controls.reload.textContent = pending ? "Reloading…" : "Reload & Verify"; },
       render(kind, label, message) { ui.kind=kind; ui.label=label; ui.detail=message; rail.classList.remove("ok", "bad", "complete"); if (kind) rail.classList.add(kind); state.textContent = label; detail.textContent = message; },
       setExpanded(expanded = true) { if (expanded) ui.onOpen?.(); },
       setOpenHandler(handler) { ui.onOpen = typeof handler === "function" ? handler : null; },
@@ -714,11 +765,12 @@
       getManualStage() { return ui.staged.slice(); },
       isLocked() { return ui.locked; },
       trackObserver(observer) { if (observer?.disconnect) ui.observers.push(observer); },
-      lock(reason = "Extension was reloaded. Hard-refresh this Yahoo tab before arming.", label = "EXTENSION RELOAD REQUIRED") {
+      lock(reason = "Extension context changed. Use Reload & Verify before arming.", label = "EXTENSION RELOAD REQUIRED") {
         ui.locked = true;
         for (const observer of ui.observers) observer.disconnect();
         ui.observers = [];
-        for (const control of Object.values(controls)) control.disabled = true;
+        for (const [name, control] of Object.entries(controls)) if (name !== "reload") control.disabled = true;
+        controls.reload.disabled = !ui.attestation || !ui.onReload;
         data.confirm.disabled = true;
         data.clearPin.disabled = true;
         data.search.disabled = true;
@@ -743,10 +795,10 @@
         return false;
       },
       getSnapshot() {
-        return { version:VERSION, mode:ui.mode, kind:ui.kind, label:ui.label, detail:ui.detail, context:ui.context, roster:ui.roster, recommendations:ui.recommendations, board:ui.board, between:ui.between, warnings:ui.warnings, events:ui.events, latestText:ui.latestText, ladderState:ui.ladderState, pinned:ui.pinned, pinOutcome:ui.pinOutcome, pinText:ui.pinText, pinLabel:ui.pinLabel, controls:{ arm:{ disabled:controls.arm.disabled, text:controls.arm.textContent }, halt:{ disabled:controls.halt.disabled, text:controls.halt.textContent }, export:{ disabled:controls.export.disabled, text:controls.export.textContent } } };
+        return { version:VERSION, attestation:ui.attestation, mode:ui.mode, kind:ui.kind, label:ui.label, detail:ui.detail, context:ui.context, roster:ui.roster, recommendations:ui.recommendations, board:ui.board, between:ui.between, warnings:ui.warnings, events:ui.events, latestText:ui.latestText, ladderState:ui.ladderState, pinned:ui.pinned, pinOutcome:ui.pinOutcome, pinText:ui.pinText, pinLabel:ui.pinLabel, controls:{ arm:{ disabled:controls.arm.disabled, text:controls.arm.textContent }, halt:{ disabled:controls.halt.disabled, text:controls.halt.textContent }, export:{ disabled:controls.export.disabled, text:controls.export.textContent }, reload:{ disabled:controls.reload.disabled, text:controls.reload.textContent } } };
       },
     };
-    api.setContext(); api.setRoster(PUBLIC_ROSTER_SLOTS.map((slot) => ({ slot }))); api.setRecommendations([]); api.setBetweenTurns(); api.setWarnings([]); redrawManual(); host._controlApi = api; return api;
+    api.setContext(); api.setRoster(PUBLIC_ROSTER_SLOTS.map((slot) => ({ slot }))); api.setRecommendations([]); api.setBetweenTurns(); api.setWarnings([]); api.setAttestation(null); redrawManual(); host._controlApi = api; return api;
   }
 
   function commandCenterRole(pathname = "") {
@@ -756,7 +808,7 @@
   }
 
   function extensionContextFailureMessage() {
-    return "Extension was reloaded or its version changed. Hard-refresh this Yahoo tab before arming.";
+    return "Extension context changed. Use Reload & Verify on this Yahoo page before arming.";
   }
 
   function lockExtensionContext(environment, rail, error = null) {
@@ -779,27 +831,82 @@
 
   async function requireCurrentExtensionVersion(environment) {
     const runtime = environment.chrome?.runtime ?? root.chrome?.runtime;
-    if (!runtime?.sendMessage) throw new Error("extension_bridge_unavailable_hard_refresh_required");
+    if (!runtime?.sendMessage) throw new Error("extension_bridge_unavailable_reload_verify_required");
     let response;
     try {
       response = await runtime.sendMessage({ type:"version_handshake", version:VERSION });
     } catch {
-      throw new Error("extension_context_invalidated_hard_refresh_required");
+      throw new Error("extension_context_invalidated_reload_verify_required");
     }
-    if (response?.ok !== true || String(response.version ?? "") !== VERSION) {
+    if (!validRuntimeAttestation(response)) {
       throw new Error(`extension_version_mismatch:content_${VERSION}:background_${String(response?.version ?? "missing")}`);
     }
-    return VERSION;
+    return response;
   }
 
-  async function verifyCurrentExtensionVersion(environment, rail) {
+  async function requireRuntimeAttestationWithRetry(environment, attempts = 20, delayMs = 100) {
+    let failure = null;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try { return await requireCurrentExtensionVersion(environment); }
+      catch (error) { failure = error; }
+      if (attempt + 1 < attempts) await new Promise((resolve) => environment.setTimeout(resolve, delayMs));
+    }
+    throw failure ?? new Error("runtime_attestation_unavailable");
+  }
+
+  async function verifyCurrentExtensionVersion(environment, rail, { retry = false } = {}) {
     try {
-      await requireCurrentExtensionVersion(environment);
+      const attestation = retry
+        ? await requireRuntimeAttestationWithRetry(environment)
+        : await requireCurrentExtensionVersion(environment);
+      rail.setAttestation?.(attestation);
       return true;
     } catch (error) {
+      rail.setAttestation?.(null);
       lockExtensionContext(environment, rail, error);
       return false;
     }
+  }
+
+  function installReloadAndVerify(environment, rail) {
+    rail.setReloadHandler?.(() => {
+      const snapshot = rail.getSnapshot?.() ?? {};
+      const refusal = reloadRefusal(snapshot);
+      if (refusal) {
+        rail.addEvent?.("reload refused", refusal);
+        rail.render?.("bad", "RELOAD REFUSED", refusal);
+        return false;
+      }
+      let marker;
+      try {
+        marker = makeReloadMarker(snapshot.attestation);
+        environment.sessionStorage.setItem(RELOAD_MARKER_KEY, JSON.stringify(marker));
+      } catch (error) {
+        rail.addEvent?.("reload refused", String(error?.message ?? error));
+        rail.render?.("bad", "RELOAD REFUSED", String(error?.message ?? error));
+        return false;
+      }
+      rail.setReloadPending?.(true);
+      const reloadTimer = environment.setTimeout(() => environment.location.reload(), RELOAD_PAGE_DELAY_MS);
+      const beginReload = () => rail.lock?.("Reloading the extension and this Yahoo tab. Yahoo controls remain disabled until the new runtime attests.", "RELOAD VERIFYING");
+      const runtime = environment.chrome?.runtime ?? root.chrome?.runtime;
+      if (!runtime?.id || !runtime?.sendMessage) { beginReload(); return true; }
+      try {
+        const pending = runtime.sendMessage({ type:"reload_extension", marker:{ version:marker.version, digest:marker.digest, bootId:marker.bootId } });
+        void Promise.resolve(pending).then((response) => {
+          if (response?.ok !== false) { beginReload(); return; }
+          environment.clearTimeout?.(reloadTimer);
+          environment.sessionStorage.removeItem(RELOAD_MARKER_KEY);
+          rail.setReloadPending?.(false);
+          rail.addEvent?.("reload refused", String(response.error ?? "background reload refused"));
+          rail.render?.("bad", "RELOAD REFUSED", String(response.error ?? "background reload refused"));
+        }).catch(beginReload);
+      } catch {
+        // An invalidated bridge means Chrome already reloaded the extension; the page timer completes verification.
+        beginReload();
+      }
+      return true;
+    });
   }
 
   function attachCommandCenterBridge(environment, rail) {
@@ -1379,9 +1486,21 @@
   async function boot(environment = root) {
     if (!environment.document || !environment.location) return null;
     const rail = createRail(environment.document);
+    installReloadAndVerify(environment, rail);
     attachCommandCenterBridge(environment, rail);
     try {
-      if (!await verifyCurrentExtensionVersion(environment, rail)) return rail;
+      const markerRaw = environment.sessionStorage.getItem(RELOAD_MARKER_KEY);
+      const marker = markerRaw == null ? null : readJson(environment.sessionStorage, RELOAD_MARKER_KEY, { invalid:true });
+      if (!await verifyCurrentExtensionVersion(environment, rail, { retry:Boolean(markerRaw) })) return rail;
+      const reloadOutcome = evaluateReloadMarker(marker, rail.getSnapshot().attestation);
+      if (reloadOutcome.status === "failed") {
+        rail.lock(reloadOutcome.reason, "RELOAD VERIFY FAILED");
+        return rail;
+      }
+      if (reloadOutcome.status === "passed") {
+        environment.sessionStorage.removeItem(RELOAD_MARKER_KEY);
+        rail.addEvent("reload verified", reloadOutcome.reason);
+      }
       if (environment.location.pathname === "/f1/mock_waiting") {
         bootWaitingRoom(environment, rail);
       } else if (environment.location.pathname === `/f1/${TEST_LEAGUE_ID}/settings`) {
@@ -1440,6 +1559,12 @@
       makeOperatorAttestation,
       statusFromRunnerReceipts,
       requireCurrentExtensionVersion,
+      requireRuntimeAttestationWithRetry,
+      validRuntimeAttestation,
+      makeReloadMarker,
+      evaluateReloadMarker,
+      reloadRefusal,
+      installReloadAndVerify,
       buildExportPayload,
       buildUiRoster,
       buildUiRecommendations,

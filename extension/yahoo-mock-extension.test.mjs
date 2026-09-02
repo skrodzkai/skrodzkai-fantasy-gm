@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { webcrypto } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import vm from "node:vm";
+import { sourceRuntimeAttestation } from "../analysis/runtime-attestation.mjs";
 
 const source = await readFile(new URL("./yahoo-mock-extension.js", import.meta.url), "utf8");
 const boardSource = await readFile(new URL("./yahoo-mock-board.js", import.meta.url), "utf8");
@@ -24,7 +27,7 @@ vm.runInContext(runnerSource, context);
 vm.runInContext(source, context);
 vm.runInContext(boardSource, context);
 const helpers = context.SKRODZKaiYahooMockExtension._test;
-const backgroundContext = { Date };
+const backgroundContext = { Date, TextEncoder, URL };
 backgroundContext.globalThis = backgroundContext;
 vm.createContext(backgroundContext);
 vm.runInContext(backgroundSource, backgroundContext);
@@ -69,6 +72,7 @@ function memoryLocalStorage() {
   return {
     getItem: (key) => values.get(key) ?? null,
     setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
   };
 }
 
@@ -281,7 +285,7 @@ test("exports runner and controller receipts using distinct draft-slot and Yahoo
 test("manifest has only the two public-mock surfaces plus the exact verified test league and no broad permissions", async () => {
   const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "0.14.0");
+  assert.equal(manifest.version, "0.14.1");
   assert.deepEqual(manifest.permissions, ["storage"]);
   assert.equal(manifest.host_permissions, undefined);
   assert.deepEqual(manifest.background, { service_worker: "extension/command-center-background.js" });
@@ -392,7 +396,7 @@ test("background exposes session storage to isolated content scripts", () => {
   const session = { ...memorySession(), setAccessLevel(options) { access.push(options); return Promise.resolve(); } };
   const chromeApi = {
     storage:{ session },
-    runtime:{ getManifest:() => ({ version:"0.14.0" }), getURL:(value) => value, onMessage:{ addListener() {} } },
+    runtime:{ getManifest:() => ({ version:"0.14.1" }), getURL:(value) => value, onMessage:{ addListener() {} } },
     windows:{ onRemoved:{ addListener() {} }, update:async () => {}, create:async () => ({ id:1 }) },
     tabs:{ onRemoved:{ addListener() {} }, sendMessage:async () => ({ ok:true }) },
   };
@@ -440,7 +444,7 @@ test("bridge locks every action when Chrome invalidates the extension context", 
     __skrodzkaiYahooMockExtensionV1:{ runner:{ halt(reason) { halted = reason; } }, statusTimer:7 },
   };
   helpers.attachCommandCenterBridge(environment, rail);
-  assert.match(locked, /Hard-refresh/);
+  assert.match(locked, /Reload & Verify/);
   assert.equal(halted, "extension_context_invalidated");
   assert.equal((source.match(/if \(rail\.isLocked\(\)\) return false;/g) ?? []).length >= 4, true);
   assert.match(source, /for \(const observer of ui\.observers\) observer\.disconnect\(\)/);
@@ -448,7 +452,7 @@ test("bridge locks every action when Chrome invalidates the extension context", 
 });
 
 test("version handshake requires the current installed background version", async () => {
-  assert.equal(await helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.14.0" }) } } }), "0.14.0");
+  assert.equal((await helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.14.1", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 }) } } })).version, "0.14.1");
   await assert.rejects(
     helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.7.5" }) } } }),
     /extension_version_mismatch/,
@@ -457,8 +461,136 @@ test("version handshake requires the current installed background version", asyn
     helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage() { throw new Error("invalidated"); } } } }),
     /extension_context_invalidated/,
   );
-  assert.equal(backgroundHelpers.extensionVersion({ runtime:{ getManifest:() => ({ version:"0.14.0" }) } }), "0.14.0");
+  assert.equal(backgroundHelpers.extensionVersion({ runtime:{ getManifest:() => ({ version:"0.14.1" }) } }), "0.14.1");
   assert.doesNotMatch(backgroundSource, /identify_arm_surface|tabs\.query/);
+});
+
+test("runtime attestation hashes the complete manifest-derived runtime set and survives worker restarts", async () => {
+  const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
+  const derived = [...new Set([
+    "manifest.json",
+    manifest.background.service_worker,
+    ...manifest.content_scripts.flatMap((entry) => entry.js),
+    "extension/command-center.html",
+    "extension/command-center.js",
+    "extension/command-center.css",
+  ])].sort();
+  assert.deepEqual([...backgroundHelpers.RUNTIME_FILES].sort(), derived);
+
+  const bytes = new TextEncoder();
+  const digest = await backgroundHelpers.runtimeDigest(
+    { runtime:{ getURL:(path) => path } },
+    async (path) => bytes.encode(`fixture:${path}`),
+    webcrypto,
+    TextEncoder,
+  );
+  assert.match(digest, /^[a-f0-9]{64}$/);
+  const sourceAttestation = await sourceRuntimeAttestation(fileURLToPath(new URL("..", import.meta.url)));
+  assert.equal(sourceAttestation.version, "0.14.1");
+  assert.match(sourceAttestation.digest, /^[a-f0-9]{64}$/);
+  assert.deepEqual(sourceAttestation.files, [...backgroundHelpers.RUNTIME_FILES]);
+
+  const session = memorySession();
+  const chromeApi = { runtime:{ getManifest:() => ({ version:"0.14.1" }) }, storage:{ session } };
+  let digestCalls = 0;
+  const first = await backgroundHelpers.createRuntimeAttestor(chromeApi, {
+    clock:() => 100,
+    digest:async () => { digestCalls += 1; return digest; },
+    randomId:() => "boot-12345678",
+  }).current();
+  const restartedWorker = await backgroundHelpers.createRuntimeAttestor(chromeApi, {
+    clock:() => 200,
+    digest:async () => { digestCalls += 1; return "b".repeat(64); },
+    randomId:() => "boot-87654321",
+  }).current();
+  assert.deepEqual(restartedWorker, first);
+  assert.equal(digestCalls, 1);
+});
+
+test("background reload gate permits only an idle TEST/MOCK sender and enforces cooldown", async () => {
+  const sender = { tab:{ id:7, url:"https://football.fantasysports.yahoo.com/f1/542830/settings" }, url:"https://football.fantasysports.yahoo.com/f1/542830/settings" };
+  const idleSession = memorySession();
+  const idleRouter = backgroundHelpers.createStateRouter(idleSession, () => 20_000);
+  assert.deepEqual(JSON.parse(JSON.stringify(await idleRouter.reloadGate(sender))), { ok:true });
+  assert.deepEqual(JSON.parse(JSON.stringify(await idleRouter.reloadGate(sender))), { ok:false, error:"reload_cooldown_active" });
+
+  const running = memorySession({ "skz.runnerSeenAt":20_000, "skz.runnerTabId":9 });
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(await backgroundHelpers.createStateRouter(running, () => 20_000).reloadGate(sender))),
+    { ok:false, error:"reload_refused_runner_active" },
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(await backgroundHelpers.createStateRouter(memorySession(), () => 20_000).reloadGate({ tab:{ id:8 }, url:"https://football.fantasysports.yahoo.com/f1/420010/settings" }))),
+    { ok:false, error:"reload_sender_not_test_surface" },
+  );
+});
+
+test("reload marker requires a new extension-session boot identity and remains fail closed", () => {
+  const before = { ok:true, version:"0.14.1", digest:"a".repeat(64), bootId:"boot-before", bootedAt:100 };
+  const marker = helpers.makeReloadMarker(before, 1_000);
+  assert.equal(helpers.evaluateReloadMarker(marker, before, 1_001).status, "failed");
+  const after = { ...before, bootId:"boot-after", bootedAt:200 };
+  assert.equal(helpers.evaluateReloadMarker(marker, after, 1_001).status, "passed");
+  assert.equal(helpers.evaluateReloadMarker(marker, after, marker.expiresAt + 1).status, "failed");
+  assert.equal(helpers.reloadRefusal({ context:{ armed:true } }), "reload_refused_while_armed");
+  assert.equal(helpers.reloadRefusal({ context:{ ownedTurn:true } }), "reload_refused_during_owned_turn");
+  assert.equal(helpers.reloadRefusal({ context:{ autodraft:true } }), "reload_refused_while_autodraft_active");
+  assert.equal(helpers.reloadRefusal({ context:{} }), null);
+  assert.match(source, /name !== "reload"/);
+  assert.match(backgroundSource, /if \(message\?\.type === "version_handshake"\)[\s\S]*?return true;/);
+});
+
+test("Reload & Verify locks Yahoo controls, writes a marker, asks the background, and refreshes the same tab", async () => {
+  const attestation = { ok:true, version:"0.14.1", digest:"a".repeat(64), bootId:"boot-before", bootedAt:100 };
+  const storage = memoryLocalStorage();
+  const messages = [];
+  let handler = null;
+  let scheduled = null;
+  let lockLabel = "";
+  let reloads = 0;
+  const rail = {
+    setReloadHandler(value) { handler = value; },
+    getSnapshot() { return { attestation, context:{ armed:false, ownedTurn:false, autodraft:false } }; },
+    lock(_reason, label) { lockLabel = label; },
+  };
+  helpers.installReloadAndVerify({
+    chrome:{ runtime:{ id:"extension-id", sendMessage(message) { messages.push(message); return Promise.resolve({ ok:true }); } } },
+    sessionStorage:storage,
+    location:{ reload() { reloads += 1; } },
+    setTimeout(callback) { scheduled = callback; return 1; },
+    clearTimeout() {},
+  }, rail);
+  assert.equal(handler(), true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(lockLabel, "RELOAD VERIFYING");
+  assert.equal(messages[0].type, "reload_extension");
+  assert.equal(JSON.parse(storage.getItem("skrodzkai-runtime-reload-marker-v1")).bootId, "boot-before");
+  scheduled();
+  assert.equal(reloads, 1);
+
+  const refusedStorage = memoryLocalStorage();
+  let refusedHandler = null;
+  let refusedLocked = false;
+  let refusedPending = null;
+  helpers.installReloadAndVerify({
+    chrome:{ runtime:{ id:"extension-id", sendMessage:async () => ({ ok:false, error:"reload_refused_runner_active" }) } },
+    sessionStorage:refusedStorage,
+    location:{ reload() {} },
+    setTimeout() { return 2; },
+    clearTimeout() {},
+  }, {
+    setReloadHandler(value) { refusedHandler = value; },
+    getSnapshot() { return { attestation, context:{} }; },
+    lock() { refusedLocked = true; },
+    setReloadPending(value) { refusedPending = value; },
+    addEvent() {},
+    render() {},
+  });
+  assert.equal(refusedHandler(), true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(refusedLocked, false);
+  assert.equal(refusedPending, false);
+  assert.equal(refusedStorage.getItem("skrodzkai-runtime-reload-marker-v1"), null);
 });
 
 test("recommendation hotkeys resolve only during an owned-turn decision window", () => {
@@ -608,11 +740,15 @@ test("bundled board contains unique IDs and labeled market evidence or fallback"
 });
 
 test("extension contains no network or remote-model execution path", () => {
-  for (const bundledSource of [source, boardSource, controllerSource, runnerSource, popupSource, backgroundSource]) {
+  for (const bundledSource of [source, boardSource, controllerSource, runnerSource, popupSource]) {
     assert.doesNotMatch(bundledSource, /\bfetch\s*\(/);
     assert.doesNotMatch(bundledSource, /XMLHttpRequest|WebSocket|EventSource/);
     assert.doesNotMatch(bundledSource, /openrouter|anthropic|openai/i);
   }
+  assert.equal((backgroundSource.match(/\bfetch\s*\(/g) ?? []).length, 1);
+  assert.match(backgroundSource, /fetch\(chromeApi\.runtime\.getURL\(path\)\)/);
+  assert.doesNotMatch(backgroundSource, /XMLHttpRequest|WebSocket|EventSource/);
+  assert.doesNotMatch(backgroundSource, /openrouter|anthropic|openai/i);
   assert.doesNotMatch(`${popupSource}\n${backgroundSource}`, /https?:\/\//);
   assert.doesNotMatch(source, />HIDE</);
 });
