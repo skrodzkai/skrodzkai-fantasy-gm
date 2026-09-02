@@ -156,12 +156,19 @@ test("board health is a single fail-closed arm gate with visible freshness and c
   assert.equal((source.match(/kind: "mock_arm_refused"/g) ?? []).length, 1);
   assert.equal((source.match(/kind: "test_arm_refused"/g) ?? []).length, 1);
   assert.match(source, /const preflightError = validateDraftPreflight\([\s\S]*kind: "extension_locked"[\s\S]*failure: preflightError/);
+  const signalBoard = {
+    ...board,
+    draftSignalOverlay: { projectionUnchanged:true, roleAudit:{ rosterMatched:188, uniqueTargets:188, totalTargets:190 }, market:{ coverageStatus:"NO_ELIGIBLE_LINES_CAPTURED" } },
+    players: board.players.map((player, index) => index ? player : { ...player, name:"Signal Player", draftSignals:{ warnings:["CURRENT_ROLE_WATCH"] } }),
+  };
   const warnings = helpers.buildUiWarnings({
-    room:{ roomId:"9391926", seat:7 }, armRecord:null, autodraft:false, roster:{ total:15 }, board:board.players, boardData:board, expectedRosterTotal:15, now,
+    room:{ roomId:"9391926", seat:7 }, armRecord:null, autodraft:false, roster:{ total:15 }, board:signalBoard.players, boardData:signalBoard, decision:{ targetYahooIds:["1"] }, expectedRosterTotal:15, now,
   });
   assert.ok(warnings.some((warning) => /Data as-of/.test(warning.text)));
   assert.ok(warnings.some((warning) => /Injury coverage: COMPLETE/.test(warning.text)));
   assert.ok(warnings.some((warning) => /Bye coverage: COMPLETE · 872\/872/.test(warning.text)));
+  assert.ok(warnings.some((warning) => /Ranking overlay: PROJECTION-SAFE · role 188\/188 · market NO_ELIGIBLE_LINES_CAPTURED/.test(warning.text)));
+  assert.ok(warnings.some((warning) => /Signal Player: CURRENT_ROLE_WATCH/.test(warning.text)));
 });
 
 test("binds League Two team 3 while keeping its live field size and snake slot separate", () => {
@@ -274,7 +281,7 @@ test("exports runner and controller receipts using distinct draft-slot and Yahoo
 test("manifest has only the two public-mock surfaces plus the exact verified test league and no broad permissions", async () => {
   const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "0.13.0");
+  assert.equal(manifest.version, "0.14.0");
   assert.deepEqual(manifest.permissions, ["storage"]);
   assert.equal(manifest.host_permissions, undefined);
   assert.deepEqual(manifest.background, { service_worker: "extension/command-center-background.js" });
@@ -385,7 +392,7 @@ test("background exposes session storage to isolated content scripts", () => {
   const session = { ...memorySession(), setAccessLevel(options) { access.push(options); return Promise.resolve(); } };
   const chromeApi = {
     storage:{ session },
-    runtime:{ getManifest:() => ({ version:"0.13.0" }), getURL:(value) => value, onMessage:{ addListener() {} } },
+    runtime:{ getManifest:() => ({ version:"0.14.0" }), getURL:(value) => value, onMessage:{ addListener() {} } },
     windows:{ onRemoved:{ addListener() {} }, update:async () => {}, create:async () => ({ id:1 }) },
     tabs:{ onRemoved:{ addListener() {} }, sendMessage:async () => ({ ok:true }) },
   };
@@ -441,7 +448,7 @@ test("bridge locks every action when Chrome invalidates the extension context", 
 });
 
 test("version handshake requires the current installed background version", async () => {
-  assert.equal(await helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.13.0" }) } } }), "0.13.0");
+  assert.equal(await helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.14.0" }) } } }), "0.14.0");
   await assert.rejects(
     helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.7.5" }) } } }),
     /extension_version_mismatch/,
@@ -450,7 +457,7 @@ test("version handshake requires the current installed background version", asyn
     helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage() { throw new Error("invalidated"); } } } }),
     /extension_context_invalidated/,
   );
-  assert.equal(backgroundHelpers.extensionVersion({ runtime:{ getManifest:() => ({ version:"0.13.0" }) } }), "0.13.0");
+  assert.equal(backgroundHelpers.extensionVersion({ runtime:{ getManifest:() => ({ version:"0.14.0" }) } }), "0.14.0");
   assert.doesNotMatch(backgroundSource, /identify_arm_surface|tabs\.query/);
 });
 
@@ -523,7 +530,7 @@ test("operator attestation is explicit none, explicit intervention, or missing",
 });
 
 test("war-room recommendations show only the resolved live ladder with real metrics", () => {
-  const board = [{ yahooId: "1", name: "One", position: "RB", team: "BUF", confidence: "MULTI_SOURCE" }];
+  const board = [{ yahooId: "1", name: "One", position: "K", team: "BUF", confidence: "MULTI_SOURCE", draftSignals:{ specialist:{ kind:"K", teamOffenseRank:3, week1ImpliedPoints:27.5 } } }];
   assert.deepEqual([...helpers.buildUiRecommendations(board, null)], []);
   const [recommendation] = helpers.buildUiRecommendations(board, {
     targetYahooIds: ["1"],
@@ -538,6 +545,7 @@ test("war-room recommendations show only the resolved live ladder with real metr
   assert.equal(recommendation.edge, "8.3");
   assert.equal(recommendation.confidence, "MULTI_SOURCE");
   assert.match(recommendation.reason, /BPA 8\.3 · wait 2\.1 · Pnext 20%/);
+  assert.match(recommendation.reason, /K offense #3 · W1 implied 27\.5/);
   const [manual] = helpers.buildUiRecommendations(board, {
     targetYahooIds: ["1"],
     manualOverride: { status: "applied", chosenYahooId: "1" },

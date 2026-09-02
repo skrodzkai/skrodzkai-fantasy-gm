@@ -1,7 +1,7 @@
 (function installYahooMockExtension(root) {
   "use strict";
 
-  const VERSION = "0.13.0";
+  const VERSION = "0.14.0";
   const GLOBAL_KEY = "__skrodzkaiYahooMockExtensionV1";
   const PREFLIGHT_KEY = "skrodzkai-yahoo-mock-extension-preflight-v1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-extension-receipts-v1";
@@ -909,6 +909,24 @@
     return rows;
   }
 
+  function draftSignalLabel(player) {
+    const specialist = player?.draftSignals?.specialist;
+    const labels = [];
+    if (specialist?.kind === "K") {
+      if (Number.isFinite(specialist.teamOffenseRank)) labels.push(`K offense #${specialist.teamOffenseRank}`);
+      if (Number.isFinite(specialist.week1ImpliedPoints)) labels.push(`W1 implied ${specialist.week1ImpliedPoints.toFixed(1)}`);
+    }
+    if (specialist?.kind === "DEF") {
+      if (Number.isFinite(specialist.earlyScheduleRank)) labels.push(`DEF W1-4 #${specialist.earlyScheduleRank}`);
+      if (Number.isFinite(specialist.week1OpponentImpliedPoints)) labels.push(`W1 opp ${specialist.week1OpponentImpliedPoints.toFixed(1)}`);
+    }
+    if (specialist?.kind === "IDP" && specialist.depthPosition) {
+      labels.push(`depth ${specialist.depthPosition}${Number.isFinite(specialist.depthRank) ? ` #${specialist.depthRank}` : ""}`);
+    }
+    if (Array.isArray(player?.draftSignals?.market) && player.draftSignals.market.length) labels.push(`${player.draftSignals.market.length} market line${player.draftSignals.market.length === 1 ? "" : "s"}`);
+    return labels.length ? ` · ${labels.join(" · ")}` : "";
+  }
+
   function buildUiRecommendations(board = [], decision = null) {
     if (!Array.isArray(decision?.targetYahooIds)) return [];
     const byId = new Map(Array.from(board, (player) => [String(player.yahooId), player]));
@@ -925,11 +943,11 @@
         edge: Number.isFinite(adjusted) ? adjusted.toFixed(1) : "POLICY",
         confidence: player.confidence ?? "LOCAL_RULE",
         freshness: "TURN",
-        reason: manual
+        reason: (manual
           ? "operator pin validated; baseline fallbacks retained"
           : leader
             ? leader.valueReason ?? `BPA ${Number(leader.marginalUtility ?? 0).toFixed(1)} · wait ${Number(leader.costOfWaiting ?? 0).toFixed(1)} · Pnext ${Math.round(Number(leader.pAvailableNext ?? 0) * 100)}%`
-            : "verified local ladder; exact Yahoo ID",
+            : "verified local ladder; exact Yahoo ID") + draftSignalLabel(player),
       }];
     });
   }
@@ -960,10 +978,17 @@
     const healthFailure = boardHealthGate(boardData, now);
     const asOf = health.generatedAt ? new Date(health.generatedAt).toISOString() : "missing";
     const ageHours = Number.isFinite(health.ageMs) ? (health.ageMs / 3_600_000).toFixed(1) : "unknown";
+    const signalOverlay = boardData?.draftSignalOverlay;
+    const targetWarnings = Array.from(decision?.targetYahooIds ?? []).flatMap((yahooId) => {
+      const player = Array.from(board ?? []).find((entry) => String(entry.yahooId) === String(yahooId));
+      return Array.from(player?.draftSignals?.warnings ?? []).map((warning) => `${player.name || `Y!${yahooId}`}: ${warning}`);
+    });
     const warnings = [
       { severity: healthFailure ? "danger" : "", text: `Data as-of ${asOf} · ${ageHours}h old${healthFailure ? ` · ${healthFailure}` : ""}` },
       { severity: health.injuryCoverageComplete ? "" : "danger", text: `Injury coverage: ${health.injuryCoverageComplete ? "COMPLETE" : "INCOMPLETE"}${health.injuryPlayersTotal ? ` · ${health.injuryPlayersChecked}/${health.injuryPlayersTotal}` : ""}` },
       { severity: health.byeCoverageComplete ? "" : "danger", text: `Bye coverage: ${health.byeCoverageComplete ? "COMPLETE" : "INCOMPLETE"} · ${health.byePlayersWithBye}/${health.byePlayersTotal}` },
+      ...(signalOverlay ? [{ severity: signalOverlay.projectionUnchanged === true ? "" : "danger", text: `Ranking overlay: ${signalOverlay.projectionUnchanged === true ? "PROJECTION-SAFE" : "PROJECTION MUTATION DETECTED"} · role ${signalOverlay.roleAudit?.rosterMatched ?? 0}/${signalOverlay.roleAudit?.uniqueTargets ?? signalOverlay.roleAudit?.totalTargets ?? 0} · market ${signalOverlay.market?.coverageStatus ?? "UNKNOWN"}` }] : []),
+      ...targetWarnings.slice(0, 4).map((text) => ({ severity: "danger", text })),
       ...(decision?.qb2 ? [{ text: `QB2 ${decision.qb2.recommendation}: ${decision.qb2.reason}` }] : []),
       ...(decision?.byeConcentration?.warning ? [{ severity: "danger", text: decision.byeConcentration.reason }] : []),
     ];

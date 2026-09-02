@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { assembleV5Board, SCORING_SCHEMA_HASH } from "./build-v5-board.mjs";
 import { buildV5ReadinessReport } from "./build-v5-readiness-report.mjs";
 import { buildSnakeSeatPackets } from "./build-snake-seat-packets.mjs";
+import { enrichBoardWithDraftSignals } from "./draft-signal-overlay.mjs";
 import { extensionBoardFromV5, renderExtensionBoard, renderOfflineBoardCsv } from "./export-extension-board.mjs";
 import { validateSourceSnapshot } from "./free-source-registry.mjs";
 import { parseHistory } from "./opponent-calibration.mjs";
@@ -20,6 +21,9 @@ const execFile = promisify(execFileCallback);
 
 export const ESPN_CLAY_URL = "https://g.espncdn.com/s/ffldraftkit/26/NFLDK2026_CS_ClayProjections2026.pdf";
 export const SLEEPER_PLAYERS_URL = "https://api.sleeper.app/v1/players/nfl";
+export const NFLVERSE_DEPTH_CHARTS_URL = "https://github.com/nflverse/nflverse-data/releases/download/depth_charts/depth_charts_2026.csv";
+export const NFLVERSE_ROSTERS_URL = "https://github.com/nflverse/nflverse-data/releases/download/rosters/roster_2026.csv";
+export const NFLVERSE_SCHEDULE_URL = "https://raw.githubusercontent.com/nflverse/nfldata/master/data/games.csv";
 const USER_AGENT = "SKRODZKai-Fantasy-GM/1.0 (personal draft research; one request per source per run)";
 const POSITION_MINIMUMS = Object.freeze({ QB: 24, RB: 60, WR: 80, TE: 40 });
 const TEAM_ALIASES = Object.freeze({ JAC: "JAX", WSH: "WAS", LA: "LAR" });
@@ -290,13 +294,18 @@ export function renderBoardMovementMarkdown(board, movement) {
     name:playerById.get(String(entry.yahooId ?? entry.playerId))?.name ?? null,
   }));
   const lines = [
-    "# Draft Board Movement v14", "", `Generated: ${board.generatedAt}`, `Prior passing board: ${movement.priorReceipt?.boardPath ?? "none"}`, "",
+    "# Draft Board Movement v15", "", `Generated: ${board.generatedAt}`, `Prior passing board: ${movement.priorReceipt?.boardPath ?? "none"}`, "",
     "## Top 30", "", "| Rank | Player | Pos | Projection | Bye | Injury action |", "| ---: | --- | --- | ---: | ---: | --- |",
     ...top.map((player) => `| ${player.overallRank} | ${player.name} | ${player.position} | ${Number(player.consensusPoints).toFixed(2)} | ${player.bye ?? "—"} | ${player.injury?.draftAction ?? "UNKNOWN"} |`),
     "", "## Material movement", "", "| Player | Pos | Change | Rank delta | Projection delta | Injury | Eligibility |", "| --- | --- | --- | ---: | ---: | --- | --- |",
     ...movement.changes.slice(0, 75).map((change) => `| ${change.name} | ${change.position} | ${change.kind} | ${change.rankDelta ?? "—"} | ${Number.isFinite(change.projectionDelta) ? change.projectionDelta.toFixed(2) : "—"} | ${change.before?.draftAction ?? "—"} → ${change.after?.draftAction ?? "—"} | ${change.before?.validationStatus ?? "—"} → ${change.after?.validationStatus ?? "—"} |`),
     "", "## Injury watch", "", "| Player | Status | Draft action | Evidence |", "| --- | --- | --- | --- |",
-    ...watch.map((entry) => `| ${entry.name ?? entry.playerId} | ${entry.status ?? "UNKNOWN"} | ${entry.draftAction ?? "UNKNOWN"} | ${entry.primarySourceId ?? "—"} |`), "",
+    ...watch.map((entry) => `| ${entry.name ?? entry.playerId} | ${entry.status ?? "UNKNOWN"} | ${entry.draftAction ?? "UNKNOWN"} | ${entry.primarySourceId ?? "—"} |`),
+    "", "## Ranking signals", "",
+    `- Projection columns unchanged: ${board.draftSignalOverlay?.projectionUnchanged === true ? "YES" : "NO OR UNAVAILABLE"}`,
+    `- Role audit: ${board.draftSignalOverlay?.roleAudit?.rosterMatched ?? 0}/${board.draftSignalOverlay?.roleAudit?.uniqueTargets ?? 0} unique current rosters; ${board.draftSignalOverlay?.roleAudit?.depthChartMatched ?? 0}/${board.draftSignalOverlay?.roleAudit?.uniqueTargets ?? 0} unique current depth charts (${board.draftSignalOverlay?.roleAudit?.offenseTargets ?? 0} offense + ${board.draftSignalOverlay?.roleAudit?.idpTargets ?? 0} IDP, ${board.draftSignalOverlay?.roleAudit?.overlappingEligibleTargets ?? 0} overlaps)`,
+    `- Sportsbook challenger: ${board.draftSignalOverlay?.market?.coverageStatus ?? "UNAVAILABLE"}; ${board.draftSignalOverlay?.market?.flaggedPlayers ?? 0} flagged players`,
+    `- DEF schedule context complete: ${board.draftSignalOverlay?.specialistContext?.scheduleComplete === true ? "YES" : "NO"}`, "",
   ];
   return `${lines.join("\n")}\n`;
 }
@@ -305,7 +314,7 @@ export async function discoverPreviousPassingBoard(outputParent, excludedFinalPa
   const entries = await readdir(outputParent, { withFileTypes:true });
   const candidates = entries
     .filter((entry) => entry.isDirectory())
-    .map((entry) => ({ name:entry.name, timestamp:entry.name.match(/^draft-prep-v(?:11|13|14)-(\d{8}T\d{9}Z)$/)?.[1] ?? null }))
+    .map((entry) => ({ name:entry.name, timestamp:entry.name.match(/^draft-prep-v(?:11|13|14|15)-(\d{8}T\d{9}Z)$/)?.[1] ?? null }))
     .filter((entry) => entry.timestamp)
     .sort((left, right) => right.timestamp.localeCompare(left.timestamp))
     .map((entry) => entry.name);
@@ -315,7 +324,7 @@ export async function discoverPreviousPassingBoard(outputParent, excludedFinalPa
     try {
       const health = JSON.parse(await readFile(join(directory, "nightly-health.json"), "utf8"));
       if (health.status !== "PASS") continue;
-      for (const filename of ["player-board-v14.json", "player-board-v13.json", "player-board-v11.json"]) {
+      for (const filename of ["player-board-v15.json", "player-board-v14.json", "player-board-v13.json", "player-board-v11.json"]) {
         try {
           const boardPath = join(directory, filename);
           const board = JSON.parse(await readFile(boardPath, "utf8"));
@@ -348,7 +357,7 @@ export function byeCoverage(players) {
   };
 }
 
-export function buildHealth({ generatedAt, clock, yahoo, espnHealth, sleeperHealth, sleeperReused, board, movement, rehearsal, packets, opponentWarRoom, realShadowAcceptance, identityReceipt, failure = null }) {
+export function buildHealth({ generatedAt, clock, yahoo, espnHealth, sleeperHealth, sleeperReused, board, movement, rehearsal, packets, opponentWarRoom, realShadowAcceptance, identityReceipt, draftSignals = null, failure = null }) {
   const automatic = (board?.players ?? []).filter((player) => player.automaticEligible === true);
   const byes = byeCoverage(board?.players);
   const reasons = [
@@ -362,6 +371,14 @@ export function buildHealth({ generatedAt, clock, yahoo, espnHealth, sleeperHeal
     ...(clock && !clock.fresh ? ["generated_at_wall_clock_skew"] : []),
     ...(board && board.injuryCoverage?.complete !== true ? ["injury_coverage_incomplete"] : []),
     ...(board && byes.complete !== true ? ["bye_coverage_incomplete"] : []),
+    ...(!draftSignals && !failure ? ["draft_signal_overlay_missing"] : []),
+    ...(draftSignals && draftSignals.projectionUnchanged !== true ? ["draft_signal_overlay_mutated_projections"] : []),
+    ...(draftSignals && draftSignals.roleAudit?.offenseTargets !== 150 ? ["top_150_offense_role_audit_missing"] : []),
+    ...(draftSignals && draftSignals.roleAudit?.idpTargets !== 40 ? ["top_40_idp_role_audit_missing"] : []),
+    ...(draftSignals && draftSignals.roleAudit?.rosterCoverageComplete !== true ? ["current_roster_audit_incomplete"] : []),
+    ...(draftSignals && draftSignals.roleAudit?.depthChartCoverageComplete !== true ? ["current_depth_chart_audit_incomplete"] : []),
+    ...(draftSignals && draftSignals.specialistContext?.scheduleComplete !== true ? ["weeks_1_4_schedule_context_incomplete"] : []),
+    ...(draftSignals && draftSignals.sourceReceipts?.some((receipt) => receipt.fresh !== true) ? ["stale_nflverse_ranking_context"] : []),
     ...(failure ? [String(failure)] : []),
   ];
   return {
@@ -382,6 +399,7 @@ export function buildHealth({ generatedAt, clock, yahoo, espnHealth, sleeperHeal
     byes: { source: "caller-supplied Yahoo player snapshots", ...byes },
     boardMovement: movement ?? { changes:[], reason:"board-not-built" },
     projectionBias: board?.projectionModel?.sourceGapByPosition ?? null,
+    draftSignals,
     rehearsal: rehearsal ? { accepted: rehearsal.accepted, latency: rehearsal.latency, runnerSourceSha256: rehearsal.runnerSourceSha256, scoringSchemaHash: rehearsal.scoringSchemaHash } : null,
     seatPackets: packets ? { count: packets.packets?.length ?? 0, executionInput: packets.executionInput } : null,
     opponentWarRoom: opponentWarRoom ? { cardCount:opponentWarRoom.cards?.length ?? 0, policy:opponentWarRoom.policy } : null,
@@ -391,7 +409,7 @@ export function buildHealth({ generatedAt, clock, yahoo, espnHealth, sleeperHeal
 }
 
 function finalDirectoryName(generatedAt) {
-  return `draft-prep-v14-${generatedAt.replace(/[-:.]/g, "")}`;
+  return `draft-prep-v15-${generatedAt.replace(/[-:.]/g, "")}`;
 }
 
 async function ensureOutputParent(outputParent, allowedOutputRoot) {
@@ -402,14 +420,15 @@ async function ensureOutputParent(outputParent, allowedOutputRoot) {
 
 export async function publishSuccessfulRun({ staging, finalPath, board, extensionSource, offlineBoardCsv, readiness, rehearsal, packets, opponentWarRoom, movementMarkdown, realShadowAcceptance, health }) {
   await Promise.all([
-    writeFile(join(staging, "player-board-v14.json"), `${JSON.stringify(board, null, 2)}\n`, { mode: 0o600 }),
-    writeFile(join(staging, "yahoo-mock-board-v14.js"), extensionSource, { mode: 0o600 }),
-    writeFile(join(staging, "yahoo-mock-board-v14.csv"), offlineBoardCsv, { mode: 0o600 }),
-    writeFile(join(staging, "draft-readiness-v14.json"), `${JSON.stringify(readiness, null, 2)}\n`, { mode: 0o600 }),
-    writeFile(join(staging, "rehearsal-30s-v14.json"), `${JSON.stringify(rehearsal, null, 2)}\n`, { mode: 0o600 }),
-    writeFile(join(staging, "opponent-war-room-v14.json"), `${JSON.stringify({ ...opponentWarRoom, seatPackets:packets.packets }, null, 2)}\n`, { mode: 0o600 }),
-    writeFile(join(staging, "board-movement-v14.md"), movementMarkdown, { mode: 0o600 }),
-    writeFile(join(staging, "real-shadow-acceptance-v14.json"), `${JSON.stringify(realShadowAcceptance, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(staging, "player-board-v15.json"), `${JSON.stringify(board, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(staging, "draft-signals-v15.json"), `${JSON.stringify(board.draftSignalOverlay ?? null, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(staging, "yahoo-mock-board-v15.js"), extensionSource, { mode: 0o600 }),
+    writeFile(join(staging, "yahoo-mock-board-v15.csv"), offlineBoardCsv, { mode: 0o600 }),
+    writeFile(join(staging, "draft-readiness-v15.json"), `${JSON.stringify(readiness, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(staging, "rehearsal-30s-v15.json"), `${JSON.stringify(rehearsal, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(staging, "opponent-war-room-v15.json"), `${JSON.stringify({ ...opponentWarRoom, seatPackets:packets.packets }, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(staging, "board-movement-v15.md"), movementMarkdown, { mode: 0o600 }),
+    writeFile(join(staging, "real-shadow-acceptance-v15.json"), `${JSON.stringify(realShadowAcceptance, null, 2)}\n`, { mode: 0o600 }),
   ]);
   await writeFile(join(staging, "nightly-health.json"), `${JSON.stringify(health, null, 2)}\n`, { mode: 0o600 });
   await rename(staging, finalPath);
@@ -426,7 +445,7 @@ export async function refreshDraftPrep(options) {
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
-  const staging = await mkdtemp(join(outputParent, `.draft-prep-v14-${randomUUID()}-`));
+  const staging = await mkdtemp(join(outputParent, `.draft-prep-v15-${randomUUID()}-`));
   let health;
   try {
     if (!clock.fresh) throw new Error(`generatedAt differs from wall clock by ${clock.generatedAtSkewMinutes.toFixed(2)} minutes`);
@@ -470,7 +489,7 @@ export async function refreshDraftPrep(options) {
       writeFile(join(sourceDirectory, "sleeper-players.json"), `${JSON.stringify(sleeper.snapshot, null, 2)}\n`, { mode: 0o600 }),
     ]);
 
-    const board = assembleV5Board({
+    let board = assembleV5Board({
       baselineRows: baseline.value,
       offenseSnapshot: yahooOffense.value,
       specialistSnapshot: yahooSpecialists.value,
@@ -482,6 +501,30 @@ export async function refreshDraftPrep(options) {
       survivalCalibration,
       asOf: clock.wallClockAt,
     });
+    const rankingContextPaths = [options.nflverseDepthPath, options.nflverseRosterPath, options.nflverseSchedulePath];
+    if (rankingContextPaths.some(Boolean) && !rankingContextPaths.every(Boolean)) throw new Error("all nflverse ranking-context paths are required together");
+    if (rankingContextPaths.every(Boolean)) {
+      const [depthChartCsv, rosterCsv, scheduleCsv, marketOverlay, depthChartFile, rosterFile, scheduleFile] = await Promise.all([
+        readFile(options.nflverseDepthPath, "utf8"),
+        readFile(options.nflverseRosterPath, "utf8"),
+        readFile(options.nflverseSchedulePath, "utf8"),
+        options.marketOverlayPath ? readFile(options.marketOverlayPath, "utf8").then(JSON.parse) : { entries:[], sourcesChecked:[], roleFindings:[] },
+        stat(options.nflverseDepthPath),
+        stat(options.nflverseRosterPath),
+        stat(options.nflverseSchedulePath),
+      ]);
+      board = enrichBoardWithDraftSignals({
+        board,
+        projectionSnapshots:[espnSnapshot],
+        depthChartCsv,
+        rosterCsv,
+        scheduleCsv,
+        marketOverlay,
+        asOf:clock.wallClockAt,
+        sourceRetrievedAt:{ depthCharts:depthChartFile.mtime.toISOString(), rosters:rosterFile.mtime.toISOString(), schedule:scheduleFile.mtime.toISOString() },
+        sourceUrls:{ depthCharts:NFLVERSE_DEPTH_CHARTS_URL, rosters:NFLVERSE_ROSTERS_URL, schedule:NFLVERSE_SCHEDULE_URL },
+      });
+    }
     const extensionBoard = extensionBoardFromV5(board);
     const extensionSource = renderExtensionBoard(extensionBoard);
     const offlineBoardCsv = renderOfflineBoardCsv(extensionBoard);
@@ -505,7 +548,7 @@ export async function refreshDraftPrep(options) {
     const movementMarkdown = renderBoardMovementMarkdown(board, movement);
     const engine = await loadDecisionEngine(options.runnerPath);
     const realShadowAcceptance = runRealShadowAcceptance({ engine, boardData:extensionBoard, settingsSnapshot:realSettings });
-    health = buildHealth({ generatedAt: clock.wallClockAt, clock, yahoo, espnHealth, sleeperHealth, sleeperReused: sleeper.reused, board, movement, rehearsal, packets, opponentWarRoom, realShadowAcceptance, identityReceipt: joined.receipt });
+    health = buildHealth({ generatedAt: clock.wallClockAt, clock, yahoo, espnHealth, sleeperHealth, sleeperReused: sleeper.reused, board, movement, rehearsal, packets, opponentWarRoom, realShadowAcceptance, identityReceipt: joined.receipt, draftSignals: board.draftSignalOverlay ?? null });
     if (health.status !== "PASS") throw new Error(health.reasons.join("; "));
     if (!sleeper.reused) await writeSleeperCache(options.sleeperCachePath, sleeper.snapshot);
 
@@ -513,7 +556,7 @@ export async function refreshDraftPrep(options) {
     return { finalPath, health };
   } catch (error) {
     await rm(staging, { recursive: true, force: true });
-    const failedStaging = await mkdtemp(join(outputParent, `.draft-prep-v14-failed-${randomUUID()}-`));
+    const failedStaging = await mkdtemp(join(outputParent, `.draft-prep-v15-failed-${randomUUID()}-`));
     health = buildHealth({ generatedAt, clock, failure: String(error?.message ?? error) });
     await writeFile(join(failedStaging, "nightly-health.json"), `${JSON.stringify(health, null, 2)}\n`, { mode: 0o600 });
     try {
@@ -540,7 +583,7 @@ function parseArgs(argv) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const required = ["generated-at", "output-parent", "baseline", "yahoo-offense", "yahoo-specialists", "yahoo-eligibility", "history", "opponent-calibration", "teams", "manager-map", "real-settings", "runner"];
+  const required = ["generated-at", "output-parent", "baseline", "yahoo-offense", "yahoo-specialists", "yahoo-eligibility", "history", "opponent-calibration", "teams", "manager-map", "real-settings", "runner", "nflverse-depth", "nflverse-roster", "nflverse-schedule", "market-overlay"];
   for (const key of required) if (!args[key]) throw new Error(`missing --${key}=...`);
   const result = await refreshDraftPrep({
     generatedAt: args["generated-at"],
@@ -558,6 +601,10 @@ async function main() {
     survivalCalibrationPath: args.survival ?? null,
     sleeperCachePath: args["sleeper-cache"] ?? null,
     runnerPath: args.runner,
+    nflverseDepthPath: args["nflverse-depth"],
+    nflverseRosterPath: args["nflverse-roster"],
+    nflverseSchedulePath: args["nflverse-schedule"],
+    marketOverlayPath: args["market-overlay"],
   });
   process.stdout.write(`${JSON.stringify({ output: result.finalPath, status: result.health.status })}\n`);
 }
