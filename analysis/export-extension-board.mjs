@@ -34,6 +34,7 @@ function compactOffense(player) {
     bye: player.bye ?? null,
     omittedScoringCategories: Array.from(player.omittedScoringCategories ?? []),
     projectionBlendPolicy: player.projectionBlendPolicy ?? "unspecified",
+    draftSignals: player.draftSignals ?? null,
   };
 }
 
@@ -72,6 +73,7 @@ function compactSpecialist(player, positionOverride = null) {
     bye: player.bye ?? null,
     omittedScoringCategories: Array.from(player.omittedScoringCategories ?? []),
     projectionBlendPolicy: player.projectionBlendPolicy ?? "unspecified",
+    draftSignals: player.draftSignals ?? null,
   };
 }
 
@@ -161,6 +163,7 @@ export function extensionBoardFromV5(board) {
     scoringSchemaHash: board.scoringSchemaHash ?? null,
     replacementBySlot: board.replacementBySlot ?? null,
     survivalCalibration: board.survivalCalibration ?? null,
+    draftSignalOverlay: board.draftSignalOverlay ?? null,
     injuryCoverage,
     injuryFreshnessPolicy: board.injuryFreshnessPolicy ?? null,
     byeCoverage,
@@ -180,6 +183,7 @@ export function renderExtensionBoard(board) {
     scoringSchemaHash: board.scoringSchemaHash,
     replacementBySlot: board.replacementBySlot,
     survivalCalibration: board.survivalCalibration,
+    draftSignalOverlay: board.draftSignalOverlay,
     injuryCoverage: board.injuryCoverage,
     injuryFreshnessPolicy: board.injuryFreshnessPolicy,
     byeCoverage: board.byeCoverage,
@@ -195,7 +199,7 @@ function csvCell(value) {
 }
 
 export function renderOfflineBoardCsv(board) {
-  const columns = ["value_rank", "name", "team", "position", "eligible", "projection", "vor", "bye", "yahoo_rank", "confidence", "automatic_eligible", "manual_eligible", "validation_status"];
+  const columns = ["value_rank", "name", "team", "position", "eligible", "projection", "vor", "bye", "yahoo_rank", "confidence", "automatic_eligible", "manual_eligible", "validation_status", "attention_required", "signal_warnings"];
   const rows = Array.from(board?.players ?? [])
     .sort((left, right) => Number(left.valueRank ?? Infinity) - Number(right.valueRank ?? Infinity) || Number(left.rank ?? Infinity) - Number(right.rank ?? Infinity) || String(left.yahooId).localeCompare(String(right.yahooId)))
     .map((player) => [
@@ -212,6 +216,8 @@ export function renderOfflineBoardCsv(board) {
       player.automaticEligible,
       player.manualEligible,
       player.validationStatus,
+      player.draftSignals?.attentionRequired === true,
+      Array.from(player.draftSignals?.warnings ?? []).join(" | "),
     ].map(csvCell).join(","));
   return `${columns.join(",")}\n${rows.join("\n")}\n`;
 }

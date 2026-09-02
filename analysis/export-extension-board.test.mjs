@@ -70,7 +70,7 @@ test("exports only executable offense while retaining explicitly labeled special
   assert.match(renderExtensionBoard(board), /SKRODZKaiYahooMockBoard/);
   assert.match(renderExtensionBoard(board), /"byeCoverage"/);
   const csv = renderOfflineBoardCsv(board);
-  assert.match(csv, /^value_rank,name,team,position,eligible,projection,vor,bye,yahoo_rank,confidence,automatic_eligible,manual_eligible,validation_status/m);
+  assert.match(csv, /^value_rank,name,team,position,eligible,projection,vor,bye,yahoo_rank,confidence,automatic_eligible,manual_eligible,validation_status,attention_required,signal_warnings/m);
   assert.match(csv, /RB 2,TST,RB/);
 });
 

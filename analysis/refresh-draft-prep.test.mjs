@@ -113,7 +113,7 @@ test("discovers only the newest prior PASS board and reports rank, projection, i
   assert.match(markdown, /\| Player \| QUESTIONABLE \| REVIEW \| team-report \|/);
 });
 
-test("publishes the complete v14 artifact set with one atomic rename", async () => {
+test("publishes the complete v15 artifact set with one atomic rename", async () => {
   const root = await mkdtemp(join(tmpdir(), "draft-prep-v13-publish-test-"));
   const staging = await mkdtemp(join(root, ".staging-"));
   await mkdir(join(staging, "source-snapshots"));
@@ -134,16 +134,17 @@ test("publishes the complete v14 artifact set with one atomic rename", async () 
     health: { status: "PASS" },
   });
   assert.deepEqual((await readdir(finalPath)).sort(), [
-    "board-movement-v14.md",
-    "draft-readiness-v14.json",
+    "board-movement-v15.md",
+    "draft-readiness-v15.json",
+    "draft-signals-v15.json",
     "nightly-health.json",
-    "opponent-war-room-v14.json",
-    "player-board-v14.json",
-    "real-shadow-acceptance-v14.json",
-    "rehearsal-30s-v14.json",
+    "opponent-war-room-v15.json",
+    "player-board-v15.json",
+    "real-shadow-acceptance-v15.json",
+    "rehearsal-30s-v15.json",
     "source-snapshots",
-    "yahoo-mock-board-v14.csv",
-    "yahoo-mock-board-v14.js",
+    "yahoo-mock-board-v15.csv",
+    "yahoo-mock-board-v15.js",
   ]);
   await assert.rejects(() => readdir(staging), { code: "ENOENT" });
 });
@@ -166,6 +167,39 @@ test("health reasons fail closed on eligible-player injury or bye gaps", () => {
   assert.ok(health.reasons.includes("injury_coverage_incomplete"));
   assert.ok(health.reasons.includes("bye_coverage_incomplete"));
   assert.equal(health.byes.playersTotal, 2);
+});
+
+test("health reasons fail closed on incomplete or mutating draft signals", () => {
+  const health = buildHealth({
+    generatedAt:"2026-09-02T16:00:00Z",
+    draftSignals:{
+      projectionUnchanged:false,
+      roleAudit:{
+        offenseTargets:149,
+        idpTargets:39,
+        rosterCoverageComplete:false,
+        depthChartCoverageComplete:false,
+      },
+      specialistContext:{ scheduleComplete:false },
+      sourceReceipts:[{ sourceId:"nflverse-depth-charts", fresh:false }],
+    },
+  });
+  assert.equal(health.status, "FAIL");
+  assert.deepEqual(health.reasons, [
+    "draft_signal_overlay_mutated_projections",
+    "top_150_offense_role_audit_missing",
+    "top_40_idp_role_audit_missing",
+    "current_roster_audit_incomplete",
+    "current_depth_chart_audit_incomplete",
+    "weeks_1_4_schedule_context_incomplete",
+    "stale_nflverse_ranking_context",
+  ]);
+});
+
+test("health fails closed when the draft-signal overlay is absent", () => {
+  const health = buildHealth({ generatedAt:"2026-09-02T16:00:00Z" });
+  assert.equal(health.status, "FAIL");
+  assert.ok(health.reasons.includes("draft_signal_overlay_missing"));
 });
 
 test("stale caller-supplied Yahoo inputs publish a health-only failure atomically", async () => {

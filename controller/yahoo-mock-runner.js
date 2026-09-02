@@ -217,6 +217,13 @@
         automaticEligible: player.automaticEligible === true,
         manualEligible: player.manualEligible === true,
         validationStatus: String(player.validationStatus ?? "MISSING_VALIDATION_STATUS"),
+        draftSignals: player.draftSignals ? {
+          attentionRequired: player.draftSignals.attentionRequired === true,
+          warnings: Array.from(player.draftSignals.warnings ?? [], String).slice(0, 12),
+          role: player.draftSignals.role ?? null,
+          market: Array.isArray(player.draftSignals.market) ? player.draftSignals.market : null,
+          specialist: player.draftSignals.specialist ?? null,
+        } : null,
       };
       if (!copy.yahooId) throw new Error(`board player ${index} requires a verified Yahoo ID`);
       if (!OFFENSE.includes(position) && !["K", "DEF", "D", "LB", "CB", "S"].includes(position)) {
@@ -614,6 +621,7 @@
       marketMean: player.marketMean,
       marketStatus: player.marketStatus,
       bye: player.bye,
+      draftSignals: player.draftSignals,
     };
   }
 
@@ -860,7 +868,7 @@
         costOfWaiting: entry.costOfWaiting,
         pAvailableNext: entry.pAvailableNext,
         survivalStatus: entry.survivalStatus,
-        valueReason: `league-scored BPA ${entry.marginalUtility.toFixed(1)} + next-turn option ${entry.expectedNextUtility.toFixed(1)}; wait cost ${entry.costOfWaiting.toFixed(1)}; market ${Number.isFinite(entry.player.yahooRank) ? `Y!${entry.player.yahooRank}` : entry.player.marketStatus}`,
+        valueReason: `league-scored BPA ${entry.marginalUtility.toFixed(1)} + next-turn option ${entry.expectedNextUtility.toFixed(1)}; wait cost ${entry.costOfWaiting.toFixed(1)}; market ${Number.isFinite(entry.player.yahooRank) ? `Y!${entry.player.yahooRank}` : entry.player.marketStatus}${entry.player.draftSignals?.attentionRequired ? `; WATCH ${entry.player.draftSignals.warnings.slice(0, 2).join(" | ")}` : ""}`,
         eligible: true,
       })),
       qb2,

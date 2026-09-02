@@ -55,6 +55,28 @@ export const FREE_SOURCE_REGISTRY = Object.freeze([
     maximumRefreshHours: 24,
     licenseUseNote: "Attribute Sleeper and cache no more frequently than daily.",
   }),
+  Object.freeze({
+    id: "draftkings-public",
+    sourceFamily: "sportsbook-market",
+    evidenceKind: "market_challenger",
+    role: "manual, non-authoritative season-prop disagreement signal",
+    access: "currently visible public DraftKings Sportsbook pages; no undocumented API",
+    cost: "free",
+    constraints: "manual receipt only; selection-biased coverage never counts as projection evidence",
+    maximumRefreshHours: 48,
+    licenseUseNote: "Retain only a factual line, public URL, capture time, and derived disagreement flag.",
+  }),
+  Object.freeze({
+    id: "fanduel-public",
+    sourceFamily: "sportsbook-market",
+    evidenceKind: "market_challenger",
+    role: "manual, non-authoritative season-prop disagreement signal",
+    access: "currently visible public FanDuel Sportsbook pages; no undocumented API",
+    cost: "free",
+    constraints: "manual receipt only; selection-biased coverage never counts as projection evidence",
+    maximumRefreshHours: 48,
+    licenseUseNote: "Retain only a factual line, public URL, capture time, and derived disagreement flag.",
+  }),
 ]);
 
 export function validateSourceSnapshot(snapshot, asOf) {

@@ -107,11 +107,14 @@ test("preserves exact Yahoo multi-position eligibility without requiring market 
     validationStatus: "DUAL_ROLE_SCORING_UNVERIFIED",
     adpLow: null,
     adpHigh: null,
+    draftSignals: { attentionRequired:true, warnings:["ROLE_WATCH"], role:{ depthRank:1 }, market:null, specialist:{ kind:"IDP", depthPosition:"LCB", depthRank:1 } },
   })]);
   assert.deepEqual(Array.from(hunter.eligible), ["WR", "CB"]);
   assert.equal(hunter.automaticEligible, false);
   assert.equal(hunter.manualEligible, true);
   assert.equal(hunter.marketStatus, "BOARD_RANK_FALLBACK_UNCALIBRATED");
+  assert.equal(hunter.draftSignals.specialist.depthPosition, "LCB");
+  assert.deepEqual(Array.from(hunter.draftSignals.warnings), ["ROLE_WATCH"]);
 });
 
 test("missing board eligibility metadata fails closed", () => {
