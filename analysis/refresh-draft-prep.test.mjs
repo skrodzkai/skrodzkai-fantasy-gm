@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 import { SCORING_SCHEMA_HASH } from "./build-v5-board.mjs";
-import { boardMovers, buildHealth, byeCoverage, discoverPreviousPassingBoard, fetchEspnClayPdf, joinEspnRowsToYahoo, loadOrFetchSleeper, publishSuccessfulRun, refreshDraftPrep, renderBoardMovementMarkdown, writeSleeperCache } from "./refresh-draft-prep.mjs";
+import { boardMovers, buildHealth, byeCoverage, discoverPreviousPassingBoard, fetchEspnClayPdf, joinEspnRowsToYahoo, joinProjectionRowsToYahoo, loadOrFetchSleeper, publishSuccessfulRun, refreshDraftPrep, renderBoardMovementMarkdown, writeSleeperCache } from "./refresh-draft-prep.mjs";
 
 function response(bytes, headers = {}) {
   const normalized = new Map(Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]));
@@ -53,6 +53,45 @@ test("joins through deterministic exact and unique suffixless identities only", 
   assert.deepEqual(joined.rows.map((row) => row.playerId ?? null), ["1", "2", null, "5"]);
   assert.equal(joined.receipt.fuzzyMatching, false);
   assert.ok(joined.receipt.ambiguousExactKeys >= 1);
+});
+
+test("identity overrides are exact, Yahoo-bounded, and receipt Top-200 coverage", () => {
+  const joined = joinProjectionRowsToYahoo({
+    sourceId: "cbs-projections",
+    rows: [
+      { name: "Known Player", team: "BUF", position: "QB", sourceRank: 1 },
+      { name: "Changed Name", team: "JAX", position: "WR", sourceRank: 2 },
+      { name: "Missing Player", team: "DAL", position: "RB", sourceRank: 3 },
+    ],
+    sleeperPlayers: {},
+    baselineRows: [],
+    yahooRows: [
+      { yahooId: "1", name: "Known Player", team: "BUF" },
+      { yahooId: "2", name: "Yahoo Name", team: "JAX" },
+    ],
+    overrides: [{ sourceId: "cbs-projections", name: "Changed Name", team: "JAX", position: "WR", yahooId: "2" }],
+    topLimit: 200,
+  });
+  assert.deepEqual(joined.rows.map((row) => row.playerId ?? null), ["1", "2", null]);
+  assert.equal(joined.receipt.matchedByMethod.override, 1);
+  assert.equal(joined.receipt.topCoverage, 2 / 3);
+  assert.deepEqual(joined.receipt.unjoinedTop, [{ sourceRank: 3, name: "Missing Player", team: "DAL", position: "RB" }]);
+  assert.throws(() => joinProjectionRowsToYahoo({
+    sourceId: "cbs-projections", rows: [], sleeperPlayers: {}, baselineRows: [], yahooRows: [],
+    overrides: [{ sourceId: "cbs-projections", name: "No One", team: "BUF", position: "QB", yahooId: "999" }],
+  }), /unknown Yahoo ID 999/);
+});
+
+test("team-position fallback is bounded to explicitly allowed singleton positions", () => {
+  const joined = joinProjectionRowsToYahoo({
+    sourceId: "ffc-adp",
+    rows: [{ name: "Seattle Defense", team: "SEA", position: "DEF" }, { name: "Different Back", team: "SEA", position: "RB" }],
+    sleeperPlayers: {}, baselineRows: [],
+    yahooRows: [{ yahooId: "d1", name: "Seattle", team: "SEA", position: "DEF" }, { yahooId: "r1", name: "Running Back", team: "SEA", position: "RB" }],
+    teamPositionFallbacks: ["DEF"],
+  });
+  assert.deepEqual(joined.rows.map((row) => row.playerId ?? null), ["d1", null]);
+  assert.equal(joined.receipt.matchedByMethod.teamPosition, 1);
 });
 
 test("reuses a current Sleeper cache without a second request", async () => {

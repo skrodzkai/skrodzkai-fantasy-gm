@@ -37,6 +37,16 @@ const YAHOO_STATUS = Object.freeze({
   NA: "UNKNOWN",
 });
 
+const ACCEPTED_OFFENSE_OMISSIONS = Object.freeze([
+  "rushingHundredYardGames", "receivingHundredYardGames", "returnYards",
+  "returnTouchdowns", "twoPointConversions", "fumblesLost",
+  "offensiveFumbleReturnTouchdowns",
+]);
+const ACCEPTED_IDP_OMISSIONS = Object.freeze([
+  "fumbleRecoveries", "touchdowns", "safeties", "blockedKicks",
+  "turnoverReturnYards", "extraPointReturns",
+]);
+
 function parsePayload(row) {
   if (!row?.payload_json) return {};
   try {
@@ -185,7 +195,14 @@ export function assembleV5Board({
     const yahooFilters = filterMembership.get(String(row.yahooId)) ?? [];
     const splitHunter = String(row.name ?? "").toLowerCase() === "travis hunter";
     const filterPosition = ["K", "DEF", "LB", "CB", "DB", "D"].find((candidate) => yahooFilters.includes(candidate));
-    const position = normalizePosition(row.position || baseline?.position || (splitHunter ? (offenseIds.has(String(row.yahooId)) ? "WR" : "CB") : filterPosition === "D" ? "DL" : filterPosition));
+    const rowPosition = normalizePosition(row.position);
+    const position = normalizePosition(
+      !yahooFilters.includes("O") && ["DL", "LB", "DB", "CB", "S"].includes(rowPosition)
+        ? rowPosition
+        : !yahooFilters.includes("O") && filterPosition
+          ? filterPosition === "D" ? "DL" : filterPosition
+          : row.position || baseline?.position || (splitHunter ? (offenseIds.has(String(row.yahooId)) ? "WR" : "CB") : null),
+    );
     const specialistPosition = baseline?.payload?.specialist_qualified
       ? normalizePosition(baseline.payload.specialist?.draft_position)
       : null;
@@ -252,7 +269,10 @@ export function assembleV5Board({
   };
   const registryById = new Map(FREE_SOURCE_REGISTRY.map((source) => [source.id, source]));
   const projectionHealth = validateSourceSnapshot(projectionSnapshots.map((snapshot) => snapshot.manifest), asOf);
-  const externalProjectionSources = projectionSnapshots.map((snapshot, index) => {
+  const externalProjectionSources = projectionSnapshots
+    .filter((snapshot) => snapshot.manifest.productionEligible !== false)
+    .map((snapshot) => {
+    const index = projectionSnapshots.indexOf(snapshot);
     const policy = registryById.get(snapshot.manifest.sourceId);
     if (policy?.evidenceKind !== "raw_stat_projection") {
       throw new Error(`${snapshot.manifest.sourceId} cannot count as raw-stat projection evidence`);
@@ -266,9 +286,17 @@ export function assembleV5Board({
       weight: 1,
       inputRows: snapshot.rows.length,
       rows: snapshot.rows
-        .filter((row) => ["QB", "RB", "WR", "TE"].includes(normalizePosition(row.position)))
+        .filter((row) => ["QB", "RB", "WR", "TE", "K", "DL", "LB", "DB", "CB", "S"].includes(normalizePosition(row.position)))
         .filter((row) => !hasFiniteProjection(row.projectionGames) || Number(row.projectionGames) > 0)
-        .map((row) => ({ ...row, playerId: row.playerId ?? null }))
+        .map((row) => ({
+          ...row,
+          playerId: row.playerId ?? null,
+          acceptedOmissions: row.scoringKind === "idp"
+            ? ACCEPTED_IDP_OMISSIONS
+            : row.scoringKind === "offense"
+              ? ACCEPTED_OFFENSE_OMISSIONS
+              : [],
+        }))
         .filter((row) => row.playerId),
     };
   });
@@ -279,8 +307,8 @@ export function assembleV5Board({
     replacementRanks: LEAGUE_REPLACEMENT_RANKS,
     asOf,
     evidencePolicy: (player) => ({
-      minimumFreshFamilies: ["QB", "RB", "WR", "TE"].includes(player.position) ? 2 : 1,
-      requiredFamilies: ["QB", "RB", "WR", "TE"].includes(player.position) ? ["yahoo"] : [],
+      minimumFreshFamilies: ["QB", "RB", "WR", "TE", "DL", "LB", "DB", "CB", "S"].includes(player.position) ? 2 : 1,
+      requiredFamilies: ["QB", "RB", "WR", "TE", "DL", "LB", "DB", "CB", "S"].includes(player.position) ? ["yahoo"] : [],
     }),
     replacementRoster,
   });
@@ -351,12 +379,12 @@ export function assembleV5Board({
     const projectionUsable = Number.isFinite(Number(player.consensusPoints)) && weeklyProfile != null;
     const offensePosition = player.eligible.some((position) => ["QB", "RB", "WR", "TE"].includes(position));
     const specialistPosition = player.eligible.some((position) => ["K", "DEF", "DL", "LB", "DB", "CB", "S", "D"].includes(position));
-    const validatedSpecialist = !offensePosition && specialistPosition && player.sourceFamilies.includes("yahoo");
-    const executable = projectionUsable && injury.executable && (player.executable || validatedSpecialist);
+    const yahooOnlyLateSpecialist = !offensePosition && player.eligible.some((position) => ["K", "DEF"].includes(position)) && player.sourceFamilies.includes("yahoo") && player.scorableSourceFamilyCount === 1;
+    const executable = projectionUsable && injury.executable && (player.executable || yahooOnlyLateSpecialist);
     const manualEligible = projectionUsable && injury.executable;
     const validationStatus = dualRole
       ? "DUAL_ROLE_SCORING_UNVERIFIED"
-      : validatedSpecialist
+      : yahooOnlyLateSpecialist
           ? "UNVALIDATED_SPECIALIST_PROJECTION"
           : player.executable
             ? "EXECUTABLE"
@@ -432,7 +460,7 @@ export function assembleV5Board({
     replacementRanks: LEAGUE_REPLACEMENT_RANKS,
     replacementBySlot: projectionBoard.replacementBySlot,
     replacementRankBasis: "joint maximum-weight allocation of every 2 Minute Drillers starter slot",
-    specialistRankingBasis: { K: "Yahoo preseason rank", DEF: "Yahoo preseason rank", DL: "Yahoo league projection; unvalidated specialist tier", LB: "Yahoo league projection; unvalidated specialist tier", DB: "Yahoo league projection; unvalidated specialist tier" },
+    specialistRankingBasis: { K: "Yahoo preseason rank; Razzball raw-stat total is a diagnostic challenger", DEF: "Yahoo preseason rank; season aggregates cannot reconstruct weekly scoring", DL: "league-scored median/mean of gate-passing Yahoo and independent IDP raw-stat families", LB: "league-scored median/mean of gate-passing Yahoo and independent IDP raw-stat families", DB: "league-scored median/mean of gate-passing Yahoo and independent IDP raw-stat families" },
     sources: projectionBoard.sourceReceipts,
     snapshotReceipts: {
       yahooOffenseObservedAt: offenseObservedAt,

@@ -8,6 +8,7 @@ import {
   scoreOffenseStatLine,
   scoreWeeklyOffenseStatLines,
   scoreIdpStatLine,
+  scoreKickerStatLine,
 } from "./player-intelligence.mjs";
 
 test("scores the league's QB premium and yardage bonuses exactly", () => {
@@ -65,6 +66,10 @@ test("scores every observed IDP category with the league's exact values", () => 
     turnoverReturnYards: 20,
     extraPointReturns: 1,
   }), 36);
+});
+
+test("scores kicker raw stats with the league's flat field-goal and missed-PAT rules", () => {
+  assert.equal(scoreKickerStatLine({ fieldGoalsMade: 30, extraPointsMade: 40, extraPointsAttempted: 42 }), 128);
 });
 
 test("joint replacement reassigns multi-position players across flex and IDP slots", () => {
@@ -235,14 +240,95 @@ test("projection omission receipts propagate without fabricated numeric values",
     evidencePolicy: () => ({ minimumFreshFamilies: 2, requiredFamilies: ["yahoo"] }),
     sources: [
       { sourceId: "yahoo", family: "yahoo", updatedAt: "2026-08-22T11:00:00Z", rows: [{ playerId: "r1", leaguePoints: 200 }] },
-      { sourceId: "espn", family: "espn-clay", updatedAt: "2026-08-22T11:00:00Z", rows: [{ playerId: "r1", stats: { rushingYards: 1_000 }, omittedScoringCategories: ["rushingHundredYardGames"] }] },
+      { sourceId: "espn", family: "espn-clay", updatedAt: "2026-08-22T11:00:00Z", acceptedOmissions: ["rushingHundredYardGames"], rows: [{ playerId: "r1", stats: { rushingYards: 1_000 }, omittedScoringCategories: ["rushingHundredYardGames"] }] },
     ],
   });
   assert.deepEqual(board.players[0].omittedScoringCategories, ["rushingHundredYardGames"]);
-  assert.equal(board.players[0].consensusPoints, 200);
-  assert.match(board.players[0].projectionBlendPolicy, /required-family-full-schema/);
+  assert.equal(board.players[0].consensusPoints, 150);
+  assert.match(board.players[0].projectionBlendPolicy, /equal-family-mean/);
   assert.equal(board.players[0].sourceFamilyPerGamePoints["espn-clay"], 100 / 17);
   assert.equal(board.players[0].executable, true);
+});
+
+test("unaccepted omissions remain diagnostic and cannot satisfy evidence policy", () => {
+  const board = buildPlayerBoard({
+    asOf: "2026-08-22T12:00:00Z",
+    players: [{ playerId: "r1", name: "Runner", position: "RB" }],
+    replacementRanks: { RB: 1 },
+    evidencePolicy: () => ({ minimumFreshFamilies: 2, requiredFamilies: ["yahoo"] }),
+    sources: [
+      { sourceId: "yahoo", family: "yahoo", updatedAt: "2026-08-22T11:00:00Z", rows: [{ playerId: "r1", leaguePoints: 200 }] },
+      { sourceId: "partial", family: "partial", updatedAt: "2026-08-22T11:00:00Z", rows: [{ playerId: "r1", stats: { rushingYards: 1_000 }, omittedScoringCategories: ["rushingTouchdowns"] }] },
+    ],
+  });
+  assert.equal(board.players[0].consensusPoints, 200);
+  assert.equal(board.players[0].scorableSourceFamilyCount, 1);
+  assert.deepEqual(board.players[0].unacceptedOmittedScoringCategories, ["rushingTouchdowns"]);
+  assert.equal(board.players[0].executable, false);
+});
+
+test("uses the median once three scorable source families are available", () => {
+  const board = buildPlayerBoard({
+    asOf: "2026-08-22T12:00:00Z",
+    players: [{ playerId: "r1", name: "Runner", position: "RB" }],
+    replacementRanks: { RB: 1 },
+    sources: [
+      { sourceId: "a", family: "a", updatedAt: "2026-08-22T11:00:00Z", rows: [{ playerId: "r1", leaguePoints: 100 }] },
+      { sourceId: "b", family: "b", updatedAt: "2026-08-22T11:00:00Z", rows: [{ playerId: "r1", leaguePoints: 200 }] },
+      { sourceId: "c", family: "c", updatedAt: "2026-08-22T11:00:00Z", rows: [{ playerId: "r1", leaguePoints: 900 }] },
+    ],
+  });
+  assert.equal(board.players[0].consensusPoints, 200);
+  assert.match(board.players[0].projectionBlendPolicy, /median/);
+});
+
+test("scores IDP raw-stat rows under the league IDP rules", () => {
+  const board = buildPlayerBoard({
+    asOf: "2026-08-22T12:00:00Z",
+    players: [{ playerId: "d1", name: "Defender", position: "LB" }],
+    replacementRanks: { LB: 1 },
+    minimumFreshSources: 1,
+    sources: [{
+      sourceId: "idp",
+      family: "idp",
+      updatedAt: "2026-08-22T11:00:00Z",
+      rows: [{ playerId: "d1", scoringKind: "idp", projectionGames: 17, stats: { soloTackles: 100, sacks: 5 } }],
+    }],
+  });
+  assert.equal(board.players[0].consensusPoints, 60);
+});
+
+test("scores kicker raw-stat rows under the league kicker rules", () => {
+  const board = buildPlayerBoard({
+    asOf: "2026-08-22T12:00:00Z",
+    players: [{ playerId: "k1", name: "Kicker", position: "K" }],
+    replacementRanks: { K: 1 },
+    minimumFreshSources: 1,
+    sources: [{ sourceId: "kicker", family: "kicker", updatedAt: "2026-08-22T11:00:00Z", rows: [{ playerId: "k1", scoringKind: "kicker", projectionGames: 17, stats: { fieldGoalsMade: 30, extraPointsMade: 40, extraPointsAttempted: 42 } }] }],
+  });
+  assert.equal(board.players[0].consensusPoints, 128);
+});
+
+test("team-defense season aggregates remain diagnostic even when a row joins", () => {
+  const board = buildPlayerBoard({
+    asOf: "2026-08-22T12:00:00Z",
+    players: [{ playerId: "def1", name: "Buffalo", position: "DEF" }],
+    replacementRanks: { DEF: 1 },
+    minimumFreshSources: 1,
+    sources: [{
+      sourceId: "defense",
+      family: "defense",
+      updatedAt: "2026-08-22T11:00:00Z",
+      rows: [{
+        playerId: "def1",
+        scoringKind: "team-defense",
+        leaguePoints: 999,
+        stats: { interceptions: 20, returnTouchdowns: 3 },
+      }],
+    }],
+  });
+  assert.equal(board.players[0].consensusPoints, null);
+  assert.equal(board.players[0].scorableSourceFamilyCount, 0);
 });
 
 test("null and blank projection values do not become zero-point evidence", () => {

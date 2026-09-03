@@ -21,7 +21,8 @@ const MARKET_STATS = Object.freeze({
   season_receiving_touchdowns: "receivingTouchdowns",
 });
 const TEAM_ALIASES = Object.freeze({ JAC: "JAX", LA: "LAR", WSH: "WAS" });
-const ROLE_SOURCES = new Set(["nfl_official", "team_official", "nflverse", "sleeper", "yahoo"]);
+const ROLE_SOURCES = new Set(["nfl_official", "team_official", "nflverse", "sleeper", "yahoo", "rotoworld-news"]);
+const ROLE_SOURCE_HOSTS = Object.freeze({ "rotoworld-news": "www.nbcsports.com" });
 
 function canonicalTeam(value) {
   const team = String(value ?? "").trim().toUpperCase();
@@ -410,7 +411,7 @@ function manualRoleFindings(packet, asOf) {
     const finding = {
       yahooId: String(entry.yahooId),
       sourceId,
-      sourceUrl: checkedUrl(entry.sourceUrl, `role finding ${index} sourceUrl`),
+      sourceUrl: checkedUrl(entry.sourceUrl, `role finding ${index} sourceUrl`, ROLE_SOURCE_HOSTS[sourceId] ?? null),
       observedAt,
       severity,
       summary: String(entry.summary ?? "").trim(),

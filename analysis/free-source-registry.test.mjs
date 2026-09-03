@@ -5,7 +5,7 @@ import { FREE_SOURCE_REGISTRY, validateSourceSnapshot } from "./free-source-regi
 
 test("registry contains only zero-cost declared sources", () => {
   assert.ok(FREE_SOURCE_REGISTRY.length >= 4);
-  assert.ok(FREE_SOURCE_REGISTRY.every((source) => source.cost.toLowerCase().includes("free")));
+  assert.ok(FREE_SOURCE_REGISTRY.every((source) => ["free", "free-manual", "free-noncommercial"].includes(source.cost)));
 });
 
 test("source snapshots require a provenance manifest and report freshness", () => {

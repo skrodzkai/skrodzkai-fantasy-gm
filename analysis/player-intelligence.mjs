@@ -33,6 +33,12 @@ export const IDP_SCORING = Object.freeze({
   extraPointReturns: 2,
 });
 
+export const KICKER_SCORING = Object.freeze({
+  fieldGoalsMade: 3,
+  extraPointsMade: 1,
+  extraPointsMissed: -1,
+});
+
 const REQUIRED_PLAYER_FIELDS = ["playerId", "name", "position"];
 const DEFAULT_PROJECTION_GAMES = 17;
 
@@ -63,6 +69,10 @@ function weightedMean(rows) {
   const totalWeight = rows.reduce((sum, row) => sum + row.weight, 0);
   if (totalWeight <= 0) throw new Error("projection weights must total more than zero");
   return rows.reduce((sum, row) => sum + row.points * row.weight, 0) / totalWeight;
+}
+
+function median(values) {
+  return quantile(values, 0.5);
 }
 
 export function scoreOffenseStatLine(stats, scoring = OFFENSE_SCORING) {
@@ -101,6 +111,13 @@ export function scoreIdpStatLine(stats, scoring = IDP_SCORING) {
     (points, [field, value]) => points + finite(stats?.[field]) * value,
     0,
   );
+}
+
+export function scoreKickerStatLine(stats, scoring = KICKER_SCORING) {
+  const missedExtraPoints = finite(stats?.extraPointsMissed, Math.max(0, finite(stats?.extraPointsAttempted) - finite(stats?.extraPointsMade)));
+  return finite(stats?.fieldGoalsMade) * scoring.fieldGoalsMade +
+    finite(stats?.extraPointsMade) * scoring.extraPointsMade +
+    missedExtraPoints * scoring.extraPointsMissed;
 }
 
 function normalizePosition(value) {
@@ -223,16 +240,21 @@ export function deriveJointReplacementLevels({ players, teamCount, rosterSlots }
 }
 
 function projectionPoints(row) {
+  const scoringKind = String(row?.scoringKind ?? "offense").toLowerCase();
+  if (!["offense", "idp", "kicker"].includes(scoringKind)) return null;
   if (row?.leaguePoints !== null && row?.leaguePoints !== undefined && row?.leaguePoints !== "" && Number.isFinite(Number(row.leaguePoints))) {
     return Number(row.leaguePoints);
   }
   const stats = row?.stats;
-  if (Array.isArray(row?.weeklyStats)) return scoreWeeklyOffenseStatLines(row.weeklyStats);
+  if (Array.isArray(row?.weeklyStats)) return scoringKind === "offense" ? scoreWeeklyOffenseStatLines(row.weeklyStats) : null;
   if (!stats || typeof stats !== "object") return null;
-  const hasScoredStat = Object.keys(OFFENSE_SCORING).some(
+  const scoring = scoringKind === "idp" ? IDP_SCORING : scoringKind === "kicker" ? KICKER_SCORING : OFFENSE_SCORING;
+  const hasScoredStat = Object.keys(scoring).some(
     (key) => stats[key] !== null && stats[key] !== undefined && stats[key] !== "" && Number.isFinite(Number(stats[key])),
   );
-  return hasScoredStat ? scoreOffenseStatLine(stats) : null;
+  return hasScoredStat
+    ? scoringKind === "idp" ? scoreIdpStatLine(stats) : scoringKind === "kicker" ? scoreKickerStatLine(stats) : scoreOffenseStatLine(stats)
+    : null;
 }
 
 function hasFinite(value) {
@@ -336,6 +358,9 @@ export function buildPlayerBoard({
     const weight = finite(source.weight, 1);
     if (weight <= 0) throw new Error(`source ${sourceId} weight must be positive`);
     const rows = Array.isArray(source.rows) ? source.rows : [];
+    const sourceAcceptedOmissions = new Set(
+      Array.isArray(source.acceptedOmissions) ? source.acceptedOmissions.map(String) : [],
+    );
     sourceReceipts.push({
       sourceId,
       family,
@@ -354,15 +379,21 @@ export function buildPlayerBoard({
       const perGamePoints = projectionPerGame(row, source);
       if (!Number.isFinite(perGamePoints)) continue;
       const evidence = evidenceByPlayer.get(playerId) ?? [];
+      const omissions = Array.isArray(row.omittedScoringCategories)
+        ? [...new Set(row.omittedScoringCategories.map(String))].sort()
+        : [];
+      const acceptedOmissions = new Set(
+        Array.isArray(row.acceptedOmissions) ? row.acceptedOmissions.map(String) : sourceAcceptedOmissions,
+      );
       evidence.push({
         sourceId,
         family,
         perGamePoints,
         weight,
         updatedAt: source.updatedAt,
-        omittedScoringCategories: Array.isArray(row.omittedScoringCategories)
-          ? [...new Set(row.omittedScoringCategories.map(String))].sort()
-          : [],
+        omittedScoringCategories: omissions,
+        acceptedOmittedScoringCategories: omissions.filter((field) => acceptedOmissions.has(field)),
+        unacceptedOmittedScoringCategories: omissions.filter((field) => !acceptedOmissions.has(field)),
       });
       evidenceByPlayer.set(playerId, evidence);
     }
@@ -382,6 +413,8 @@ export function buildPlayerBoard({
       perGamePoints: weightedMean(rows.map((row) => ({ ...row, points: row.perGamePoints }))),
       weight: 1,
       omittedScoringCategories: [...new Set(rows.flatMap((row) => row.omittedScoringCategories))].sort(),
+      acceptedOmittedScoringCategories: [...new Set(rows.flatMap((row) => row.acceptedOmittedScoringCategories))].sort(),
+      unacceptedOmittedScoringCategories: [...new Set(rows.flatMap((row) => row.unacceptedOmittedScoringCategories))].sort(),
     }));
     const policy = evidencePolicy
       ? evidencePolicy(player)
@@ -391,28 +424,27 @@ export function buildPlayerBoard({
       throw new Error(`player ${player.playerId} minimumFreshFamilies must be a positive integer`);
     }
     const requiredFamilies = [...new Set((policy?.requiredFamilies ?? []).map(String))].sort();
-    const presentFamilies = new Set(familyEvidence.map((row) => row.family));
+    const scoringEvidence = familyEvidence.filter((row) => row.unacceptedOmittedScoringCategories.length === 0);
+    const presentFamilies = new Set(scoringEvidence.map((row) => row.family));
     const missingRequiredFamilies = requiredFamilies.filter((family) => !presentFamilies.has(family));
-    const completeRequiredEvidence = familyEvidence.filter((row) => requiredFamilies.includes(row.family) && row.omittedScoringCategories.length === 0);
-    const scoringEvidence = familyEvidence.some((row) => row.omittedScoringCategories.length > 0) && completeRequiredEvidence.length
-      ? completeRequiredEvidence
-      : familyEvidence;
-    const projectionBlendPolicy = scoringEvidence === familyEvidence
-      ? "equal-family-mean"
-      : "required-family-full-schema; incomplete families are diagnostic only";
+    const projectionBlendPolicy = scoringEvidence.length >= 3
+      ? "equal-family-median; only families with no unaccepted scoring omissions"
+      : "equal-family-mean; only families with no unaccepted scoring omissions";
     const normalizedEvidence = familyEvidence.map((row) => ({
       ...row,
       points: row.perGamePoints * expectedGames,
     }));
     const points = normalizedEvidence.map((row) => row.points);
     const perGamePoints = scoringEvidence.length
-      ? weightedMean(scoringEvidence.map((row) => ({ ...row, points: row.perGamePoints })))
+      ? scoringEvidence.length >= 3
+        ? median(scoringEvidence.map((row) => row.perGamePoints))
+        : weightedMean(scoringEvidence.map((row) => ({ ...row, points: row.perGamePoints })))
       : null;
     const consensus = perGamePoints == null ? null : perGamePoints * expectedGames;
     const calibratedOutcome = player.outcomeCalibrated === true &&
       hasFinite(player.outcomeLow) && hasFinite(player.outcomeHigh) &&
       Number(player.outcomeLow) <= Number(player.outcomeHigh);
-    const executable = familyEvidence.length >= minimumFreshFamilies && missingRequiredFamilies.length === 0;
+    const executable = scoringEvidence.length >= minimumFreshFamilies && missingRequiredFamilies.length === 0;
     const omittedScoringCategories = [...new Set(familyEvidence.flatMap((row) => row.omittedScoringCategories))].sort();
     return {
       ...player,
@@ -429,6 +461,8 @@ export function buildPlayerBoard({
       sourceIds: evidence.map((row) => row.sourceId).sort(),
       sourceFamilyCount: familyEvidence.length,
       sourceFamilies: familyEvidence.map((row) => row.family).sort(),
+      scorableSourceFamilyCount: scoringEvidence.length,
+      scorableSourceFamilies: scoringEvidence.map((row) => row.family).sort(),
       sourceFamilyPerGamePoints: Object.fromEntries(
         familyEvidence.map((row) => [row.family, row.perGamePoints]),
       ),
@@ -437,12 +471,13 @@ export function buildPlayerBoard({
       requiredSourceFamilies: requiredFamilies,
       missingRequiredSourceFamilies: missingRequiredFamilies,
       omittedScoringCategories,
+      unacceptedOmittedScoringCategories: [...new Set(familyEvidence.flatMap((row) => row.unacceptedOmittedScoringCategories))].sort(),
       executable,
       evidenceStatus: executable
         ? "VALIDATED"
         : missingRequiredFamilies.length
           ? "MISSING_REQUIRED_PROJECTION_FAMILY"
-        : familyEvidence.length === 1
+        : scoringEvidence.length === 1
           ? "UNVALIDATED_SINGLE_SOURCE_PROJECTION"
           : "NO_FRESH_PROJECTION",
       blockReason:
@@ -450,7 +485,7 @@ export function buildPlayerBoard({
           ? null
           : missingRequiredFamilies.length
             ? `requires source families ${requiredFamilies.join(", ")}; missing ${missingRequiredFamilies.join(", ")}`
-            : `requires ${minimumFreshFamilies} fresh projection families; found ${familyEvidence.length}`,
+            : `requires ${minimumFreshFamilies} scorable projection families; found ${scoringEvidence.length}`,
     };
   });
 

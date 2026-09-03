@@ -23,6 +23,74 @@ export const FREE_SOURCE_REGISTRY = Object.freeze([
     licenseUseNote: "Retain only source receipt and locally derived values; do not republish the PDF.",
   }),
   Object.freeze({
+    id: "cbs-projections",
+    sourceFamily: "cbs",
+    evidenceKind: "raw_stat_projection",
+    role: "independent public offense projection input scored locally under league rules",
+    access: "public CBS Sports 2026 projection tables",
+    cost: "free",
+    constraints: "ingest raw stat columns only; CBS fantasy-point totals never enter the blend",
+    maximumRefreshHours: 168,
+    maximumRetrievalHours: 24,
+    licenseUseNote: "Retain source receipts and derived values; do not republish page content.",
+  }),
+  Object.freeze({
+    id: "razzball-projections",
+    sourceFamily: "razzball",
+    evidenceKind: "raw_stat_projection",
+    role: "independent public offense, kicker, team-defense, and IDP projection challenger",
+    access: "public Razzball 2026 projection tables and their CSV export",
+    cost: "free",
+    constraints: "offense and IDP may enter the blend only after coverage gates; K may enter after exact league scoring; DEF remains diagnostic because weekly points-allowed buckets cannot be reconstructed from season aggregates",
+    maximumRefreshHours: 168,
+    maximumRetrievalHours: 24,
+    licenseUseNote: "Retain source receipts and derived values; do not republish page content.",
+  }),
+  Object.freeze({
+    id: "ffc-adp",
+    sourceFamily: "fantasy-football-calculator",
+    evidenceKind: "market_adp",
+    role: "independent 12-team PPR draft-market challenger",
+    access: "documented public Fantasy Football Calculator ADP endpoint",
+    cost: "free",
+    constraints: "market timing signal only; never counts as performance projection evidence",
+    maximumRefreshHours: 24,
+    licenseUseNote: "Retain factual ADP fields and source metadata only.",
+  }),
+  Object.freeze({
+    id: "rotoworld-top-200",
+    sourceFamily: "rotoworld",
+    evidenceKind: "rank_challenger",
+    role: "manual expert-rank disagreement challenger",
+    access: "currently visible public NBC Sports Rotoworld Top 200 page",
+    cost: "free-manual",
+    constraints: "manual receipted capture only; never scrape or silently enter the projection blend",
+    maximumRefreshHours: 168,
+    licenseUseNote: "Retain rank, player identity, URL, and capture time only.",
+  }),
+  Object.freeze({
+    id: "rotoworld-news",
+    sourceFamily: "rotoworld",
+    evidenceKind: "injury_and_role",
+    role: "manual news, role, and injury warning evidence",
+    access: "currently visible public NBC Sports Rotoworld player-news pages",
+    cost: "free-manual",
+    constraints: "manual receipted facts only; warnings never mutate numeric projections",
+    maximumRefreshHours: 24,
+    licenseUseNote: "Quote sparingly and retain factual status receipts only.",
+  }),
+  Object.freeze({
+    id: "fantasypros-manual",
+    sourceFamily: "fantasypros",
+    evidenceKind: "rank_challenger",
+    role: "optional manual consensus-rank challenger",
+    access: "currently visible free FantasyPros ranking page",
+    cost: "free-manual",
+    constraints: "no paid API and no automated scraping; never counts as raw-stat projection evidence",
+    maximumRefreshHours: 168,
+    licenseUseNote: "Retain rank, player identity, URL, and capture time only.",
+  }),
+  Object.freeze({
     id: "nfl-official",
     sourceFamily: "nfl-official",
     evidenceKind: "injury_and_role",
@@ -48,9 +116,9 @@ export const FREE_SOURCE_REGISTRY = Object.freeze([
     id: "sleeper",
     sourceFamily: "sleeper",
     evidenceKind: "injury_and_identity",
-    role: "secondary player identity, active status, practice participation, and injury-status cross-check",
+    role: "secondary player identity, active status, practice participation, injury-status cross-check, and add/drop trend warning",
     access: "public read-only Sleeper API",
-    cost: "free for non-commercial use",
+    cost: "free-noncommercial",
     constraints: "attribute Sleeper when published; cache the player map and fetch no more than daily",
     maximumRefreshHours: 24,
     licenseUseNote: "Attribute Sleeper and cache no more frequently than daily.",
@@ -78,6 +146,12 @@ export const FREE_SOURCE_REGISTRY = Object.freeze([
     licenseUseNote: "Retain only a factual line, public URL, capture time, and derived disagreement flag.",
   }),
 ]);
+
+const ALLOWED_COSTS = new Set(["free", "free-manual", "free-noncommercial"]);
+
+for (const source of FREE_SOURCE_REGISTRY) {
+  if (!ALLOWED_COSTS.has(source.cost)) throw new Error(`${source.id} has unsupported cost ${source.cost}`);
+}
 
 export function validateSourceSnapshot(snapshot, asOf) {
   const now = Date.parse(asOf);

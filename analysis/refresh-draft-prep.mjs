@@ -54,6 +54,10 @@ function identityKey(name, team, dropSuffix = false) {
   return `${canonicalName(name, dropSuffix)}:${canonicalTeam(team)}`;
 }
 
+function overrideIdentityKey(name, team, position) {
+  return `${identityKey(name, team, false)}:${String(position ?? "").toUpperCase()}`;
+}
+
 function uniqueIdentityMap(rows, dropSuffix = false) {
   const values = new Map();
   const ambiguous = new Set();
@@ -72,34 +76,72 @@ function uniqueIdentityMap(rows, dropSuffix = false) {
   return { values, ambiguous };
 }
 
-export function joinEspnRowsToYahoo({ rows, sleeperPlayers, baselineRows, yahooRows = [] }) {
+export function joinProjectionRowsToYahoo({ rows, sleeperPlayers, baselineRows, yahooRows = [], sourceId = null, overrides = [], topLimit = null, teamPositionFallbacks = [] }) {
   const identities = [
-    ...yahooRows.map((row) => ({ yahooId: row.yahooId, name: row.name, team: row.team })),
-    ...(baselineRows ?? []).map((row) => ({ yahooId: row.yahoo_id, name: row.name, team: row.team })),
-    ...Object.values(sleeperPlayers ?? {}).map((row) => ({ yahooId: row.yahoo_id, name: row.full_name, team: row.team })),
+    ...yahooRows.map((row) => ({ yahooId: row.yahooId, name: row.name, team: row.team, position: row.position })),
+    ...(baselineRows ?? []).map((row) => ({ yahooId: row.yahoo_id, name: row.name, team: row.team, position: row.position })),
+    ...Object.values(sleeperPlayers ?? {}).map((row) => ({ yahooId: row.yahoo_id, name: row.full_name, team: row.team, position: row.position || row.fantasy_positions?.[0] })),
   ];
   const exact = uniqueIdentityMap(identities, false);
   const suffixless = uniqueIdentityMap(identities, true);
+  const allowedTeamPositions = new Set(teamPositionFallbacks.map((value) => String(value).toUpperCase()));
+  const teamPosition = uniqueIdentityMap(
+    identities.filter((row) => allowedTeamPositions.has(String(row.position ?? "").toUpperCase())).map((row) => ({ ...row, name: String(row.position).toUpperCase() })),
+    false,
+  );
+  const knownYahooIds = new Set(identities.map((row) => row.yahooId).filter((value) => value !== null && value !== undefined).map(String));
+  const overrideMap = new Map();
+  for (const override of overrides ?? []) {
+    if (sourceId && override.sourceId !== sourceId) continue;
+    const yahooId = String(override.yahooId ?? "");
+    if (!knownYahooIds.has(yahooId)) throw new Error(`identity override references unknown Yahoo ID ${yahooId}`);
+    const key = overrideIdentityKey(override.name, override.team, override.position);
+    if (!override.name || !override.team || !override.position) throw new Error("identity override requires name, team, and position");
+    if (overrideMap.has(key)) throw new Error(`duplicate identity override ${key}`);
+    overrideMap.set(key, yahooId);
+  }
   const matchedByPosition = {};
   const unmatchedByPosition = {};
-  const joined = rows.map((row) => {
+  const matchedByMethod = { override: 0, exact: 0, suffixless: 0, teamPosition: 0 };
+  const joined = rows.map((row, index) => {
+    const overrideId = overrideMap.get(overrideIdentityKey(row.name, row.team, row.position));
     const exactId = exact.values.get(identityKey(row.name, row.team, false));
     const suffixId = suffixless.values.get(identityKey(row.name, row.team, true));
-    const playerId = exactId ?? suffixId ?? null;
+    const teamPositionId = allowedTeamPositions.has(String(row.position ?? "").toUpperCase())
+      ? teamPosition.values.get(identityKey(String(row.position).toUpperCase(), row.team, false))
+      : null;
+    const playerId = overrideId ?? exactId ?? suffixId ?? teamPositionId ?? null;
+    if (overrideId) matchedByMethod.override += 1;
+    else if (exactId) matchedByMethod.exact += 1;
+    else if (suffixId) matchedByMethod.suffixless += 1;
+    else if (teamPositionId) matchedByMethod.teamPosition += 1;
     const bucket = playerId ? matchedByPosition : unmatchedByPosition;
     bucket[row.position] = (bucket[row.position] ?? 0) + 1;
-    return playerId ? { ...row, playerId } : row;
+    return playerId ? { ...row, playerId, sourceRank: row.sourceRank ?? index + 1 } : { ...row, sourceRank: row.sourceRank ?? index + 1 };
   });
+  const topRows = Number.isInteger(topLimit) && topLimit > 0
+    ? joined.filter((row) => Number(row.sourceRank) <= topLimit)
+    : [];
+  const unjoinedTop = topRows.filter((row) => !row.playerId).map((row) => ({ sourceRank: row.sourceRank, name: row.name, team: row.team, position: row.position }));
   return {
     rows: joined,
     receipt: {
+      sourceId,
       matchedByPosition,
       unmatchedByPosition,
+      matchedByMethod,
       ambiguousExactKeys: exact.ambiguous.size,
       ambiguousSuffixlessKeys: suffixless.ambiguous.size,
       fuzzyMatching: false,
+      topLimit,
+      topCoverage: topRows.length ? (topRows.length - unjoinedTop.length) / topRows.length : null,
+      unjoinedTop,
     },
   };
+}
+
+export function joinEspnRowsToYahoo(options) {
+  return joinProjectionRowsToYahoo(options);
 }
 
 function requireFreshIso(value, label) {
@@ -483,6 +525,15 @@ export async function refreshDraftPrep(options) {
     espnSnapshot.identityReceipt = joined.receipt;
     const [espnHealth, sleeperHealth] = validateSourceSnapshot([espnSnapshot.manifest, sleeper.snapshot.manifest], clock.wallClockAt);
     if (!espnHealth.fresh || !sleeperHealth.fresh) throw new Error("public source freshness gate failed");
+    const additionalProjectionSnapshots = options.additionalProjectionPath
+      ? await readFile(options.additionalProjectionPath, "utf8").then(JSON.parse).then((value) => {
+          if (!Array.isArray(value)) throw new Error("additional projection packet must be an array");
+          return value.filter((snapshot) => snapshot.manifest?.sourceId !== "espn-mike-clay");
+        })
+      : [];
+    const additionalProjectionHealth = validateSourceSnapshot(additionalProjectionSnapshots.map((snapshot) => snapshot.manifest), clock.wallClockAt);
+    if (additionalProjectionHealth.some((receipt) => receipt.fresh !== true)) throw new Error("additional public projection freshness gate failed");
+    const projectionSnapshots = [espnSnapshot, ...additionalProjectionSnapshots];
 
     await Promise.all([
       writeFile(join(sourceDirectory, "espn-clay-2026.json"), `${JSON.stringify(espnSnapshot, null, 2)}\n`, { mode: 0o600 }),
@@ -497,7 +548,7 @@ export async function refreshDraftPrep(options) {
       sleeperPlayers: sleeper.snapshot.players,
       sleeperObservedAt: sleeper.snapshot.manifest.sourceAsOf,
       externalInjuryReports: externalInjuries,
-      projectionSnapshots: [espnSnapshot],
+      projectionSnapshots,
       survivalCalibration,
       asOf: clock.wallClockAt,
     });
@@ -515,7 +566,7 @@ export async function refreshDraftPrep(options) {
       ]);
       board = enrichBoardWithDraftSignals({
         board,
-        projectionSnapshots:[espnSnapshot],
+        projectionSnapshots,
         depthChartCsv,
         rosterCsv,
         scheduleCsv,
@@ -605,6 +656,7 @@ async function main() {
     nflverseRosterPath: args["nflverse-roster"],
     nflverseSchedulePath: args["nflverse-schedule"],
     marketOverlayPath: args["market-overlay"],
+    additionalProjectionPath: args["additional-projections"] ?? null,
   });
   process.stdout.write(`${JSON.stringify({ output: result.finalPath, status: result.health.status })}\n`);
 }
