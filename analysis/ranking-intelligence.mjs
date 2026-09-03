@@ -177,11 +177,57 @@ function csvCell(value) {
 }
 
 export function renderRankingCsv(players) {
-  const fields = ["candidateRank", "previousRank", "yahooId", "name", "team", "position", "bye", "candidatePoints", "vorp", "yahooPerGame", "priorYahooPerGame", "espnPerGame", "cbsPerGame", "razzballPerGame", "ffcAdp", "rotoworldRank", "fantasyProsRank", "injuryStatus", "flags"];
+  const fields = ["candidateRank", "previousRank", "yahooId", "name", "team", "position", "bye", "candidatePoints", "vorp", "yahooPerGame", "priorYahooPerGame", "espnPerGame", "cbsPerGame", "razzballPerGame", "ffcAdp", "rotoworldRank", "fantasyProsRank", "injuryStatus", "calibrationStatus", "activeWeekP20", "activeWeekP80", "availabilityP20", "availabilityP50", "availabilityP80", "seasonP20", "seasonP50", "seasonP80", "flags"];
   return `${[fields.join(","), ...players.map((player) => fields.map((field) => csvCell(player[field])).join(","))].join("\n")}\n`;
 }
 
-export function buildRankingIntelligence({ board, snapshots, ffcRows = [], rankChallengers = [], sleeperTrends = {}, sleeperPlayersCurrent = {}, challengerReceipts = {}, generatedAt }) {
+export function attachHistoricalCalibration(rankingPack, historicalCalibration = null) {
+  const byYahooId = new Map((historicalCalibration?.currentPlayers ?? []).map((player) => [String(player.yahooId), player]));
+  const players = (rankingPack.players ?? []).map((player) => {
+    const calibration = byYahooId.get(String(player.yahooId)) ?? {
+      yahooId: String(player.yahooId),
+      gsisId: null,
+      position: player.position,
+      status: historicalCalibration ? "CALIBRATION_IDENTITY_MISSING" : "CALIBRATION_NOT_PROVIDED",
+      activeWeek: null,
+      availability: null,
+      season: null,
+    };
+    return {
+      ...player,
+      calibrationStatus: calibration.status,
+      activeWeekP20: calibration.activeWeek?.p20 ?? null,
+      activeWeekP80: calibration.activeWeek?.p80 ?? null,
+      availabilityP20: calibration.availability?.p20 ?? null,
+      availabilityP50: calibration.availability?.p50 ?? null,
+      availabilityP80: calibration.availability?.p80 ?? null,
+      seasonP20: calibration.season?.p20 ?? null,
+      seasonP50: calibration.season?.p50 ?? null,
+      seasonP80: calibration.season?.p80 ?? null,
+      historicalCalibration: {
+        ...calibration,
+        trainingSeasons: historicalCalibration?.trainingSeasons ?? null,
+        holdoutSeason: historicalCalibration?.holdoutSeason ?? null,
+      },
+    };
+  });
+  const brief = rankingPack.astraModelBrief ?? {};
+  const validation = historicalCalibration
+    ? [...new Set(["2025 untouched challenger-zero holdout", ...(brief.validation ?? []), "2020-2024 weekly outcome and availability priors"])]
+    : brief.validation ?? [];
+  return {
+    ...rankingPack,
+    schemaVersion: 2,
+    astraModelBrief: {
+      ...brief,
+      validation,
+      ...(historicalCalibration ? { calibrationPolicy: "historical ranges are annotations only; failed position gates remain null and never alter projection, rank, VORP, or source-family values" } : {}),
+    },
+    players,
+  };
+}
+
+export function buildRankingIntelligence({ board, snapshots, ffcRows = [], rankChallengers = [], sleeperTrends = {}, sleeperPlayersCurrent = {}, challengerReceipts = {}, historicalCalibration = null, generatedAt }) {
   const boardAgeHours = (Date.parse(generatedAt) - Date.parse(board.generatedAt)) / 3_600_000;
   const baseBoardReceipt = {
     generatedAt: board.generatedAt ?? null,
@@ -286,7 +332,7 @@ export function buildRankingIntelligence({ board, snapshots, ffcRows = [], rankC
       flags: [...new Set(flags)].sort(),
     };
   }).sort((left, right) => (left.candidateRank ?? Infinity) - (right.candidateRank ?? Infinity) || left.name.localeCompare(right.name));
-  return {
+  return attachHistoricalCalibration({
     schemaVersion: 1,
     generatedAt,
     posture: "research and draft preparation only; no Yahoo action authority",
@@ -312,7 +358,7 @@ export function buildRankingIntelligence({ board, snapshots, ffcRows = [], rankC
       currentSleeperInjuryCoverage: { matchedPlayers: currentSleeperByYahoo.size, boardPlayers: board.players?.length ?? 0 },
       receipts: challengerReceipts,
     },
-  };
+  }, historicalCalibration);
 }
 
 async function main() {
@@ -320,13 +366,14 @@ async function main() {
   for (const key of ["board", "espn-text", "espn-pdf", "cbs-qb", "cbs-rb", "cbs-wr", "cbs-te", "razzball-offense", "razzball-idp", "razzball-k", "razzball-def", "ffc-adp", "overrides", "output", "generated-at", "espn-source-as-of", "cbs-source-as-of", "razzball-source-as-of"]) {
     if (!args[key]) throw new Error(`missing --${key}=...`);
   }
-  const [board, espnText, espnPdf, overridesPacket, ffcPayload, trendAdds, trendDrops, sleeperPlayersCurrent, rankChallengers] = await Promise.all([
+  const [board, espnText, espnPdf, overridesPacket, ffcPayload, trendAdds, trendDrops, sleeperPlayersCurrent, rankChallengers, historicalCalibration] = await Promise.all([
     readFile(args.board, "utf8").then(JSON.parse), readFile(args["espn-text"], "utf8"), readFile(args["espn-pdf"]),
     readFile(args.overrides, "utf8").then(JSON.parse), readFile(args["ffc-adp"], "utf8"),
     args["trends-add"] ? readFile(args["trends-add"], "utf8").then(JSON.parse) : [],
     args["trends-drop"] ? readFile(args["trends-drop"], "utf8").then(JSON.parse) : [],
     args["sleeper-players"] ? readFile(args["sleeper-players"], "utf8").then(JSON.parse) : {},
     args["rank-challengers"] ? readFile(args["rank-challengers"], "utf8").then(JSON.parse) : [],
+    args["historical-calibration"] ? readFile(args["historical-calibration"], "utf8").then(JSON.parse) : null,
   ]);
   const identities = (board.players ?? []).map((player) => ({ yahooId: String(player.yahooId ?? player.playerId), name: player.name, team: player.team, position: rankingPosition(player) }));
   const join = (rows, sourceId, topLimit = null, teamPositionFallbacks = []) => joinProjectionRowsToYahoo({ rows, sleeperPlayers: {}, baselineRows: [], yahooRows: identities, sourceId, overrides: overridesPacket.overrides, topLimit, teamPositionFallbacks });
@@ -367,12 +414,12 @@ async function main() {
     expertRankReceipts[packet.sourceId] = { ...joined.receipt, observedAt: packet.observedAt, url: packet.url, captureMethod: packet.captureMethod ?? null, contentSha256: packet.contentSha256 ?? null };
     return joined.rows.map((row) => ({ ...row, sourceId: packet.sourceId, observedAt: packet.observedAt, url: packet.url }));
   });
-  const output = buildRankingIntelligence({ board, snapshots: [espnBase, cbsSnapshot, razzballSnapshot], ffcRows: ffcJoined.rows, rankChallengers: joinedChallengers, sleeperTrends: { add: trendAdds, drop: trendDrops }, sleeperPlayersCurrent, challengerReceipts: { ffcAdp: ffcJoined.receipt, expertRanks: expertRankReceipts }, generatedAt: args["generated-at"] });
+  const output = buildRankingIntelligence({ board, snapshots: [espnBase, cbsSnapshot, razzballSnapshot], ffcRows: ffcJoined.rows, rankChallengers: joinedChallengers, sleeperTrends: { add: trendAdds, drop: trendDrops }, sleeperPlayersCurrent, challengerReceipts: { ffcAdp: ffcJoined.receipt, expertRanks: expertRankReceipts }, historicalCalibration, generatedAt: args["generated-at"] });
   await mkdir(dirname(args.output), { recursive: true });
   await Promise.all([
     writeFile(args.output, `${JSON.stringify(output, null, 2)}\n`, { mode: 0o600 }),
     writeFile(args.output.replace(/\.json$/i, ".csv"), renderRankingCsv(output.players), { mode: 0o600 }),
-    writeFile(args.output.replace(/astra-ranking-pack-v16\.json$/i, "public-projection-snapshots-v16.json"), `${JSON.stringify([espnBase, cbsSnapshot, razzballSnapshot], null, 2)}\n`, { mode: 0o600 }),
+    writeFile(args.output.replace(/astra-ranking-pack-v(\d+)\.json$/i, "public-projection-snapshots-v$1.json"), `${JSON.stringify([espnBase, cbsSnapshot, razzballSnapshot], null, 2)}\n`, { mode: 0o600 }),
   ]);
   process.stdout.write(`${JSON.stringify({ output: args.output, status: output.status, players: output.players.length, gates: Object.fromEntries(Object.entries(output.sourceGates).map(([id, gate]) => [id, { pass: gate.pass, coverage: gate.topCoverage }])) })}\n`);
 }

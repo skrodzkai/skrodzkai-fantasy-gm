@@ -8,6 +8,15 @@ test("registry contains only zero-cost declared sources", () => {
   assert.ok(FREE_SOURCE_REGISTRY.every((source) => ["free", "free-manual", "free-noncommercial"].includes(source.cost)));
 });
 
+test("nflverse registry declares the historical calibration inputs and boundaries", () => {
+  const source = FREE_SOURCE_REGISTRY.find((entry) => entry.id === "nflverse");
+  assert.match(source.role, /weekly outcome and availability calibration/);
+  assert.match(source.role, /snap counts/);
+  assert.match(source.constraints, /weeks 1-17 only/);
+  assert.match(source.constraints, /same-season roster crosswalk/);
+  assert.match(source.constraints, /never backfill historical publisher accuracy/);
+});
+
 test("source snapshots require a provenance manifest and report freshness", () => {
   const manifest = (sourceId, sourceFamily, sourceAsOf) => ({
     sourceId, sourceFamily, sourceAsOf, retrievedAt: sourceAsOf, snapshotId: `${sourceId}-test`,
