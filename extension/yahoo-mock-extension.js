@@ -495,7 +495,9 @@
   function enableExport(environment, rail, room, runner = null) {
     if (!room) return;
     rail.controls.export.disabled = false;
-    rail.controls.export.onclick = () => {
+    rail.controls.export.onclick = async () => {
+      const runtimeAttestation = await verifyCurrentExtensionVersion(environment, rail);
+      if (!runtimeAttestation) return;
       const attestation = makeOperatorAttestation(environment.prompt?.(
         "Owner attestation required. Type NONE if Yahoo never required a rescue, or INTERVENTION: followed by a brief description if you prevented or replaced an automatic Yahoo selection.",
       ));
@@ -505,7 +507,7 @@
         urlSeat: room.urlSeat ?? room.seat,
         storage: environment.localStorage,
         runner: runner ?? environment[GLOBAL_KEY]?.runner ?? null,
-        runtimeAttestation: rail.getSnapshot?.().attestation ?? null,
+        runtimeAttestation,
         operatorAttestation: attestation,
       });
       downloadJson(environment, `skrodzkai-mock-${room.roomId}-seat-${room.seat}.json`, payload);

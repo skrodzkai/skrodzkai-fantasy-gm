@@ -1039,6 +1039,12 @@
     );
   }
 
+  function controllerMinimumAvailableTargets(round, targets, config, minimumFallbacks) {
+    return Number(round) === Number(config.rounds)
+      ? Math.min(Number(minimumFallbacks), Array.from(targets ?? []).length)
+      : Number(minimumFallbacks);
+  }
+
   function create(options = {}, environment = root) {
     const controllerApi = environment.SKRODZKaiYahooDraftController;
     const documentRef = environment.document;
@@ -1138,6 +1144,7 @@
     let failure = null;
     let busy = false;
     let pendingDecision = null;
+    let selectionTimerId = null;
     let activeTurnMetrics = null;
     let previousAvailablePlayers = null;
 
@@ -1175,11 +1182,17 @@
       monitorId = null;
     }
 
+    function clearSelectionTimer() {
+      if (selectionTimerId != null) environment.clearTimeout?.(selectionTimerId);
+      selectionTimerId = null;
+    }
+
     function fail(code, details = {}) {
       if (["failed", "completed", "halted", "stopped"].includes(state)) return;
       failure = { code, ...details };
       state = "failed";
       stopMonitor();
+      clearSelectionTimer();
       try {
         currentController?.stop?.("runner_failed");
       } catch (error) {
@@ -1278,6 +1291,7 @@
         targets = [chosen, ...targets.filter((target) => String(target.yahooId) !== chosenId)];
         receipt("runner_on_clock_choice_applied", { turn: pending.turn.label, chosenYahooId: chosenId, source, baselineFallbacks: pending.targets.map((target) => target.yahooId) });
       }
+      clearSelectionTimer();
       pendingDecision = null;
       const elapsed = Date.now() - pending.detectedAt;
       if (elapsed >= TURN_TO_CLICK_BUDGET_MS) throw new Error("turn_to_click_budget_exhausted");
@@ -1288,7 +1302,7 @@
           pollMs: 25,
           selectionDeadlineMs: remainingSelectionBudget,
           confirmationDeadlineMs: 5000,
-          minimumAvailableTargets: minimumFallbacks,
+          minimumAvailableTargets: controllerMinimumAvailableTargets(pending.turn.round, targets, config, minimumFallbacks),
           maxConfirmedPicks: 1,
           expectedRoomId,
           expectedSeat: expectedUrlSeat,
@@ -1353,7 +1367,8 @@
       if (manualOverride.status === "applied" || selectionHoldMs === 0) {
         startPendingController(null, manualOverride.status === "applied" ? "pre_staged_pin" : "baseline_immediate");
       } else {
-        environment.setTimeout(() => {
+        selectionTimerId = environment.setTimeout(() => {
+          selectionTimerId = null;
           try { startPendingController(null, "baseline_timeout"); } catch (error) { fail(String(error?.message ?? error)); }
         }, selectionHoldMs);
       }
@@ -1494,6 +1509,7 @@
         controllerReceipts = [];
       }
       stopMonitor();
+      clearSelectionTimer();
       pendingDecision = null;
       let stopError = null;
       try {
@@ -1519,6 +1535,7 @@
     function stop(reason = "operator_stop") {
       if (["completed", "failed", "halted", "stopped"].includes(state)) return;
       stopMonitor();
+      clearSelectionTimer();
       pendingDecision = null;
       currentController?.stop?.(reason);
       currentController = null;
@@ -1598,6 +1615,7 @@
       buildDecisionLadder,
       applyManualOverride,
       validateCompletedRoster,
+      controllerMinimumAvailableTargets,
       validRuntimeAttestation,
       rosterSlotAccepts,
       allocateRosterSlots,

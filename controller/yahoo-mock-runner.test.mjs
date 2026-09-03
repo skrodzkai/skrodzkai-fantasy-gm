@@ -536,9 +536,11 @@ function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE",
     },
   };
   const runnerApi = loadRunner(controllerApi);
+  let clearedTimeouts = 0;
   const environment = {
     Event: class Event { constructor(type) { this.type=type; } },
     clearInterval,
+    clearTimeout(id) { clearedTimeouts += 1; clearTimeout(id); },
     crypto,
     document,
     location:{ pathname:"/draftclient/f1/99/6" },
@@ -553,12 +555,17 @@ function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE",
     filterDeadlineMs:500, selectionHoldMs, replacementBySlot, board,
     runtimeAttestation:{ ok:true, version:"0.14.2", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
   }, environment);
-  return { runner, getControllerTargets:() => controllerTargets };
+  return { runner, getControllerTargets:() => controllerTargets, getClearedTimeouts:() => clearedTimeouts };
 }
 
 test("runner creation refuses unknown Autodraft state or a nonempty Yahoo queue", () => {
   assert.throws(() => integrationFixture({ autodraftState:"UNKNOWN" }), /autodraft_state_unknown_at_create/);
   assert.throws(() => integrationFixture({ queueState:"NONEMPTY_OR_UNKNOWN" }), /yahoo_queue_not_empty_or_unknown_at_create/);
+});
+
+test("final round accepts the remaining legal ladder while earlier rounds retain five fallbacks", () => {
+  assert.equal(helpers.controllerMinimumAvailableTargets(18, [{}, {}], testConfig, 5), 5);
+  assert.equal(helpers.controllerMinimumAvailableTargets(19, [{}, {}], testConfig, 5), 2);
 });
 
 test("on-clock exact choice starts immediately and keeps baseline fallbacks", async () => {
@@ -573,6 +580,7 @@ test("on-clock exact choice starts immediately and keeps baseline fallbacks", as
   await waitFor(() => fixture.getControllerTargets());
   assert.equal(fixture.getControllerTargets()[0].yahooId, chosen);
   assert.equal(fixture.getControllerTargets().length >= 5, true);
+  assert.equal(fixture.getClearedTimeouts() >= 1, true);
   const receipts = fixture.runner.exportReceipts();
   assert.equal(receipts.some((entry) => entry.kind === "runner_on_clock_choice_applied"), true);
   const resolved = receipts.find((entry) => entry.kind === "runner_turn_resolved");
