@@ -8,7 +8,8 @@ This is a dependency-free, page-resident controller for Yahoo NFL live draft roo
 - Prefer Yahoo player IDs. The fallback identity requires the exact displayed Yahoo name, position, and team abbreviation.
 - On an owned turn Yahoo renders a `Draft` button inside every available player row. The controller clicks only the button inside the uniquely matched target row; it never uses a page-global Draft selector.
 - The controller requires both the live `YOUR TURN` document title and the exact `YOUR TURN • ROUND …, PICK …` banner. Static future-pick text is ignored.
-- A checked Autodraft control, blocking dialog, ambiguous player, ambiguous Draft action, changed room, unavailable ladder, or unconfirmed roster transition stops the controller.
+- The exact Yahoo Autodraft control must be present and visibly unchecked, and Yahoo must visibly report `Your queue is empty`. Active, missing, duplicated, or ambiguous safety controls stop the controller before any click and are rechecked through confirmation.
+- A blocking dialog, ambiguous player, ambiguous Draft action, changed room, unavailable ladder, or unconfirmed roster transition stops the controller.
 - A standalone controller defaults to returning a failed mock to the lobby. The qualification runner overrides that default with `failureAction: "stay"`, stops clicking, and preserves the draft page for inspection or handoff.
 - `failureAction: "stay"` is the non-navigating failure mode for a real-room handoff. It stops clicking and preserves the draft page; it does not make an unverified real draft executable.
 
@@ -59,7 +60,7 @@ The runner exposes a one-way `halt()` kill switch. A halted runner cannot resume
 
 ## Local Chrome extension
 
-The repository root is also a dependency-free Manifest V3 extension. Load the repository directory as an unpacked extension in Chrome. It requests no general extension permissions and runs MOCK/TEST execution only on Yahoo's public mock waiting room and exact League Two surfaces. Version `0.14.1` keeps an isolated read-only observer on exact real-league 420010 / team 7 surfaces; that content-script set contains no runner, controller, or mutation path. The TEST/MOCK Yahoo rail accepts **Reload & Verify** only while all execution controls are inactive. It reloads the unpacked extension, refreshes the same Yahoo tab, and requires a new extension-session boot ID plus a healthy manifest-version/runtime-digest handshake before restoring controls. A missing rail after reload means Chrome could not inject the extension and requires manual inspection. Stale, missing, or mismatched attestations remain visibly locked.
+The repository root is also a dependency-free Manifest V3 extension. Load the repository directory as an unpacked extension in Chrome. It requests no general extension permissions and runs MOCK/TEST execution only on Yahoo's public mock waiting room and exact League Two surfaces. Version `0.14.2` keeps an isolated read-only observer on exact real-league 420010 / team 7 surfaces; that content-script set contains no runner, controller, or mutation path. **Reload & Verify** is available only on idle, off-clock TEST/MOCK setup surfaces and is disabled inside the live draft client. It reloads the unpacked extension, refreshes the same Yahoo tab, and requires a new extension-session boot ID plus a healthy manifest-version/runtime-digest handshake before restoring controls. A missing rail after reload means Chrome could not inject the extension and requires manual inspection. Stale, missing, or mismatched attestations remain visibly locked.
 
 The expandable `SKRODZKai` command center arms public mocks from `/f1/mock_waiting`. The test lane first parses `/f1/542830/settings` for the exact 19-active-slot plus three-IR roster, 12-team maximum, half-PPR scoring, and 60-second clock. It can then arm from `/f1/542830/draft` only after Yahoo publishes the snake slot and the page still exposes `SKRODZKai` team 3 plus the actual 10–12 team league summary. Each tab-scoped token binds the observed room, URL team, snake slot, actual team count, and roster shape. The draftclient cannot create a replacement token: it refuses to start without the matching draft-home token, and league 420010 is excluded at the manifest and runtime layers.
 
@@ -70,7 +71,7 @@ On the matching draftclient page the extension:
 3. Starts the existing deterministic runner inside the page, removing model and browser-control latency from the pick clock.
 4. Displays the owned roster, resolved decision ladder, exact snake horizon, live availability pressure, warnings, and room-scoped receipts in one page-attached operations surface.
 5. Accepts a conditional next-pick pin only before the owned turn. The pin binds the exact room, snake slot, and next round; the runner applies it only when the Yahoo ID is still available and position-legal. Otherwise it records the rejection and immediately executes the unchanged five-target baseline ladder.
-6. Exposes a one-way `HALT` control and a JSON `EXPORT` containing room-scoped extension, runner, and controller receipts. Export requires an explicit owner attestation: `NONE`, or `INTERVENTION:` plus a brief description when the owner prevented or replaced a Yahoo automatic selection. Missing or intervention evidence locks TEST acceptance.
+6. Exposes a one-way `HALT` control and a JSON `EXPORT` containing room-scoped extension, runner, and controller receipts plus the exact loaded-runtime attestation. Export requires an explicit owner attestation: `NONE`, or `INTERVENTION:` plus a brief description when the owner prevented or replaced a Yahoo automatic selection. Missing or intervention evidence locks TEST acceptance.
 7. On the exact TEST team page, reads Yahoo's rendered starter and bench rows and records one final-roster receipt. Acceptance requires both generic D slots to contain Yahoo-eligible IDPs and no drafted IDP on `BN`.
 
 The TEST-room opponent panel uses only the observed snake window and the live decision ladder. It explicitly withholds 2 Minute Drillers manager-history projections because those owner identities do not participate in the retained test league.
@@ -118,6 +119,16 @@ click path:
   Downstream League Two TEST gates must require both `status === "PASS"` and
   `contract === "league_two_test_19_idp"`; the generic `valid` field and process
   exit code also cover public-only evidence and are not sufficient.
+- The League Two grader also requires the same runtime attestation at export and
+  runner start, Autodraft visibly off, the Yahoo queue visibly empty, a unique
+  Yahoo clock reading, command-center readiness under 250 ms, and every owned-
+  turn detection-to-click interval under 2 seconds. Use
+  `--require-manual-override=true --require-rejected-override=true` for the final
+  rehearsal: stage one valid next-pick pin and, on a different round, one player
+  Yahoo has already drafted. The latter must be visibly rejected while the
+  unchanged five-target baseline completes the pick. Do not invoke Reload &
+  Verify inside the draft client, and prove the kill switch only in the separate
+  offline rehearsal because a live halt intentionally invalidates a clean run.
 - `build-v5-readiness-report.mjs` and `run-v5-rehearsals.mjs` produce the
   sanitized history, specialist-survival, 12-seat roster, concentration, and
   chaos receipts stored outside the repository.

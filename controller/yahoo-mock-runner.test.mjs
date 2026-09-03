@@ -504,7 +504,7 @@ test("observed TEST roster validation rejects a specialist displaced to the benc
   assert.equal(helpers.validateObservedTestRoster(bad, picks), false);
 });
 
-function integrationFixture({ selectionHoldMs = 80 } = {}) {
+function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE", queueState = "EMPTY" } = {}) {
   const board = boardForConfig(mockConfig);
   const rows = board.slice(0, 20).map((entry) => ({ player:entry }));
   const select = { value:"all", options:[{ value:"all", textContent:"All Positions" }], dispatchEvent() {} };
@@ -517,6 +517,9 @@ function integrationFixture({ selectionHoldMs = 80 } = {}) {
     runtime:{
       parseRoom:() => ({ roomId:"99", seat:6 }),
       parseRosterCount:() => ({ filled:0, total:15 }),
+      readAutodraftState:() => autodraftState,
+      readQueueState:() => queueState,
+      readDraftClock:() => ({ label:"00:59", seconds:59 }),
       isAutodraftActive:() => false,
       readOwnedTurn:() => ({ label:"R1P6", round:1, pick:6 }),
       readPlayerRow:(row) => row.player,
@@ -548,9 +551,15 @@ function integrationFixture({ selectionHoldMs = 80 } = {}) {
     configName:"public_mock_15", executionMode:"MOCK", expectedRoomId:"99", expectedSeat:6, expectedUrlSeat:6,
     observedTeamCount:12, observedRosterSlots:mockConfig.rosterSlots, minimumFallbacks:5, pollMs:25,
     filterDeadlineMs:500, selectionHoldMs, replacementBySlot, board,
+    runtimeAttestation:{ ok:true, version:"0.14.2", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
   }, environment);
   return { runner, getControllerTargets:() => controllerTargets };
 }
+
+test("runner creation refuses unknown Autodraft state or a nonempty Yahoo queue", () => {
+  assert.throws(() => integrationFixture({ autodraftState:"UNKNOWN" }), /autodraft_state_unknown_at_create/);
+  assert.throws(() => integrationFixture({ queueState:"NONEMPTY_OR_UNKNOWN" }), /yahoo_queue_not_empty_or_unknown_at_create/);
+});
 
 test("on-clock exact choice starts immediately and keeps baseline fallbacks", async () => {
   const fixture = integrationFixture({ selectionHoldMs:500 });

@@ -68,7 +68,7 @@ function liveEnvironment({ click, confirmationDeadlineMs = 200 } = {}) {
   const draftButton = button("Draft");
   const document = documentFixture({
     title: "YOUR TURN, DRAFT NOW | Live NFL Draft",
-    body: "YOUR TURN • ROUND 1, PICK 8\nYOUR TEAM (0/15)",
+    body: "00:59\nYOUR TURN • ROUND 1, PICK 8\nYOUR TEAM (0/15)\nAutodraft will pick from queue\nYour queue is empty.",
   });
   draftButton.click = () => click?.({ document, location });
   const row = {
@@ -127,8 +127,16 @@ test("requires both the live title and exact owned-turn banner", () => {
 test("detects checked Autodraft rather than the unrelated refresh icon", () => {
   const inactive = documentFixture({ buttons: [button("", "refresh"), button("Autodraft")] });
   const active = documentFixture({ buttons: [button("", "refresh"), button("Autodraft", "checkmark-default")] });
+  const unknown = documentFixture({ buttons: [button("", "refresh")] });
   assert.equal(helpers.isAutodraftActive(inactive), false);
   assert.equal(helpers.isAutodraftActive(active), true);
+  assert.equal(helpers.readAutodraftState(inactive), "INACTIVE");
+  assert.equal(helpers.readAutodraftState(active), "ACTIVE");
+  assert.equal(helpers.readAutodraftState(unknown), "UNKNOWN");
+  assert.equal(helpers.readQueueState(documentFixture({ body:"Autodraft will pick from queue\nYour queue is empty." })), "EMPTY");
+  assert.equal(helpers.readQueueState(documentFixture({ body:"Queue\nPlayer One" })), "NONEMPTY_OR_UNKNOWN");
+  assert.deepEqual(JSON.parse(JSON.stringify(helpers.readDraftClock(documentFixture({ body:"00:37" })))), { label:"00:37", seconds:37 });
+  assert.equal(helpers.readDraftClock(documentFixture({ body:"00:37\n01:05" })), null);
 });
 
 test("parses the Yahoo room and roster transition", () => {
@@ -241,7 +249,7 @@ test("allows only one page-resident controller", () => {
   const environment = {
     clearInterval() {},
     crypto: { randomUUID: () => "test-session" },
-    document: documentFixture({ title: "5 picks until your turn", body: "YOUR TEAM (0/15)" }),
+    document: documentFixture({ title: "5 picks until your turn", body: "YOUR TEAM (0/15)\nAutodraft will pick from queue\nYour queue is empty.", buttons:[button("Autodraft")] }),
     getComputedStyle: () => ({ display: "block", visibility: "visible" }),
     localStorage: storageFixture(),
     location: { pathname: "/draftclient/f1/9369352/8", assign() {} },
@@ -277,7 +285,7 @@ test("clicks the exact row and confirms the roster transition", async (t) => {
   const environment = liveEnvironment({
     click: ({ document }) => {
       document.title = "14 picks until your turn | Live NFL Draft";
-      document.body.innerText = "BRIAN's Pick • You're up in 14 Picks\nYOUR TEAM (1/15)";
+      document.body.innerText = "BRIAN's Pick • You're up in 14 Picks\nYOUR TEAM (1/15)\nAutodraft will pick from queue\nYour queue is empty.";
     },
   });
   const controller = controllerApi
@@ -299,10 +307,10 @@ test("clicks the exact row and confirms the roster transition", async (t) => {
 test("waits for the turn banner after a non-atomic roster repaint", async (t) => {
   const environment = liveEnvironment({
     click: ({ document }) => {
-      document.body.innerText = "YOUR TURN • ROUND 1, PICK 8\nYOUR TEAM (1/15)";
+      document.body.innerText = "00:58\nYOUR TURN • ROUND 1, PICK 8\nYOUR TEAM (1/15)\nAutodraft will pick from queue\nYour queue is empty.";
       setTimeout(() => {
         document.title = "14 picks until your turn | Live NFL Draft";
-        document.body.innerText = "BRIAN's Pick • You're up in 14 Picks\nYOUR TEAM (1/15)";
+        document.body.innerText = "BRIAN's Pick • You're up in 14 Picks\nYOUR TEAM (1/15)\nAutodraft will pick from queue\nYour queue is empty.";
       }, 40);
     },
   });
@@ -323,7 +331,7 @@ test("confirms a pick when the snake wrap immediately opens a new owned turn", a
     click: ({ document }) => {
       clickCount += 1;
       document.title = "YOUR TURN, DRAFT NOW | Live NFL Draft";
-      document.body.innerText = "YOUR TURN • ROUND 2, PICK 1\nYOUR TEAM (1/15)";
+      document.body.innerText = "00:59\nYOUR TURN • ROUND 2, PICK 1\nYOUR TEAM (1/15)\nAutodraft will pick from queue\nYour queue is empty.";
     },
   });
   const controller = controllerApi
@@ -386,7 +394,7 @@ test("records failure and leaves the room when confirmation times out", async (t
 test("leaves the room even when the failure receipt cannot be written", async (t) => {
   const environment = liveEnvironment();
   environment.document.title = "5 picks until your turn | Live NFL Draft";
-  environment.document.body.innerText = "YOUR TEAM (0/15)";
+  environment.document.body.innerText = "YOUR TEAM (0/15)\nAutodraft will pick from queue\nYour queue is empty.";
   const controller = controllerApi
     .create({ targets: [{ yahooId: "31838" }], pollMs: 25 }, environment)
     .start();

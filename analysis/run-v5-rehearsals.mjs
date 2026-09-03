@@ -304,6 +304,9 @@ function runnerLoopEnvironment(runtime, seat) {
   const runtimeHooks = {
     parseRoom: () => ({ roomId: "542830", seat: 3 }),
     parseRosterCount: () => ({ filled: state.filled, total: config.rosterTotal }),
+    readAutodraftState: () => "INACTIVE",
+    readQueueState: () => "EMPTY",
+    readDraftClock: () => ({ label: "00:59", seconds: 59 }),
     isAutodraftActive: () => false,
     readOwnedTurn: () => {
       if (state.filled >= config.rounds) return null;
@@ -380,6 +383,7 @@ function createReplayRunner(runtime, seat, selectionHoldMs) {
     replacementBySlot: runtime.replacementBySlot,
     survivalCalibration: runtime.survivalCalibration,
     board: runtime.board,
+    runtimeAttestation: { ok:true, version:"0.14.2", digest:"a".repeat(64), bootId:"replay-boot-1234", bootedAt:1 },
   }, environment);
   return { runner, poolSize };
 }
