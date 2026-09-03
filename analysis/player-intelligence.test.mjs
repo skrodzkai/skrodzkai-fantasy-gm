@@ -298,6 +298,59 @@ test("scores IDP raw-stat rows under the league IDP rules", () => {
   assert.equal(board.players[0].consensusPoints, 60);
 });
 
+test("globally gated IDP decision points favor the tackle floor while preserving raw consensus", () => {
+  const complete = {
+    soloTackles: 0, assistedTackles: 0, sacks: 0, interceptions: 0,
+    forcedFumbles: 0, fumbleRecoveries: 0, touchdowns: 0, safeties: 0,
+    passesDefended: 0, blockedKicks: 0, tacklesForLoss: 0,
+    turnoverReturnYards: 0, extraPointReturns: 0, snaps: 850,
+  };
+  const board = buildPlayerBoard({
+    asOf: "2026-08-22T12:00:00Z",
+    players: [
+      { playerId: "floor", name: "Floor", position: "LB" },
+      { playerId: "splash", name: "Splash", position: "LB" },
+    ],
+    replacementRanks: { LB: 1 },
+    minimumFreshSources: 1,
+    idpCalibration: {
+      globalGate: { pass: true },
+      positionParameters: { LB: { volatileWeight: 0.25, roleExponent: 0, trainingSnapMean: 50 } },
+    },
+    sources: [{
+      sourceId: "idp",
+      family: "idp",
+      updatedAt: "2026-08-22T11:00:00Z",
+      rows: [
+        { playerId: "floor", scoringKind: "idp", projectionGames: 17, stats: { ...complete, soloTackles: 120 } },
+        { playerId: "splash", scoringKind: "idp", projectionGames: 17, stats: { ...complete, touchdowns: 10 } },
+      ],
+    }],
+  });
+  const floor = board.players.find((player) => player.playerId === "floor");
+  const splash = board.players.find((player) => player.playerId === "splash");
+  assert.equal(floor.consensusPoints, splash.consensusPoints);
+  assert.equal(floor.idpDecisionPoints, floor.consensusPoints);
+  assert.equal(splash.idpDecisionPoints, splash.consensusPoints * 0.25);
+  assert.ok(floor.overallRank < splash.overallRank);
+  assert.equal(floor.idpModelStatus, "ACTIVE");
+});
+
+test("failed IDP global gate preserves baseline ordering", () => {
+  const players = [
+    { playerId: "b", name: "Bravo", position: "LB" },
+    { playerId: "a", name: "Alpha", position: "LB" },
+  ];
+  const sources = [{ sourceId: "idp", family: "idp", updatedAt: "2026-08-22T11:00:00Z", rows: [
+    { playerId: "a", scoringKind: "idp", leaguePoints: 100 },
+    { playerId: "b", scoringKind: "idp", leaguePoints: 100 },
+  ] }];
+  const baseline = buildPlayerBoard({ asOf: "2026-08-22T12:00:00Z", players, sources, replacementRanks: { LB: 1 }, minimumFreshSources: 1 });
+  const failed = buildPlayerBoard({ asOf: "2026-08-22T12:00:00Z", players, sources, replacementRanks: { LB: 1 }, minimumFreshSources: 1, idpCalibration: { globalGate: { pass: false } } });
+  assert.deepEqual(failed.players.map((player) => player.playerId), baseline.players.map((player) => player.playerId));
+  assert.deepEqual(failed.players.map((player) => player.vorp), baseline.players.map((player) => player.vorp));
+});
+
 test("scores kicker raw-stat rows under the league kicker rules", () => {
   const board = buildPlayerBoard({
     asOf: "2026-08-22T12:00:00Z",

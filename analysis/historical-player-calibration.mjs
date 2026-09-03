@@ -3,7 +3,8 @@ import { readFile, stat, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 import { parseCsv } from "./opponent-calibration.mjs";
-import { scoreIdpStatLine, scoreKickerStatLine, scoreOffenseStatLine } from "./player-intelligence.mjs";
+import { IDP_SCORING, scoreIdpStatLine, scoreKickerStatLine, scoreOffenseStatLine } from "./player-intelligence.mjs";
+import { IDP_POINT_BUCKET_FIELDS, scoreIdpBuckets } from "./idp-ranking.mjs";
 
 const FIRST_SEASON = 2020;
 const TRAINING_END = 2024;
@@ -17,6 +18,16 @@ const OFFENSE_POSITIONS = new Set(["QB", "RB", "WR", "TE"]);
 const IDP_POSITIONS = new Set(["DL", "LB", "DB"]);
 const CALIBRATION_POSITIONS = Object.freeze(["QB", "RB", "WR", "TE", "K", "DL", "LB", "DB"]);
 const BASELINE_GRID = Object.freeze({ decay: [0.5, 0.75, 1], shrinkGames: [4, 8, 12] });
+const IDP_CANDIDATE_GRID = Object.freeze([
+  Object.freeze({ model: "VOLATILITY_SHRINKAGE", volatileWeight: 0.25, roleExponent: 0 }),
+  Object.freeze({ model: "VOLATILITY_SHRINKAGE", volatileWeight: 0.5, roleExponent: 0 }),
+  Object.freeze({ model: "VOLATILITY_SHRINKAGE", volatileWeight: 0.75, roleExponent: 0 }),
+  Object.freeze({ model: "TACKLE_ROLE", volatileWeight: 0.5, roleExponent: 0.25 }),
+  Object.freeze({ model: "TACKLE_ROLE", volatileWeight: 0.5, roleExponent: 0.5 }),
+  Object.freeze({ model: "TACKLE_ROLE", volatileWeight: 0.75, roleExponent: 0.25 }),
+  Object.freeze({ model: "TACKLE_ROLE", volatileWeight: 0.75, roleExponent: 0.5 }),
+]);
+const IDP_GATE = Object.freeze({ primaryTop24AbsoluteImprovement: 0.05, maximumRelativeMaeRegression: 0.02, maximumTop36AbsoluteRegression: 0.03 });
 export const HISTORICAL_STATS_REQUIRED_COLUMNS = Object.freeze([
   "player_id", "player_display_name", "season", "week", "season_type", "position", "team",
   "completions", "passing_yards", "passing_tds", "passing_interceptions", "rushing_yards", "rushing_tds",
@@ -160,7 +171,14 @@ export function scoreHistoricalStatRow(row) {
   }
   const defense = idpStats(row);
   if (IDP_POSITIONS.has(position)) {
-    lanes.push({ ...base, position, scoringKind: "idp", points: scoreIdpStatLine(defense), statEvidence: hasNonzero(defense) });
+    lanes.push({
+      ...base,
+      position,
+      scoringKind: "idp",
+      points: scoreIdpStatLine(defense),
+      idpBuckets: scoreIdpBuckets(defense, IDP_SCORING),
+      statEvidence: hasNonzero(defense),
+    });
   }
   if (position === "K") {
     const stats = kickerStats(row);
@@ -252,7 +270,13 @@ export function parseHistoricalSeason({ statsText, rosterText, snapText, schedul
     if (number(row, "defense_snaps") > 0 && IDP_POSITIONS.has(rawPosition)) positions.push(rawPosition);
     if (number(row, "st_snaps") > 0 && rawPosition === "K") positions.push("K");
     for (const position of new Set(positions)) {
-      laneAppearances.set(laneKey(playerId, position, week), { playerId, season, week, position });
+      laneAppearances.set(laneKey(playerId, position, week), {
+        playerId,
+        season,
+        week,
+        position,
+        defenseSnaps: IDP_POSITIONS.has(position) ? number(row, "defense_snaps") : 0,
+      });
     }
   }
 
@@ -263,7 +287,13 @@ export function parseHistoricalSeason({ statsText, rosterText, snapText, schedul
       pointsByLane.set(key, lane);
       if (lane.statEvidence) {
         globalAppearances.add(playerWeekKey(lane.playerId, lane.week));
-        laneAppearances.set(key, { playerId: lane.playerId, season, week: lane.week, position: lane.position });
+        laneAppearances.set(key, {
+          ...(laneAppearances.get(key) ?? {}),
+          playerId: lane.playerId,
+          season,
+          week: lane.week,
+          position: lane.position,
+        });
       }
       if (!identityByGsis.has(lane.playerId)) {
         identityByGsis.set(lane.playerId, { playerId: lane.playerId, name: lane.name, position: lane.position, birthDate: null });
@@ -279,6 +309,8 @@ export function parseHistoricalSeason({ statsText, rosterText, snapText, schedul
       name: scored?.name ?? identity.name ?? appearance.playerId,
       team: scored?.team ?? null,
       points: scored?.points ?? 0,
+      idpBuckets: scored?.idpBuckets ?? null,
+      defenseSnaps: appearance.defenseSnaps ?? 0,
       appearanceSource: scored?.statEvidence ? "STATS" : "SNAPS",
     };
   }).sort((left, right) => left.playerId.localeCompare(right.playerId) || left.position.localeCompare(right.position) || left.week - right.week);
@@ -416,6 +448,209 @@ function selectBaselineParameters(summaries) {
     grid: BASELINE_GRID,
     candidates,
     selected: { decay: candidates[0].decay, shrinkGames: candidates[0].shrinkGames },
+  };
+}
+
+function idpSeasonSummaries(weeklyScores) {
+  const groups = new Map();
+  for (const row of weeklyScores.filter((entry) => IDP_POSITIONS.has(entry.position))) {
+    const key = `${row.season}|${row.playerId}|${row.position}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        season: row.season,
+        playerId: row.playerId,
+        position: row.position,
+        appearances: 0,
+        defenseSnaps: 0,
+        bucketPoints: Object.fromEntries(Object.keys(IDP_POINT_BUCKET_FIELDS).map((bucket) => [bucket, 0])),
+      });
+    }
+    const group = groups.get(key);
+    group.appearances += 1;
+    group.defenseSnaps += number(row, "defenseSnaps");
+    for (const bucket of Object.keys(IDP_POINT_BUCKET_FIELDS)) group.bucketPoints[bucket] += number(row.idpBuckets, bucket);
+  }
+  return [...groups.values()].sort((left, right) => left.season - right.season || left.position.localeCompare(right.position) || left.playerId.localeCompare(right.playerId));
+}
+
+function idpPositionPrior(rows, targetSeason, position) {
+  const eligible = rows.filter((row) => row.season < targetSeason && row.position === position && row.appearances > 0);
+  const appearances = eligible.reduce((sum, row) => sum + row.appearances, 0);
+  const bucketMeans = Object.fromEntries(Object.keys(IDP_POINT_BUCKET_FIELDS).map((bucket) => [
+    bucket,
+    appearances ? eligible.reduce((sum, row) => sum + row.bucketPoints[bucket], 0) / appearances : 0,
+  ]));
+  const playerSeasonSnapMeans = eligible.map((row) => row.defenseSnaps / row.appearances).filter((value) => value > 0);
+  const starterSnapMean = quantile(playerSeasonSnapMeans, 0.75) ?? 0;
+  return { bucketMeans, starterSnapMean, appearances };
+}
+
+function idpPriorFeature(rows, targetSeason, playerId, position, params) {
+  const history = rows.filter((row) => row.season < targetSeason && row.playerId === playerId && row.position === position);
+  const prior = idpPositionPrior(rows, targetSeason, position);
+  const weightedGames = history.reduce((sum, row) => sum + row.appearances * params.decay ** Math.max(0, targetSeason - 1 - row.season), 0);
+  const weightedSnaps = history.reduce((sum, row) => sum + row.defenseSnaps * params.decay ** Math.max(0, targetSeason - 1 - row.season), 0);
+  const bucketMeans = Object.fromEntries(Object.keys(IDP_POINT_BUCKET_FIELDS).map((bucket) => {
+    const weightedPoints = history.reduce((sum, row) => sum + row.bucketPoints[bucket] * params.decay ** Math.max(0, targetSeason - 1 - row.season), 0);
+    return [bucket, (weightedPoints + prior.bucketMeans[bucket] * params.shrinkGames) / (weightedGames + params.shrinkGames)];
+  }));
+  const total = Object.values(bucketMeans).reduce((sum, value) => sum + value, 0);
+  return {
+    bucketShares: total > 0
+      ? Object.fromEntries(Object.entries(bucketMeans).map(([bucket, value]) => [bucket, value / total]))
+      : null,
+    priorSnapMean: (weightedSnaps + prior.starterSnapMean * params.shrinkGames) / (weightedGames + params.shrinkGames),
+    positionSnapMean: prior.starterSnapMean,
+    historyGames: weightedGames,
+  };
+}
+
+function candidateIdpPredictions({ idpSummaries, baseline, targetSeason, baselineParams, candidate }) {
+  return baseline.filter((row) => IDP_POSITIONS.has(row.position) && row.historyGames > 0).flatMap((row) => {
+    const feature = idpPriorFeature(idpSummaries, targetSeason, row.playerId, row.position, baselineParams);
+    if (!feature.bucketShares) return [];
+    const componentScale = feature.bucketShares.tackleFloor + feature.bucketShares.stableDisruption + candidate.volatileWeight * feature.bucketShares.volatileSplash;
+    const roleRatio = feature.positionSnapMean > 0
+      ? Math.max(0.85, Math.min(1.15, feature.priorSnapMean / feature.positionSnapMean)) ** candidate.roleExponent
+      : 1;
+    return [{
+      ...row,
+      predictedCandidateActiveGameMean: row.predictedActiveGameMean * componentScale * roleRatio,
+      componentScale,
+      roleRatio,
+    }];
+  });
+}
+
+function tieInclusiveTopHitRate(rows, predictedField, actualField, count) {
+  if (!rows.length) return { rate: null, predictedSetSize: 0, actualSetSize: 0, predictedCutoffTies: 0, actualCutoffTies: 0 };
+  const cutoffIndex = Math.min(count, rows.length) - 1;
+  const predictedValues = [...rows].sort((left, right) => Number(right[predictedField]) - Number(left[predictedField]));
+  const actualValues = [...rows].sort((left, right) => Number(right[actualField]) - Number(left[actualField]));
+  const predictedCutoff = Number(predictedValues[cutoffIndex][predictedField]);
+  const actualCutoff = Number(actualValues[cutoffIndex][actualField]);
+  const predicted = new Set(predictedValues.filter((row) => Number(row[predictedField]) >= predictedCutoff).map((row) => row.playerId));
+  const actual = new Set(actualValues.filter((row) => Number(row[actualField]) >= actualCutoff).map((row) => row.playerId));
+  const hits = [...predicted].filter((playerId) => actual.has(playerId)).length;
+  return {
+    rate: actual.size ? hits / actual.size : null,
+    predictedSetSize: predicted.size,
+    actualSetSize: actual.size,
+    predictedCutoffTies: Math.max(0, predicted.size - Math.min(count, rows.length)),
+    actualCutoffTies: Math.max(0, actual.size - Math.min(count, rows.length)),
+  };
+}
+
+function idpCandidateMetrics(rows, predictedField) {
+  const top = Object.fromEntries([12, 24, 36].map((count) => [String(count), tieInclusiveTopHitRate(rows, predictedField, "actualActiveGameMean", count)]));
+  return {
+    sampleCount: rows.length,
+    activeGameMae: mae(rows, predictedField, "actualActiveGameMean"),
+    spearman: spearman(rows, predictedField, "actualActiveGameMean"),
+    topHitRate: Object.fromEntries(Object.entries(top).map(([count, result]) => [count, result.rate])),
+    topHitTieReceipt: top,
+  };
+}
+
+function selectIdpCandidateParameters({ idpSummaries, summaries, baselineParams }) {
+  const baseline = baselinePredictions(summaries.filter((row) => row.season <= TRAINING_END), TRAINING_END, baselineParams);
+  const selected = {};
+  const candidatesByPosition = {};
+  for (const position of IDP_POSITIONS) {
+    const rows = IDP_CANDIDATE_GRID.map((candidate, candidateIndex) => {
+      const predictions = candidateIdpPredictions({ idpSummaries, baseline, targetSeason: TRAINING_END, baselineParams, candidate }).filter((row) => row.position === position);
+      return { ...candidate, candidateIndex, ...idpCandidateMetrics(predictions, "predictedCandidateActiveGameMean") };
+    });
+    rows.sort((left, right) =>
+      Number(right.topHitRate["24"] ?? -Infinity) - Number(left.topHitRate["24"] ?? -Infinity) ||
+      Number(right.spearman ?? -Infinity) - Number(left.spearman ?? -Infinity) ||
+      Number(left.activeGameMae ?? Infinity) - Number(right.activeGameMae ?? Infinity) ||
+      left.candidateIndex - right.candidateIndex,
+    );
+    const winner = rows[0];
+    const trainingSnapMean = idpPositionPrior(idpSummaries, HOLDOUT_SEASON, position).starterSnapMean;
+    selected[position] = {
+      model: winner.model,
+      volatileWeight: winner.volatileWeight,
+      roleExponent: winner.roleExponent,
+      trainingSnapMean,
+      selectedOnSeason: TRAINING_END,
+    };
+    candidatesByPosition[position] = rows;
+  }
+  return { selected, candidatesByPosition };
+}
+
+export function prepareIdpRankingCalibration({ weeklyScores, summaries = playerSeasonSummaries(weeklyScores), baselineParams = null }) {
+  const frozenBaselineParams = baselineParams ?? selectBaselineParameters(summaries).selected;
+  const idpSummaries = idpSeasonSummaries(weeklyScores);
+  const selection = selectIdpCandidateParameters({ idpSummaries, summaries, baselineParams: frozenBaselineParams });
+  const preregistration = {
+    status: "FROZEN_BEFORE_HOLDOUT_SCORING",
+    trainingSeasons: [FIRST_SEASON, TRAINING_END - 1],
+    innerHoldoutSeason: TRAINING_END,
+    frozenBeforeSeason: HOLDOUT_SEASON,
+    holdoutDisclosure: "2025 was already viewed; results are weakly confirmatory",
+    rankingUnit: "active-game mean exact league points",
+    sampleRule: "IDP player-seasons with prior player history; tie-inclusive top sets",
+    topHitRateDenominator: "actual tie-inclusive top set size",
+    primaryMetric: "top-24 hit rate",
+    tieBreak: ["higher Spearman", "lower MAE", "lower fixed candidate index"],
+    maeTolerance: "candidate MAE no more than 2% above baseline MAE",
+    productionFeatureBasis: "equal-family current raw-stat component shares; projected defensive snaps divided by each source projectionGames and compared with the frozen historical 75th-percentile player-season snap mean",
+    candidateGrid: IDP_CANDIDATE_GRID,
+    gateThresholds: IDP_GATE,
+    positionParameters: selection.selected,
+  };
+  const preregistrationHash = sha256(JSON.stringify(preregistration));
+  return {
+    preregistration,
+    preregistrationHash,
+    positionParameters: selection.selected,
+    parameterSelectionEvidence: selection.candidatesByPosition,
+    baselineParams: frozenBaselineParams,
+  };
+}
+
+export function buildIdpRankingCalibration({ weeklyScores, summaries = playerSeasonSummaries(weeklyScores), baselineParams = null, prepared = null }) {
+  const frozen = prepared ?? prepareIdpRankingCalibration({ weeklyScores, summaries, baselineParams });
+  const idpSummaries = idpSeasonSummaries(weeklyScores);
+  const baseline = baselinePredictions(summaries, HOLDOUT_SEASON, frozen.baselineParams);
+  const gates = {};
+  const metrics = {};
+  for (const position of IDP_POSITIONS) {
+    const baselineRows = baseline.filter((row) => row.position === position && row.historyGames > 0);
+    const candidateRows = candidateIdpPredictions({
+      idpSummaries,
+      baseline,
+      targetSeason: HOLDOUT_SEASON,
+      baselineParams: frozen.baselineParams,
+      candidate: frozen.positionParameters[position],
+    }).filter((row) => row.position === position);
+    const baselineMetric = idpCandidateMetrics(baselineRows, "predictedActiveGameMean");
+    const candidateMetric = idpCandidateMetrics(candidateRows, "predictedCandidateActiveGameMean");
+    const primaryImprovement = Number(candidateMetric.topHitRate["24"]) - Number(baselineMetric.topHitRate["24"]);
+    const maeRelativeRegression = baselineMetric.activeGameMae > 0
+      ? candidateMetric.activeGameMae / baselineMetric.activeGameMae - 1
+      : Infinity;
+    const top36Regression = Number(baselineMetric.topHitRate["36"]) - Number(candidateMetric.topHitRate["36"]);
+    const pass = Number.isFinite(primaryImprovement) && primaryImprovement >= IDP_GATE.primaryTop24AbsoluteImprovement &&
+      maeRelativeRegression <= IDP_GATE.maximumRelativeMaeRegression &&
+      top36Regression <= IDP_GATE.maximumTop36AbsoluteRegression;
+    metrics[position] = { baseline: baselineMetric, candidate: candidateMetric };
+    gates[position] = { pass, primaryImprovement, maeRelativeRegression, top36Regression };
+  }
+  const globalPass = [...IDP_POSITIONS].every((position) => gates[position]?.pass === true);
+  return {
+    schemaVersion: 1,
+    status: globalPass ? "ACTIVE" : "DIAGNOSTIC_ONLY",
+    preregistration: frozen.preregistration,
+    preregistrationHash: frozen.preregistrationHash,
+    positionParameters: frozen.positionParameters,
+    parameterSelectionEvidence: frozen.parameterSelectionEvidence,
+    holdoutMetrics: metrics,
+    gateByPosition: gates,
+    globalGate: { pass: globalPass, rule: "DL, LB, and DB must all pass before any decision score is active" },
   };
 }
 
@@ -681,7 +916,7 @@ function currentPlayerCalibrations({ board, playerSeasons, availability, model, 
   return { currentPlayers, unmatchedYahooIdentities: unmatchedYahooIdentities.sort((left, right) => left.yahooId.localeCompare(right.yahooId)) };
 }
 
-export function buildHistoricalCalibration({ weeklyScores, playerSeasons, board, generatedAt, sourceReceipts = [] }) {
+export function buildHistoricalCalibration({ weeklyScores, playerSeasons, board, generatedAt, sourceReceipts = [], idpPreregistration = null }) {
   const summaries = playerSeasonSummaries(weeklyScores);
   const parameterSelection = selectBaselineParameters(summaries);
   const holdoutPredictions = baselinePredictions(summaries, HOLDOUT_SEASON, parameterSelection.selected);
@@ -701,8 +936,9 @@ export function buildHistoricalCalibration({ weeklyScores, playerSeasons, board,
   const current = currentPlayerCalibrations({ board, playerSeasons, availability, model, intervalGates, seasonGates });
   const baseline = baselineMetrics(holdoutPredictions);
   baseline.seasonTotalMae = mae(holdoutPredictions, "predictedSeasonPoints", "actualSeasonPoints");
+  const idpRanking = buildIdpRankingCalibration({ weeklyScores, summaries, baselineParams: parameterSelection.selected, prepared: idpPreregistration });
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt,
     posture: "research calibration only; no ranking or Yahoo mutation authority",
     trainingSeasons: [FIRST_SEASON, TRAINING_END],
@@ -716,6 +952,7 @@ export function buildHistoricalCalibration({ weeklyScores, playerSeasons, board,
       appearanceRule: "positive snaps through exact same-season PFR-to-GSIS crosswalk, or nonzero scored stat evidence",
     },
     parameterSelection,
+    idpRanking,
     challengerZero: { status: "HOLDOUT_SCORED", holdoutSeason: HOLDOUT_SEASON, ...baseline, predictions: holdoutPredictions },
     availability: { gate: availability.gate, cohortSummary: Object.fromEntries([...availability.cohorts].sort().map(([key, values]) => [key, { sampleCount: values.length, mean: mean(values), p20: quantile(values, 0.2), p50: quantile(values, 0.5), p80: quantile(values, 0.8) }])) },
     activeWeekOutcome: { gateByPosition: intervalGates, bands: model.bands, groups: Object.fromEntries(Object.entries(model.groups).map(([key, value]) => [key, { sampleCount: value.sampleCount, p20: value.p20, p80: value.p80 }])) },
@@ -761,7 +998,7 @@ function args(argv) {
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const input = args(process.argv.slice(2));
-  for (const key of ["stats", "rosters", "snaps", "schedule", "board", "output", "generated-at"]) if (!input[key]) throw new Error(`missing --${key}`);
+  for (const key of ["stats", "rosters", "snaps", "schedule", "board", "output", "idp-preregistration-output", "generated-at"]) if (!input[key]) throw new Error(`missing --${key}`);
   const board = JSON.parse(await readFile(input.board, "utf8"));
   if (input["current-roster"]) board.currentRosterRows = parseCsv(await readFile(input["current-roster"], "utf8"));
   const dataset = await buildHistoricalDatasetFromFiles({
@@ -771,7 +1008,15 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
     schedulePath: input.schedule,
     retrievedAt: input["generated-at"],
   });
-  const output = buildHistoricalCalibration({ ...dataset, board, generatedAt: input["generated-at"] });
+  const idpPreregistration = prepareIdpRankingCalibration({ weeklyScores: dataset.weeklyScores });
+  if (input["idp-preregistration-output"]) {
+    await writeFile(input["idp-preregistration-output"], `${JSON.stringify({
+      preregistration: idpPreregistration.preregistration,
+      preregistrationHash: idpPreregistration.preregistrationHash,
+      positionParameters: idpPreregistration.positionParameters,
+    }, null, 2)}\n`, { mode: 0o600 });
+  }
+  const output = buildHistoricalCalibration({ ...dataset, board, generatedAt: input["generated-at"], idpPreregistration });
   output.seasonReceipts = dataset.seasonReceipts;
   await writeFile(input.output, `${JSON.stringify(output, null, 2)}\n`, { mode: 0o600 });
   process.stdout.write(`${JSON.stringify({ output: input.output, players: output.currentPlayers.length, unmatched: output.unmatchedYahooIdentities.length, baselineMae: output.challengerZero.activeGameMae })}\n`);

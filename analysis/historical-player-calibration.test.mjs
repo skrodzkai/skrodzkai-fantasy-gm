@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { HISTORICAL_STATS_REQUIRED_COLUMNS, buildHistoricalCalibration, calibrationPosition, parseHistoricalSeason, scoreHistoricalStatRow } from "./historical-player-calibration.mjs";
+import { HISTORICAL_STATS_REQUIRED_COLUMNS, buildHistoricalCalibration, buildIdpRankingCalibration, calibrationPosition, parseHistoricalSeason, scoreHistoricalStatRow } from "./historical-player-calibration.mjs";
 
 function csvFixture(columns, rows) {
   return [columns.join(","), ...rows.map((row) => columns.map((column) => row[column] ?? "").join(","))].join("\n");
@@ -113,4 +113,45 @@ test("freezes baseline hyperparameters before reading the 2025 holdout", () => {
   const b = buildHistoricalCalibration({ ...high, board: { players: [] }, generatedAt: "2026-09-03T01:00:00Z" });
   assert.deepEqual(a.parameterSelection, b.parameterSelection);
   assert.notEqual(a.challengerZero.activeGameMae, b.challengerZero.activeGameMae);
+});
+
+function syntheticIdpHistory(holdoutSnapMultiplier = 1, holdoutPointMultiplier = 1) {
+  const weeklyScores = [];
+  for (let season = 2020; season <= 2025; season += 1) {
+    for (const position of ["DL", "LB", "DB"]) {
+      for (let player = 1; player <= 30; player += 1) {
+        const holdoutMultiplier = season === 2025 ? holdoutPointMultiplier : 1;
+        const tackleFloor = (2 + player / 20) * holdoutMultiplier;
+        const stableDisruption = (player % 7) / 10 * holdoutMultiplier;
+        const volatileSplash = (player % 5) / 5 * holdoutMultiplier;
+        weeklyScores.push({
+          season,
+          playerId: `${position}-${player}`,
+          position,
+          week: 1,
+          points: tackleFloor + stableDisruption + volatileSplash,
+          idpBuckets: { tackleFloor, stableDisruption, volatileSplash },
+          defenseSnaps: (40 + player / 2) * (season === 2025 ? holdoutSnapMultiplier : 1),
+        });
+      }
+    }
+  }
+  return weeklyScores;
+}
+
+test("IDP parameter selection and holdout predictions cannot read same-season snaps", () => {
+  const baselineParams = { decay: 0.75, shrinkGames: 4 };
+  const normal = buildIdpRankingCalibration({ weeklyScores: syntheticIdpHistory(1), baselineParams });
+  const contaminated = buildIdpRankingCalibration({ weeklyScores: syntheticIdpHistory(10_000), baselineParams });
+  assert.deepEqual(normal.preregistration, contaminated.preregistration);
+  assert.deepEqual(normal.holdoutMetrics, contaminated.holdoutMetrics);
+  assert.deepEqual(normal.gateByPosition, contaminated.gateByPosition);
+});
+
+test("IDP preregistration cannot read same-season points or component shares", () => {
+  const baselineParams = { decay: 0.75, shrinkGames: 4 };
+  const normal = buildIdpRankingCalibration({ weeklyScores: syntheticIdpHistory(1, 1), baselineParams });
+  const contaminated = buildIdpRankingCalibration({ weeklyScores: syntheticIdpHistory(1, 100), baselineParams });
+  assert.deepEqual(normal.preregistration, contaminated.preregistration);
+  assert.notDeepEqual(normal.holdoutMetrics, contaminated.holdoutMetrics);
 });

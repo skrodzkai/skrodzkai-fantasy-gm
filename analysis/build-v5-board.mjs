@@ -311,6 +311,7 @@ export function assembleV5Board({
       requiredFamilies: ["QB", "RB", "WR", "TE", "DL", "LB", "DB", "CB", "S"].includes(player.position) ? ["yahoo"] : [],
     }),
     replacementRoster,
+    idpCalibration: survivalCalibration?.idpRanking ?? null,
   });
 
   const reports = Array.from(externalInjuryReports ?? []);
@@ -366,7 +367,7 @@ export function assembleV5Board({
     const expectedGamesThroughWeek17 = expectedGamesFromInjury(injury);
     const projectionGames = Number(player.expectedGames);
     const hasOutcomeRate = Number.isFinite(projectionGames) && projectionGames > 0;
-    const weeklyProfile = Number.isFinite(Number(player.perGamePoints)) && expectedGamesThroughWeek17 != null
+    const rawWeeklyProfile = Number.isFinite(Number(player.perGamePoints)) && expectedGamesThroughWeek17 != null
       ? buildWeeklyProjectionProfile({
           perGamePoints: Number(player.perGamePoints),
           byeWeek: player.bye,
@@ -376,7 +377,17 @@ export function assembleV5Board({
           perGameOutcomeHigh: hasOutcomeRate && hasFiniteProjection(player.outcomeHigh) ? Number(player.outcomeHigh) / projectionGames : null,
         })
       : null;
-    const projectionUsable = Number.isFinite(Number(player.consensusPoints)) && weeklyProfile != null;
+    const weeklyProfile = Number.isFinite(Number(player.rankingPerGamePoints)) && expectedGamesThroughWeek17 != null
+      ? buildWeeklyProjectionProfile({
+          perGamePoints: Number(player.rankingPerGamePoints),
+          byeWeek: player.bye,
+          expectedGamesThroughWeek17,
+          unavailableWeeks: injury.unavailableWeeks,
+          perGameOutcomeLow: hasOutcomeRate && hasFiniteProjection(player.rankingOutcomeLow) ? Number(player.rankingOutcomeLow) / projectionGames : null,
+          perGameOutcomeHigh: hasOutcomeRate && hasFiniteProjection(player.rankingOutcomeHigh) ? Number(player.rankingOutcomeHigh) / projectionGames : null,
+        })
+      : null;
+    const projectionUsable = Number.isFinite(Number(player.rankingPoints)) && weeklyProfile != null;
     const offensePosition = player.eligible.some((position) => ["QB", "RB", "WR", "TE"].includes(position));
     const specialistPosition = player.eligible.some((position) => ["K", "DEF", "DL", "LB", "DB", "CB", "S", "D"].includes(position));
     const yahooOnlyLateSpecialist = !offensePosition && player.eligible.some((position) => ["K", "DEF"].includes(position)) && player.sourceFamilies.includes("yahoo") && player.scorableSourceFamilyCount === 1;
@@ -396,6 +407,7 @@ export function assembleV5Board({
       injury,
       expectedGamesThroughWeek17,
       weeklyPoints: weeklyProfile?.weeklyPoints ?? null,
+      rawWeeklyPoints: rawWeeklyProfile?.weeklyPoints ?? null,
       weeklyAvailability: weeklyProfile?.availabilityProbability ?? null,
       weeklyOutcomeLow: weeklyProfile?.weeklyOutcomeLow ?? null,
       weeklyOutcomeHigh: weeklyProfile?.weeklyOutcomeHigh ?? null,
@@ -428,9 +440,9 @@ export function assembleV5Board({
             const rightRank = hasFiniteProjection(right.yahooPreseasonRank) ? Number(right.yahooPreseasonRank) : Infinity;
             return leftRank - rightRank || (right.consensusPoints ?? -Infinity) - (left.consensusPoints ?? -Infinity);
           }
-          return (right.consensusPoints ?? -Infinity) - (left.consensusPoints ?? -Infinity);
+          return (right.rankingPoints ?? -Infinity) - (left.rankingPoints ?? -Infinity);
         })
-        .map((player, index) => ({ ...player, specialistRank: player.consensusPoints === null ? null : index + 1 })),
+        .map((player, index) => ({ ...player, specialistRank: player.rankingPoints === null ? null : index + 1 })),
     ]),
   );
   const projectionGapByPosition = Object.fromEntries(
@@ -452,15 +464,16 @@ export function assembleV5Board({
   );
 
   return Object.freeze({
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: asOf,
     leagueId: "420010",
     scoringModel: "2-minute-drillers-2026",
     scoringSchemaHash: SCORING_SCHEMA_HASH,
     replacementRanks: LEAGUE_REPLACEMENT_RANKS,
     replacementBySlot: projectionBoard.replacementBySlot,
+    rawReplacementBySlot: projectionBoard.rawReplacementBySlot,
     replacementRankBasis: "joint maximum-weight allocation of every 2 Minute Drillers starter slot",
-    specialistRankingBasis: { K: "Yahoo preseason rank; Razzball raw-stat total is a diagnostic challenger", DEF: "Yahoo preseason rank; season aggregates cannot reconstruct weekly scoring", DL: "league-scored median/mean of gate-passing Yahoo and independent IDP raw-stat families", LB: "league-scored median/mean of gate-passing Yahoo and independent IDP raw-stat families", DB: "league-scored median/mean of gate-passing Yahoo and independent IDP raw-stat families" },
+    specialistRankingBasis: { K: "Yahoo preseason rank; Razzball raw-stat total is a diagnostic challenger", DEF: "Yahoo preseason rank; season aggregates cannot reconstruct weekly scoring", DL: "global-gated IDP decision score, otherwise exact-scored source-family consensus", LB: "global-gated IDP decision score, otherwise exact-scored source-family consensus", DB: "global-gated IDP decision score, otherwise exact-scored source-family consensus" },
     sources: projectionBoard.sourceReceipts,
     snapshotReceipts: {
       yahooOffenseObservedAt: offenseObservedAt,
@@ -475,6 +488,13 @@ export function assembleV5Board({
       fantasyWeeks: "1-17",
       weeklyBonuses: "weekly events; never season-thresholded",
       outcomeIntervals: "calibrated inputs only; source disagreement remains diagnostic",
+      idpRanking: survivalCalibration?.idpRanking
+        ? {
+            status: survivalCalibration.idpRanking.status,
+            globalGate: survivalCalibration.idpRanking.globalGate,
+            preregistrationHash: survivalCalibration.idpRanking.preregistrationHash,
+          }
+        : { status: "DIAGNOSTIC_ONLY_CALIBRATION_UNAVAILABLE", globalGate: { pass: false }, preregistrationHash: null },
       sourceGapByPosition: projectionGapByPosition,
     },
     survivalCalibration,
