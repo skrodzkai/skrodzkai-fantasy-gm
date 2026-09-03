@@ -1,3 +1,10 @@
+import {
+  buildIdpSourceProfile,
+  combineIdpSourceProfiles,
+  idpCalibrationHash,
+  idpDecisionScore,
+} from "./idp-ranking.mjs";
+
 export const OFFENSE_SCORING = Object.freeze({
   passingCompletions: 0.1,
   passingYards: 0.04,
@@ -159,7 +166,7 @@ function addFlowEdge(graph, from, to, capacity, cost, metadata = null) {
  * assigned multi-position player to move when that produces a better global
  * allocation, so W/R/T and D are not estimated as independent rank cutoffs.
  */
-export function deriveJointReplacementLevels({ players, teamCount, rosterSlots }) {
+export function deriveJointReplacementLevels({ players, teamCount, rosterSlots, pointsField = "consensusPoints" }) {
   if (!Number.isInteger(teamCount) || teamCount < 2) throw new Error("teamCount must be an integer of at least two");
   const slotCounts = Array.from(rosterSlots ?? []).reduce((counts, rawSlot) => {
     const slot = normalizePosition(rawSlot);
@@ -170,8 +177,8 @@ export function deriveJointReplacementLevels({ players, teamCount, rosterSlots }
   if (!Object.keys(slotCounts).length) throw new Error("rosterSlots must include at least one starter slot");
 
   const eligiblePlayers = Array.from(players ?? [])
-    .filter((player) => Number.isFinite(Number(player.consensusPoints)))
-    .map((player) => ({ ...player, eligible: eligibilityFor(player), points: Number(player.consensusPoints) }))
+    .filter((player) => Number.isFinite(Number(player[pointsField])))
+    .map((player) => ({ ...player, eligible: eligibilityFor(player), points: Number(player[pointsField]) }))
     .filter((player) => Object.keys(slotCounts).some((slot) => slotAccepts(slot, player.eligible)));
   const slotNames = Object.keys(slotCounts);
   const source = 0;
@@ -315,6 +322,7 @@ export function buildPlayerBoard({
   minimumFreshSources = 2,
   evidencePolicy = null,
   replacementRoster = null,
+  idpCalibration = null,
 }) {
   const now = assertIsoDate(asOf, "asOf");
   if (!Array.isArray(players) || players.length === 0) {
@@ -388,17 +396,28 @@ export function buildPlayerBoard({
       evidence.push({
         sourceId,
         family,
+        scoringKind: String(row?.scoringKind ?? "offense").toLowerCase(),
         perGamePoints,
         weight,
         updatedAt: source.updatedAt,
         omittedScoringCategories: omissions,
         acceptedOmittedScoringCategories: omissions.filter((field) => acceptedOmissions.has(field)),
         unacceptedOmittedScoringCategories: omissions.filter((field) => !acceptedOmissions.has(field)),
+        idpProfile: String(row?.scoringKind ?? "").toLowerCase() === "idp"
+          ? buildIdpSourceProfile({
+              stats: row.stats,
+              scoring: IDP_SCORING,
+              omittedScoringCategories: omissions,
+              sourceId,
+              projectionGames: row.projectionGames ?? source.projectionGames ?? null,
+            })
+          : null,
       });
       evidenceByPlayer.set(playerId, evidence);
     }
   }
 
+  const calibrationHash = idpCalibrationHash(idpCalibration);
   const board = players.map((player) => {
     const evidence = evidenceByPlayer.get(String(player.playerId)) ?? [];
     const expectedGames = hasFinite(player.expectedGames)
@@ -407,15 +426,19 @@ export function buildPlayerBoard({
     if (!(expectedGames >= 0 && expectedGames <= DEFAULT_PROJECTION_GAMES)) {
       throw new Error(`player ${player.playerId} expectedGames must be between 0 and ${DEFAULT_PROJECTION_GAMES}`);
     }
-    const familyEvidence = [...Map.groupBy(evidence, (row) => row.family)].map(([family, rows]) => ({
-      family,
-      sourceIds: rows.map((row) => row.sourceId).sort(),
-      perGamePoints: weightedMean(rows.map((row) => ({ ...row, points: row.perGamePoints }))),
-      weight: 1,
-      omittedScoringCategories: [...new Set(rows.flatMap((row) => row.omittedScoringCategories))].sort(),
-      acceptedOmittedScoringCategories: [...new Set(rows.flatMap((row) => row.acceptedOmittedScoringCategories))].sort(),
-      unacceptedOmittedScoringCategories: [...new Set(rows.flatMap((row) => row.unacceptedOmittedScoringCategories))].sort(),
-    }));
+    const familyEvidence = [...Map.groupBy(evidence, (row) => row.family)].map(([family, rows]) => {
+      const rawProfiles = rows.map((row) => row.idpProfile).filter(Boolean);
+      return {
+        family,
+        sourceIds: rows.map((row) => row.sourceId).sort(),
+        perGamePoints: weightedMean(rows.map((row) => ({ ...row, points: row.perGamePoints }))),
+        weight: 1,
+        omittedScoringCategories: [...new Set(rows.flatMap((row) => row.omittedScoringCategories))].sort(),
+        acceptedOmittedScoringCategories: [...new Set(rows.flatMap((row) => row.acceptedOmittedScoringCategories))].sort(),
+        unacceptedOmittedScoringCategories: [...new Set(rows.flatMap((row) => row.unacceptedOmittedScoringCategories))].sort(),
+        idpProfile: rawProfiles.length ? combineIdpSourceProfiles(rawProfiles) : null,
+      };
+    });
     const policy = evidencePolicy
       ? evidencePolicy(player)
       : { minimumFreshFamilies: minimumFreshSources };
@@ -446,16 +469,36 @@ export function buildPlayerBoard({
       Number(player.outcomeLow) <= Number(player.outcomeHigh);
     const executable = scoringEvidence.length >= minimumFreshFamilies && missingRequiredFamilies.length === 0;
     const omittedScoringCategories = [...new Set(familyEvidence.flatMap((row) => row.omittedScoringCategories))].sort();
+    const idpProfile = combineIdpSourceProfiles(scoringEvidence.map((row) => row.idpProfile).filter(Boolean));
+    const idpDecision = idpDecisionScore({
+      consensusPoints: consensus,
+      profile: idpProfile,
+      position: player.position,
+      calibration: idpCalibration,
+    });
+    const rankingPoints = idpDecision.points;
     return {
       ...player,
       consensusPoints: consensus,
       perGamePoints,
+      rankingPoints,
+      rankingPerGamePoints: rankingPoints == null || expectedGames === 0 ? null : rankingPoints / expectedGames,
+      idpProfile,
+      idpDecisionPoints: idpDecision.points,
+      idpDecisionScale: idpDecision.scale,
+      idpModelStatus: idpDecision.status,
+      idpModelWarning: idpDecision.warning ?? null,
+      idpCalibrationHash: calibrationHash,
       expectedGames,
       sourceSpreadLow: quantile(points, 0.25),
       sourceSpreadHigh: quantile(points, 0.75),
       sourceDisagreementStatus: familyEvidence.length >= 2 ? "AVAILABLE_DIAGNOSTIC_ONLY" : "INSUFFICIENT_SOURCES",
       outcomeLow: calibratedOutcome ? Number(player.outcomeLow) : null,
       outcomeHigh: calibratedOutcome ? Number(player.outcomeHigh) : null,
+      rawOutcomeLow: calibratedOutcome ? Number(player.outcomeLow) : null,
+      rawOutcomeHigh: calibratedOutcome ? Number(player.outcomeHigh) : null,
+      rankingOutcomeLow: calibratedOutcome ? Number(player.outcomeLow) * idpDecision.scale : null,
+      rankingOutcomeHigh: calibratedOutcome ? Number(player.outcomeHigh) * idpDecision.scale : null,
       uncertaintyStatus: calibratedOutcome ? "CALIBRATED_OUTCOME_INTERVAL" : "OUTCOME_INTERVAL_UNAVAILABLE",
       sourceCount: evidence.length,
       sourceIds: evidence.map((row) => row.sourceId).sort(),
@@ -490,19 +533,27 @@ export function buildPlayerBoard({
   });
 
   const replacementByPosition = {};
+  const rawReplacementByPosition = {};
   for (const [position, rankValue] of Object.entries(replacementRanks)) {
     const rank = Number(rankValue);
     if (!Number.isInteger(rank) || rank < 1) {
       throw new Error(`replacement rank for ${position} must be a positive integer`);
     }
     const eligible = board
+      .filter((player) => player.position === position && player.rankingPoints !== null)
+      .sort((left, right) => right.rankingPoints - left.rankingPoints);
+    const rawEligible = board
       .filter((player) => player.position === position && player.consensusPoints !== null)
       .sort((left, right) => right.consensusPoints - left.consensusPoints);
-    replacementByPosition[position] = eligible[Math.min(rank - 1, eligible.length - 1)]?.consensusPoints ?? null;
+    replacementByPosition[position] = eligible[Math.min(rank - 1, eligible.length - 1)]?.rankingPoints ?? null;
+    rawReplacementByPosition[position] = rawEligible[Math.min(rank - 1, rawEligible.length - 1)]?.consensusPoints ?? null;
   }
 
   const joint = replacementRoster
-    ? deriveJointReplacementLevels({ players: board, ...replacementRoster })
+    ? deriveJointReplacementLevels({ players: board, ...replacementRoster, pointsField: "rankingPoints" })
+    : null;
+  const rawJoint = replacementRoster
+    ? deriveJointReplacementLevels({ players: board, ...replacementRoster, pointsField: "consensusPoints" })
     : null;
   const ranked = board
     .map((player) => {
@@ -514,11 +565,22 @@ export function buildPlayerBoard({
       const replacementPoints = jointBaselines.length
         ? Math.min(...jointBaselines)
         : replacementByPosition[player.position] ?? null;
+      const rawJointBaselines = rawJoint
+        ? Object.entries(rawJoint.replacementBySlot)
+            .filter(([slot, points]) => points != null && slotAccepts(slot, eligibilityFor(player)))
+            .map(([, points]) => points)
+        : [];
+      const rawReplacementPoints = rawJointBaselines.length
+        ? Math.min(...rawJointBaselines)
+        : rawReplacementByPosition[player.position] ?? null;
       const vorp =
-        player.consensusPoints === null || replacementPoints === null
+        player.rankingPoints === null || replacementPoints === null
           ? null
-          : player.consensusPoints - replacementPoints;
-      return { ...player, replacementPoints, vorp };
+          : player.rankingPoints - replacementPoints;
+      const rawVorp = player.consensusPoints === null || rawReplacementPoints === null
+        ? null
+        : player.consensusPoints - rawReplacementPoints;
+      return { ...player, replacementPoints, vorp, rawReplacementPoints, rawVorp };
     })
     .sort((left, right) => {
       if (left.vorp === null) return 1;
@@ -532,7 +594,9 @@ export function buildPlayerBoard({
     scoring: OFFENSE_SCORING,
     replacementRanks: { ...replacementRanks },
     replacementByPosition,
+    rawReplacementByPosition,
     replacementBySlot: joint?.replacementBySlot ?? null,
+    rawReplacementBySlot: rawJoint?.replacementBySlot ?? null,
     replacementAllocation: joint?.assignments ?? null,
     sourceReceipts,
     players: ranked,

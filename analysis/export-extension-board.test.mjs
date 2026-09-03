@@ -1,7 +1,19 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
+import vm from "node:vm";
 
 import { extensionBoardFromV5, renderExtensionBoard, renderOfflineBoardCsv } from "./export-extension-board.mjs";
+
+const controllerSource = await readFile(new URL("../controller/yahoo-mock-runner.js", import.meta.url), "utf8");
+
+function validateWithController(players) {
+  const context = { clearInterval, console, crypto, Date, Math, setInterval, setTimeout, SKRODZKaiYahooDraftController: {} };
+  context.globalThis = context;
+  vm.createContext(context);
+  vm.runInContext(controllerSource, context);
+  return context.SKRODZKaiYahooMockRunner._test.validateBoard(players);
+}
 
 function player(position, rank, overrides = {}) {
   return {
@@ -40,7 +52,18 @@ test("exports only executable offense while retaining explicitly labeled special
       K: Array.from({ length: 12 }, (_, index) => player("K", index + 1, { sourceCount: 1, sourceFamilyCount: 1, sourceIds: ["yahoo-season-projection"] })),
       DEF: Array.from({ length: 32 }, (_, index) => player("DEF", index + 1, { sourceCount: 1, sourceFamilyCount: 1, sourceIds: ["yahoo-season-projection"] })),
       DL: [player("DL", 1)],
-      LB: [player("LB", 1)],
+      LB: [player("LB", 1, {
+        rankingPoints: 200,
+        rankingPerGamePoints: 200 / 17,
+        idpDecisionPoints: 200,
+        idpModelStatus: "ACTIVE",
+        idpCalibrationHash: "f".repeat(64),
+        idpProfile: { status: "AVAILABLE", bucketShares: { tackleFloor: 0.8, stableDisruption: 0.15, volatileSplash: 0.05 } },
+        rawWeeklyPoints: Array(17).fill(249 / 17),
+        weeklyPoints: Array(17).fill(200 / 17),
+        rawReplacementPoints: 100,
+        rawVorp: 149,
+      })],
       DB: [
         player("DB", 1, { yahooPosition: "CB" }),
         player("DB", 2, { yahooId: "WR-102", yahooPosition: "WR", eligible: ["WR", "CB", "DB", "D"] }),
@@ -56,6 +79,14 @@ test("exports only executable offense while retaining explicitly labeled special
   assert.equal(board.kickers[0].confidence, "YAHOO_ONLY");
   assert.equal(board.defenses.length, 32);
   assert.equal(board.idp.length, 4);
+  const linebacker = board.idp.find((entry) => entry.yahooId === "LB-1");
+  assert.equal(linebacker.projection, 200);
+  assert.equal(linebacker.rawProjection, 249);
+  assert.equal(linebacker.idpDecisionProjection, 200);
+  assert.equal(linebacker.idpModelStatus, "ACTIVE");
+  assert.equal(linebacker.rawWeeklyPoints.length, 17);
+  assert.equal(linebacker.idpCalibrationHash, "f".repeat(64));
+  assert.doesNotThrow(() => validateWithController(board.players));
   assert.equal(board.players.length > board.offense.length, true);
   assert.equal(board.players.find((entry) => entry.yahooId === "WR-102").position, "WR");
   assert.equal(board.replacementBySlot.D, 50);

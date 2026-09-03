@@ -339,3 +339,42 @@ test("emits the compact injury watchlist in the board artifact", () => {
   assert.deepEqual(board.injuryWatchlist.map((player) => player.yahooId), ["1"]);
   assert.equal(board.injuryWatchlist[0].draftAction, "REVIEW");
 });
+
+test("passes a globally approved IDP calibration through ranking and weekly fields", () => {
+  const stats = {
+    soloTackles: 0, assistedTackles: 0, sacks: 0, interceptions: 0,
+    forcedFumbles: 0, fumbleRecoveries: 0, touchdowns: 10, safeties: 0,
+    passesDefended: 0, blockedKicks: 0, tacklesForLoss: 0,
+    turnoverReturnYards: 0, extraPointReturns: 0, snaps: 900,
+  };
+  const board = fixture({
+    baselineRows: [{ yahoo_id: "2", name: "Linebacker", team: "BUF", position: "LB", gsis_id: "g2", sleeper_id: "s2", payload_json: JSON.stringify({ eligible: ["LB", "D"] }) }],
+    offenseSnapshot: { observedAt: "2026-08-22T10:00:00Z", players: [] },
+    specialistSnapshot: { observedAt: "2026-08-22T10:01:00Z", positions: { LB: [{ yahooId: "2", name: "Linebacker", team: "BUF", position: "LB", yahooProjectedPoints: 60, bye: 7 }] }, eligibilityEvidence: {} },
+    sleeperPlayers: { s2: { yahoo_id: 2, status: "Active", injury_status: null } },
+    projectionSnapshots: [{
+      manifest: {
+        snapshotId: "razzball-idp-test", sourceId: "razzball-projections", sourceFamily: "razzball",
+        sourceAsOf: "2026-08-22T11:00:00Z", retrievedAt: "2026-08-22T11:10:00Z",
+        contentSha256: "d".repeat(64), gamesBasis: "17", projectionPeriod: "2026", licenseUseNote: "test",
+      },
+      rows: [{ playerId: "2", name: "Linebacker", team: "BUF", position: "LB", scoringKind: "idp", projectionGames: 17, stats }],
+    }],
+    survivalCalibration: {
+      idpRanking: {
+        status: "ACTIVE",
+        globalGate: { pass: true },
+        preregistrationHash: "e".repeat(64),
+        positionParameters: { LB: { volatileWeight: 0.25, roleExponent: 0, trainingSnapMean: 50 } },
+      },
+    },
+  });
+  const linebacker = board.players[0];
+  assert.equal(linebacker.consensusPoints, 60);
+  assert.equal(linebacker.rankingPoints, 15);
+  assert.equal(linebacker.idpModelStatus, "ACTIVE");
+  const rawWeeklyTotal = linebacker.rawWeeklyPoints.reduce((sum, value) => sum + value, 0);
+  const decisionWeeklyTotal = linebacker.weeklyPoints.reduce((sum, value) => sum + value, 0);
+  assert.ok(Math.abs(decisionWeeklyTotal / rawWeeklyTotal - 0.25) < 1e-12);
+  assert.equal(board.projectionModel.idpRanking.globalGate.pass, true);
+});
