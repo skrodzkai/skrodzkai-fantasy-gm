@@ -12,6 +12,13 @@ const TEXT = `                     Quarterback Projections
       Running Back       Team    Pos Rk FF Pt   G    Carry   Ru Yds Ru TD Targ   Rec   Re Yd Re TD   Car%   Targ%
      Ashton Jeanty         LV       6    281    17    279     1128    7    87     65    496    2     67%     16%`;
 
+const IDP_TEXT = `                 Off-ball Linebacker Projections (1/2)
+        Defender        Team   Pos Rk FF Pt Snaps   Tot. Tkl   Solos Assists TFL   Sack   INT    FF
+    Jordyn Brooks        MIA      1    263    984     180       100    80     12    3.0    0.6   1.1
+                      Cornerback Projections (1/2)
+       Defender       Team    Pos Rk FF Pt Snaps   Tot. Tkl   Solos Assists TFL   Sack   INT    FF
+    Travis Hunter      JAX       1    208    747      62       45     17     2     0.0    0.9   0.4`;
+
 test("parses raw offense stats and ignores ESPN fantasy-point totals", () => {
   const rows = parseEspnClayText(TEXT);
   assert.equal(rows.length, 2);
@@ -58,4 +65,18 @@ test("emits the strict free-source manifest and extraction receipt", () => {
   assert.match(snapshot.manifest.contentSha256, /^[a-f0-9]{64}$/);
   assert.equal(snapshot.manifest.etag, "test-etag");
   assert.equal(snapshot.coverage.rejected.zeroProjectedGames, 0);
+});
+
+test("parses ESPN IDP raw stats without using ESPN fantasy points", () => {
+  const parsed = parseEspnClayTextWithCoverage(IDP_TEXT);
+  assert.equal(parsed.rows.length, 2);
+  assert.deepEqual(parsed.coverage.sections, ["CB", "LB"]);
+  assert.equal(parsed.rows[0].scoringKind, "idp");
+  assert.equal(parsed.rows[0].projectionGames, 17);
+  assert.equal(parsed.rows[0].stats.soloTackles, 100);
+  assert.equal(parsed.rows[1].name, "Travis Hunter");
+  assert.equal(parsed.rows[1].position, "CB");
+  assert.equal(parsed.rows[1].stats.interceptions, 0.9);
+  assert.equal("passesDefended" in parsed.rows[1].stats, false);
+  assert.ok(parsed.rows[1].omittedScoringCategories.includes("passesDefended"));
 });

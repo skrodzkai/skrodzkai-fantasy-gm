@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "overrides": [
+    {
+      "sourceId": "espn-mike-clay",
+      "name": "Travis Hunter",
+      "team": "JAX",
+      "position": "WR",
+      "yahooId": "99001"
+    },
+    {
+      "sourceId": "espn-mike-clay",
+      "name": "Travis Hunter",
+      "team": "JAX",
+      "position": "CB",
+      "yahooId": "99002"
+    },
+    {
+      "sourceId": "cbs-projections",
+      "name": "Travis Hunter",
+      "team": "JAX",
+      "position": "WR",
+      "yahooId": "99001"
+    },
+    {
+      "sourceId": "razzball-projections",
+      "name": "Travis Hunter",
+      "team": "JAX",
+      "position": "WR",
+      "yahooId": "99001"
+    },
+    {
+      "sourceId": "razzball-projections",
+      "name": "Travis Hunter",
+      "team": "JAX",
+      "position": "DB",
+      "yahooId": "99002"
+    },
+    {
+      "sourceId": "rotoworld-top-200",
+      "name": "A.J. Brown",
+      "team": "PHI",
+      "position": "WR",
+      "yahooId": "31883"
+    },
+    {
+      "sourceId": "rotoworld-top-200",
+      "name": "D.J. Moore",
+      "team": "BUF",
+      "position": "WR",
+      "yahooId": "30994"
+    },
+    {
+      "sourceId": "rotoworld-top-200",
+      "name": "KC Concepcion",
+      "team": "CLE",
+      "position": "WR",
+      "yahooId": "42646"
+    },
+    {
+      "sourceId": "rotoworld-top-200",
+      "name": "Deebo Samuel",
+      "team": "FA",
+      "position": "WR",
+      "yahooId": "31868"
+    },
+    {
+      "sourceId": "rotoworld-top-200",
+      "name": "Travis Hunter",
+      "team": "JAX",
+      "position": "WR",
+      "yahooId": "99001"
+    },
+    {
+      "sourceId": "rotoworld-top-200",
+      "name": "Nick Singleton",
+      "team": "TEN",
+      "position": "RB",
+      "yahooId": "42763"
+    },
+    {
+      "sourceId": "rotoworld-top-200",
+      "name": "A.J. Barner",
+      "team": "SEA",
+      "position": "TE",
+      "yahooId": "41001"
+    }
+  ]
+}

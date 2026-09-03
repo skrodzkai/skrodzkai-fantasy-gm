@@ -102,7 +102,7 @@ test("K and DEF use current Yahoo preseason rank rather than projection order", 
     },
   });
   assert.deepEqual(board.boards.specialists.K.map((player) => player.yahooId), ["10", "11"]);
-  assert.equal(board.specialistRankingBasis.K, "Yahoo preseason rank");
+  assert.match(board.specialistRankingBasis.K, /Yahoo preseason rank/);
   assert.ok(board.boards.specialists.K.every((player) => player.validationStatus === "UNVALIDATED_SPECIALIST_PROJECTION"));
   assert.ok(board.boards.specialists.K.every((player) => player.automaticEligible === true));
 });
@@ -207,6 +207,7 @@ test("split Yahoo Travis Hunter identities remain manual-only", () => {
   });
   const hunters = board.players.filter((player) => player.name === "Travis Hunter");
   assert.deepEqual(hunters.map((player) => player.yahooId).sort(), ["99001", "99002"]);
+  assert.deepEqual(hunters.map((player) => player.position).sort(), ["CB", "WR"]);
   assert.ok(hunters.every((player) => player.automaticEligible === false));
   assert.ok(hunters.every((player) => player.validationStatus === "DUAL_ROLE_SCORING_UNVERIFIED"));
 });
@@ -231,8 +232,8 @@ test("same-name players on different teams do not collide as dual-role identitie
   const receiver = board.players.find((player) => player.yahooId === "32692");
   const linebacker = board.players.find((player) => player.yahooId === "42774");
   assert.equal(receiver.validationStatus, "UNVALIDATED_SINGLE_SOURCE_PROJECTION");
-  assert.equal(linebacker.validationStatus, "UNVALIDATED_SPECIALIST_PROJECTION");
-  assert.equal(linebacker.automaticEligible, true);
+  assert.equal(linebacker.validationStatus, "UNVALIDATED_SINGLE_SOURCE_PROJECTION");
+  assert.equal(linebacker.automaticEligible, false);
 });
 
 test("a lone current Travis Hunter identity remains manual-only with two fresh families", () => {
@@ -305,7 +306,7 @@ test("a stale specialist snapshot cannot borrow the offense timestamp", () => {
   });
   const kicker = board.players.find((player) => player.yahooId === "10");
   assert.equal(kicker.executable, false);
-  assert.match(kicker.blockReason, /requires 1 fresh projection families|no fresh injury evidence/);
+  assert.match(kicker.blockReason, /requires 1 scorable projection families|no fresh injury evidence/);
 });
 
 test("an offense row keeps its own projection and injury timestamp when it also appears in a stale specialist filter", () => {
