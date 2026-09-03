@@ -1,12 +1,16 @@
 (function installYahooDraftController(root) {
   "use strict";
 
-  const VERSION = "1.1.2";
+  const VERSION = "1.1.3";
   const GLOBAL_KEY = "__skrodzkaiYahooDraftControllerV1";
   const RECEIPT_KEY = "skrodzkai-yahoo-draft-controller-receipts-v1";
   const readers = root.SKRODZKaiYahooPageReaders;
   if (!readers) throw new Error("SKRODZKai Yahoo page readers must load before the controller");
-  const { normalize, parseRoom, parseRosterCount, readOwnedTurn, buttonText, isAutodraftActive, blockers, readPlayerRow } = readers;
+  const {
+    normalize, parseRoom, parseRosterCount, readOwnedTurn, buttonText,
+    readAutodraftState, isAutodraftActive, readQueueState, readDraftClock,
+    blockers, readPlayerRow,
+  } = readers;
 
   function targetKey(target) {
     return target.yahooId
@@ -164,7 +168,10 @@
       if (!currentRoom || currentRoom.roomId !== room.roomId || currentRoom.seat !== room.seat) {
         throw new Error("room_changed");
       }
-      if (isAutodraftActive(documentRef)) throw new Error("autodraft_active");
+      const autodraftState = readAutodraftState(documentRef);
+      if (autodraftState === "ACTIVE") throw new Error("autodraft_active");
+      if (autodraftState !== "INACTIVE") throw new Error("autodraft_state_unknown");
+      if (readQueueState(documentRef) !== "EMPTY") throw new Error("yahoo_queue_not_empty_or_unknown");
       const activeBlockers = blockers(documentRef, environment);
       if (activeBlockers.length) throw new Error(`blocking_ui:${activeBlockers.join("|")}`);
       const currentTurn = readOwnedTurn(documentRef);
@@ -222,6 +229,9 @@
         position: selection.player.position,
         team: selection.player.team,
         rosterBefore,
+        autodraftState: readAutodraftState(documentRef),
+        queueState: readQueueState(documentRef),
+        clockAtClick: readDraftClock(documentRef),
         detectionToClickMs: Date.now() - detectedAt,
       });
       selection.draftButton.click();
@@ -231,7 +241,10 @@
       while (Date.now() - confirmationStart < confirmationDeadlineMs) {
         await delay(25);
         if (state !== "running") return;
-        if (isAutodraftActive(documentRef)) throw new Error("autodraft_activated_after_click");
+        const autodraftState = readAutodraftState(documentRef);
+        if (autodraftState === "ACTIVE") throw new Error("autodraft_activated_after_click");
+        if (autodraftState !== "INACTIVE") throw new Error("autodraft_state_unknown_after_click");
+        if (readQueueState(documentRef) !== "EMPTY") throw new Error("yahoo_queue_changed_after_click");
         const rosterAfter = parseRosterCount(documentRef.body?.innerText);
         if (rosterAfter && rosterAfter.filled !== rosterBefore.filled) {
           if (rosterAfter.filled !== rosterBefore.filled + 1 || rosterAfter.total !== rosterBefore.total) {
@@ -270,7 +283,10 @@
         if (!currentRoom || currentRoom.roomId !== room.roomId || currentRoom.seat !== room.seat) {
           return fail("room_changed");
         }
-        if (isAutodraftActive(documentRef)) return fail("autodraft_active");
+        const autodraftState = readAutodraftState(documentRef);
+        if (autodraftState === "ACTIVE") return fail("autodraft_active");
+        if (autodraftState !== "INACTIVE") return fail("autodraft_state_unknown");
+        if (readQueueState(documentRef) !== "EMPTY") return fail("yahoo_queue_not_empty_or_unknown");
         const activeBlockers = blockers(documentRef, environment);
         if (activeBlockers.length) return fail("blocking_ui", { blockers: activeBlockers });
         const turn = readOwnedTurn(documentRef);
@@ -291,7 +307,11 @@
       storage.setItem(probeKey, "ok");
       if (storage.getItem(probeKey) !== "ok") throw new Error("receipt storage probe failed");
       storage.removeItem(probeKey);
-      if (isAutodraftActive(documentRef)) throw new Error("Autodraft is active at start");
+      const autodraftState = readAutodraftState(documentRef);
+      if (autodraftState === "ACTIVE") throw new Error("Autodraft is active at start");
+      if (autodraftState !== "INACTIVE") throw new Error("Autodraft state is unknown at start");
+      const queueState = readQueueState(documentRef);
+      if (queueState !== "EMPTY") throw new Error("Yahoo queue must be visibly empty at start");
       const activeBlockers = blockers(documentRef, environment);
       if (activeBlockers.length) throw new Error(`blocking UI at start: ${activeBlockers.join("|")}`);
       const roster = parseRosterCount(documentRef.body?.innerText);
@@ -310,6 +330,8 @@
         failureAction,
         minimumAvailableTargets,
         maxConfirmedPicks,
+        autodraftState,
+        queueState,
       });
       intervalId = environment.setInterval(tick, pollMs);
       tick();
@@ -344,7 +366,10 @@
       parseRoom,
       parseRosterCount,
       readOwnedTurn,
+      readAutodraftState,
       isAutodraftActive,
+      readQueueState,
+      readDraftClock,
       readPlayerRow,
     },
     _test: {
@@ -352,7 +377,10 @@
       parseRoom,
       parseRosterCount,
       readOwnedTurn,
+      readAutodraftState,
       isAutodraftActive,
+      readQueueState,
+      readDraftClock,
       readPlayerRow,
       matchesTarget,
       findTargetRows,

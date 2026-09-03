@@ -504,7 +504,7 @@ test("observed TEST roster validation rejects a specialist displaced to the benc
   assert.equal(helpers.validateObservedTestRoster(bad, picks), false);
 });
 
-function integrationFixture({ selectionHoldMs = 80 } = {}) {
+function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE", queueState = "EMPTY" } = {}) {
   const board = boardForConfig(mockConfig);
   const rows = board.slice(0, 20).map((entry) => ({ player:entry }));
   const select = { value:"all", options:[{ value:"all", textContent:"All Positions" }], dispatchEvent() {} };
@@ -517,6 +517,9 @@ function integrationFixture({ selectionHoldMs = 80 } = {}) {
     runtime:{
       parseRoom:() => ({ roomId:"99", seat:6 }),
       parseRosterCount:() => ({ filled:0, total:15 }),
+      readAutodraftState:() => autodraftState,
+      readQueueState:() => queueState,
+      readDraftClock:() => ({ label:"00:59", seconds:59 }),
       isAutodraftActive:() => false,
       readOwnedTurn:() => ({ label:"R1P6", round:1, pick:6 }),
       readPlayerRow:(row) => row.player,
@@ -533,9 +536,11 @@ function integrationFixture({ selectionHoldMs = 80 } = {}) {
     },
   };
   const runnerApi = loadRunner(controllerApi);
+  let clearedTimeouts = 0;
   const environment = {
     Event: class Event { constructor(type) { this.type=type; } },
     clearInterval,
+    clearTimeout(id) { clearedTimeouts += 1; clearTimeout(id); },
     crypto,
     document,
     location:{ pathname:"/draftclient/f1/99/6" },
@@ -548,9 +553,20 @@ function integrationFixture({ selectionHoldMs = 80 } = {}) {
     configName:"public_mock_15", executionMode:"MOCK", expectedRoomId:"99", expectedSeat:6, expectedUrlSeat:6,
     observedTeamCount:12, observedRosterSlots:mockConfig.rosterSlots, minimumFallbacks:5, pollMs:25,
     filterDeadlineMs:500, selectionHoldMs, replacementBySlot, board,
+    runtimeAttestation:{ ok:true, version:"0.14.2", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
   }, environment);
-  return { runner, getControllerTargets:() => controllerTargets };
+  return { runner, getControllerTargets:() => controllerTargets, getClearedTimeouts:() => clearedTimeouts };
 }
+
+test("runner creation refuses unknown Autodraft state or a nonempty Yahoo queue", () => {
+  assert.throws(() => integrationFixture({ autodraftState:"UNKNOWN" }), /autodraft_state_unknown_at_create/);
+  assert.throws(() => integrationFixture({ queueState:"NONEMPTY_OR_UNKNOWN" }), /yahoo_queue_not_empty_or_unknown_at_create/);
+});
+
+test("final round accepts the remaining legal ladder while earlier rounds retain five fallbacks", () => {
+  assert.equal(helpers.controllerMinimumAvailableTargets(18, [{}, {}], testConfig, 5), 5);
+  assert.equal(helpers.controllerMinimumAvailableTargets(19, [{}, {}], testConfig, 5), 2);
+});
 
 test("on-clock exact choice starts immediately and keeps baseline fallbacks", async () => {
   const fixture = integrationFixture({ selectionHoldMs:500 });
@@ -564,6 +580,7 @@ test("on-clock exact choice starts immediately and keeps baseline fallbacks", as
   await waitFor(() => fixture.getControllerTargets());
   assert.equal(fixture.getControllerTargets()[0].yahooId, chosen);
   assert.equal(fixture.getControllerTargets().length >= 5, true);
+  assert.equal(fixture.getClearedTimeouts() >= 1, true);
   const receipts = fixture.runner.exportReceipts();
   assert.equal(receipts.some((entry) => entry.kind === "runner_on_clock_choice_applied"), true);
   const resolved = receipts.find((entry) => entry.kind === "runner_turn_resolved");

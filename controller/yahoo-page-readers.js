@@ -50,10 +50,32 @@
     return String(button?.innerText ?? button?.textContent ?? "").trim();
   }
 
+  function readAutodraftState(documentRef) {
+    const controls = [...documentRef.querySelectorAll("button")]
+      .filter((button) => buttonText(button) === "Autodraft");
+    if (controls.length !== 1) return "UNKNOWN";
+    return controls[0].querySelector('svg[data-icon="checkmark-default"]') ? "ACTIVE" : "INACTIVE";
+  }
+
   function isAutodraftActive(documentRef) {
-    return [...documentRef.querySelectorAll("button")].some((button) =>
-      buttonText(button) === "Autodraft" && Boolean(button.querySelector('svg[data-icon="checkmark-default"]')),
-    );
+    return readAutodraftState(documentRef) === "ACTIVE";
+  }
+
+  function readQueueState(documentRef) {
+    const body = normalize(documentRef.body?.innerText);
+    if (body.includes("YOUR QUEUE IS EMPTY")) return "EMPTY";
+    if (body.includes("QUEUE") || body.includes("AUTODRAFT WILL PICK FROM QUEUE")) return "NONEMPTY_OR_UNKNOWN";
+    return "UNKNOWN";
+  }
+
+  function readDraftClock(documentRef) {
+    const matches = textLines(documentRef.body?.innerText)
+      .map((line) => line.match(/^(\d{1,2}):(\d{2})$/))
+      .filter(Boolean)
+      .filter((match) => Number(match[2]) < 60)
+      .map((match) => ({ label:match[0], seconds:Number(match[1]) * 60 + Number(match[2]) }))
+      .filter((clock) => Number.isInteger(clock.seconds) && clock.seconds >= 0);
+    return matches.length === 1 ? matches[0] : null;
   }
 
   function isVisible(element, rootRef) {
@@ -120,6 +142,7 @@
 
   root.SKRODZKaiYahooPageReaders = Object.freeze({
     normalize, textLines, parseRoom, parseRosterCount, parseRosterSlots, readOwnedTurn,
-    buttonText, isAutodraftActive, isVisible, blockers, readPlayerRow, boardHealthReceipt, boardHealthGate,
+    buttonText, readAutodraftState, isAutodraftActive, readQueueState, readDraftClock,
+    isVisible, blockers, readPlayerRow, boardHealthReceipt, boardHealthGate,
   });
 })(globalThis);

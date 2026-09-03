@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
@@ -10,6 +11,9 @@ const ROSTER_VALIDATOR = globalThis.SKRODZKaiYahooMockRunner._test.validateCompl
 const TEST_OVERALL_PICK = globalThis.SKRODZKaiYahooMockRunner._test.overallPick;
 const TEST_SAME_SLOTS = globalThis.SKRODZKaiYahooMockRunner._test.sameSlots;
 const TEST_OBSERVED_ROSTER_VALIDATOR = globalThis.SKRODZKaiYahooMockRunner._test.validateObservedTestRoster;
+const EXTENSION_VERSION = "0.14.2";
+const PANEL_BUDGET_MS = 250;
+const TURN_TO_CLICK_BUDGET_MS = 2000;
 
 const CONTRACTS = Object.freeze({
   league_two_test_19_idp: Object.freeze({
@@ -37,6 +41,27 @@ function asArray(value) {
 function timestamp(value) {
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function validRuntimeAttestation(value) {
+  return value?.ok === true &&
+    value.version === EXTENSION_VERSION &&
+    /^[a-f0-9]{64}$/.test(String(value.digest ?? "")) &&
+    String(value.bootId ?? "").length >= 8 &&
+    Number.isFinite(Number(value.bootedAt));
+}
+
+function sameRuntimeAttestation(left, right) {
+  return validRuntimeAttestation(left) && validRuntimeAttestation(right) &&
+    left.version === right.version && left.digest === right.digest &&
+    left.bootId === right.bootId && Number(left.bootedAt) === Number(right.bootedAt);
+}
+
+function validClock(value, maximumSeconds = 300) {
+  const match = String(value?.label ?? "").match(/^(\d{1,2}):(\d{2})$/);
+  const seconds = Number(value?.seconds);
+  return Boolean(match) && Number(match[2]) < 60 && Number.isInteger(seconds) &&
+    seconds === Number(match[1]) * 60 + Number(match[2]) && seconds >= 0 && seconds <= maximumSeconds;
 }
 
 function countsByPosition(picks) {
@@ -191,7 +216,9 @@ function evaluateDraftExport(payload, options = {}) {
   }
   if (payload?.status?.state !== "completed") errors.push("exported_runner_status_not_completed");
   if (asArray(payload?.status?.picks).length !== config.rounds) errors.push("exported_status_pick_count_mismatch");
-  if (payload?.extensionVersion !== "0.14.1") errors.push("extension_version_mismatch");
+  if (payload?.extensionVersion !== EXTENSION_VERSION) errors.push("extension_version_mismatch");
+  const runtimeAttestation = payload?.runtimeAttestation;
+  if (!validRuntimeAttestation(runtimeAttestation)) errors.push("runtime_attestation_missing_or_invalid");
   const operatorAttestation = payload?.operatorAttestation;
   if (operatorAttestation?.status === "intervention") {
     if (
@@ -235,6 +262,9 @@ function evaluateDraftExport(payload, options = {}) {
     !validObservedTeamCount ||
     !TEST_SAME_SLOTS(started[0]?.observedRosterSlots, config.rosterSlots)
   ) errors.push(publicMock ? "runner_started_public_mock_config_mismatch" : "runner_started_test_config_mismatch");
+  if (!sameRuntimeAttestation(started[0]?.runtimeAttestation, runtimeAttestation)) errors.push("runner_runtime_attestation_mismatch");
+  if (started[0]?.autodraftState !== "INACTIVE") errors.push("runner_started_autodraft_not_verified_off");
+  if (started[0]?.queueState !== "EMPTY") errors.push("runner_started_queue_not_verified_empty");
   if (
     payload?.status?.runId !== selectedRun.runId ||
     String(payload?.status?.roomId) !== expectedRoomId ||
@@ -251,7 +281,12 @@ function evaluateDraftExport(payload, options = {}) {
   for (const entry of runReceipts.filter((receipt) => receipt.kind === "runner_turn_resolved")) {
     const turn = String(entry.turn ?? "");
     if (decisionsByTurn.has(turn)) errors.push(`duplicate_runner_decision:${turn}`);
-    decisionsByTurn.set(turn, entry.decision);
+    decisionsByTurn.set(turn, entry);
+    if (!Number.isFinite(Number(entry.panelReadyMs)) || Number(entry.panelReadyMs) < 0 || Number(entry.panelReadyMs) >= PANEL_BUDGET_MS) {
+      errors.push(`turn_${turn || "unknown"}_panel_ready_budget_missed`);
+    }
+    if (Number(entry.panelBudgetMs) !== PANEL_BUDGET_MS) errors.push(`turn_${turn || "unknown"}_panel_budget_contract_failed`);
+    if (!validClock(entry.clockAtDecision, publicMock ? 300 : 60)) errors.push(`turn_${turn || "unknown"}_clock_evidence_missing_or_invalid`);
   }
   if (pickReceipts.length !== config.rounds) errors.push(`exactly_${config.rounds}_runner_pick_receipts_required`);
   if (decisionsByTurn.size !== config.rounds) errors.push(`exactly_${config.rounds}_runner_decisions_required`);
@@ -265,11 +300,19 @@ function evaluateDraftExport(payload, options = {}) {
     team: String(receipt.pick?.team ?? ""),
     turn: String(receipt.pick?.turn ?? ""),
     latencyMs: Number(receipt.pick?.detectionToClickMs) + Number(receipt.pick?.clickToConfirmationMs),
-    decision: decisionsByTurn.get(String(receipt.pick?.turn ?? "")) ?? null,
+    turnDetectionToClickMs: Number(receipt.pick?.turnDetectionToClickMs),
+    turnToClickBudgetMs: Number(receipt.pick?.turnToClickBudgetMs),
+    clockAtDecision: receipt.pick?.clockAtDecision ?? null,
+    decision: decisionsByTurn.get(String(receipt.pick?.turn ?? ""))?.decision ?? null,
   }));
   picks.forEach((pick, index) => {
     const round = index + 1;
     if (pick.round !== round) errors.push(`round_${round}_runner_round_mismatch`);
+    if (!Number.isFinite(pick.turnDetectionToClickMs) || pick.turnDetectionToClickMs < 0 || pick.turnDetectionToClickMs >= TURN_TO_CLICK_BUDGET_MS) {
+      errors.push(`round_${round}_turn_to_click_budget_missed`);
+    }
+    if (pick.turnToClickBudgetMs !== TURN_TO_CLICK_BUDGET_MS) errors.push(`round_${round}_turn_to_click_budget_contract_failed`);
+    if (!validClock(pick.clockAtDecision, publicMock ? 300 : 60)) errors.push(`round_${round}_clock_evidence_missing_or_invalid`);
     if (seatFitsObservedField) {
       const expectedTurn = `R${round}P${TEST_OVERALL_PICK(round, Number(payload?.seat), observedTeamCount)}`;
       if (pick.turn !== expectedTurn) errors.push(`round_${round}_snake_turn_mismatch`);
@@ -320,13 +363,14 @@ function evaluateDraftExport(payload, options = {}) {
   };
   const stagedPins = extensionReceipts.filter((entry) => entry.kind === "manual_pin_staged" && inSelectedRun(entry));
   const appliedPins = extensionReceipts.filter((entry) => entry.kind === "manual_pin_applied" && inSelectedRun(entry));
-  const overrideClaims = publicMock ? picks.filter((pick) => pick.decision?.manualOverride?.status === "applied") : [];
-  const manualEvidenceRequired = publicMock && (
-    options.requireManualOverride === true || overrideClaims.length > 0 || stagedPins.length > 0 || appliedPins.length > 0
-  );
+  const rejectedPins = extensionReceipts.filter((entry) => entry.kind === "manual_pin_rejected" && inSelectedRun(entry));
+  const overrideClaims = picks.filter((pick) => pick.decision?.manualOverride?.status === "applied");
+  const manualEvidenceRequired = options.requireManualOverride === true || options.requireRejectedOverride === true ||
+    overrideClaims.length > 0 || stagedPins.length > 0 || appliedPins.length > 0 || rejectedPins.length > 0;
   if (manualEvidenceRequired) {
     if (options.requireManualOverride === true && overrideClaims.length !== 1) errors.push("manual_override_decision_contract_failed");
-    if (stagedPins.length !== overrideClaims.length) errors.push("manual_override_staged_receipt_contract_failed");
+    if (options.requireRejectedOverride === true && rejectedPins.length !== 1) errors.push("manual_override_rejection_contract_failed");
+    if (stagedPins.length !== overrideClaims.length + rejectedPins.length) errors.push("manual_override_staged_receipt_contract_failed");
     if (appliedPins.length !== overrideClaims.length) errors.push("manual_override_applied_receipt_contract_failed");
     for (const pick of overrideClaims) {
       const round = Number(pick.round);
@@ -346,6 +390,19 @@ function evaluateDraftExport(payload, options = {}) {
         String(applied[0].roomId) !== expectedRoomId || Number(applied[0].seat) !== Number(payload?.seat) ||
         applied[0].failure != null || String(pick.decision.manualOverride.chosenYahooId ?? "") !== yahooId
       ) errors.push("manual_override_receipt_identity_mismatch");
+    }
+    for (const rejected of rejectedPins) {
+      const expectedRound = Number(rejected.expectedRound);
+      const staged = stagedPins.filter((entry) => Number(entry.expectedRound) === expectedRound);
+      const stagedTarget = String(staged[0]?.targetYahooIds?.[0] ?? "");
+      const provesAlreadyDrafted = picks.some((pick) => pick.round < expectedRound && pick.yahooId === stagedTarget);
+      if (
+        !Number.isInteger(expectedRound) || staged.length !== 1 || rejected.baselineRetained !== true ||
+        !String(rejected.failure ?? "").trim() ||
+        String(rejected.roomId) !== expectedRoomId || Number(rejected.seat) !== Number(payload?.seat) ||
+        overrideClaims.some((pick) => pick.round === expectedRound) ||
+        (options.requireRejectedOverride === true && (rejected.failure !== "manual_pin_unavailable_or_ineligible" || !provesAlreadyDrafted))
+      ) errors.push("manual_override_rejection_receipt_invalid");
     }
   }
 
@@ -368,6 +425,9 @@ function evaluateDraftExport(payload, options = {}) {
     if (String(click.yahooId) !== pick.yahooId || String(confirmation.yahooId) !== pick.yahooId) errors.push(`round_${index + 1}_controller_player_mismatch`);
     if (String(click.turn) !== pick.turn || String(confirmation.turn) !== pick.turn) errors.push(`round_${index + 1}_controller_turn_mismatch`);
     if (Number(click.rosterBefore?.filled) !== index || Number(confirmation.rosterAfter?.filled) !== index + 1) errors.push(`round_${index + 1}_controller_roster_transition_mismatch`);
+    if (click.autodraftState !== "INACTIVE") errors.push(`round_${index + 1}_controller_autodraft_not_verified_off`);
+    if (click.queueState !== "EMPTY") errors.push(`round_${index + 1}_controller_queue_not_verified_empty`);
+    if (!validClock(click.clockAtClick, publicMock ? 300 : 60)) errors.push(`round_${index + 1}_controller_clock_evidence_missing_or_invalid`);
   }
 
   return {
@@ -382,6 +442,7 @@ function evaluateDraftExport(payload, options = {}) {
     urlTeamId: Number(payload?.urlSeat),
     observedTeamCount,
     extensionVersion: payload?.extensionVersion ?? null,
+    runtimeAttestation: validRuntimeAttestation(runtimeAttestation) ? "VERIFIED" : "MISSING_OR_INVALID",
     operatorAttestation: operatorAttestation?.status ?? "missing",
     runnerRunId: selectedRun.runId,
     confirmedPicks: picks.length,
@@ -397,6 +458,8 @@ function evaluateDraftExport(payload, options = {}) {
       claimedDecisions: overrideClaims.length,
       stagedReceipts: stagedPins.length,
       appliedReceipts: appliedPins.length,
+      rejectedReceipts: rejectedPins.length,
+      rejectedRequired: options.requireRejectedOverride === true,
     },
     counterfactualScoring: "not_available_from_compact_receipts",
     finalCounts: countsByPosition(picks),
@@ -407,6 +470,8 @@ function evaluateDraftExport(payload, options = {}) {
       position: pick.position,
       team: pick.team,
       latencyMs: pick.latencyMs,
+      turnDetectionToClickMs: pick.turnDetectionToClickMs,
+      clockAtDecision: pick.clockAtDecision,
       targetIndex: replays[index]?.targetIndex ?? -1,
       decisionReplay: replays[index]?.consistent === true ? "MATCH" : "MISMATCH",
       replayMode: replays[index]?.replayMode ?? null,
@@ -429,18 +494,24 @@ async function main() {
     const [key, ...value] = entry.split("=");
     return [key.replace(/^--/, ""), value.join("=")];
   }));
-  if (!args.input || !args.output) throw new Error("usage: node analysis/test-draft-acceptance.mjs --input=export.json --output=report.json [--contract=league_two_test_19_idp|public_mock_15] [--require-manual-override=true|false]");
+  if (!args.input || !args.output) throw new Error("usage: node analysis/test-draft-acceptance.mjs --input=export.json --output=report.json [--contract=league_two_test_19_idp|public_mock_15] [--require-manual-override=true|false] [--require-rejected-override=true|false]");
   const contract = args.contract ?? "league_two_test_19_idp";
   if (!CONTRACTS[contract]) throw new Error(`unknown acceptance contract: ${contract}`);
   if (args["require-manual-override"] != null && !["true", "false"].includes(args["require-manual-override"])) {
     throw new Error("--require-manual-override must be true or false");
   }
-  const payload = JSON.parse(await readFile(args.input, "utf8"));
+  if (args["require-rejected-override"] != null && !["true", "false"].includes(args["require-rejected-override"])) {
+    throw new Error("--require-rejected-override must be true or false");
+  }
+  const inputText = await readFile(args.input, "utf8");
+  const payload = JSON.parse(inputText);
   const result = evaluateDraftExport(payload, {
     contract,
     latencyBudgetMs: args["latency-budget-ms"] == null ? undefined : Number(args["latency-budget-ms"]),
     requireManualOverride: args["require-manual-override"] === "true",
+    requireRejectedOverride: args["require-rejected-override"] === "true",
   });
+  result.inputSha256 = createHash("sha256").update(inputText).digest("hex");
   await writeFile(args.output, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
   process.stdout.write(`${JSON.stringify({ output: args.output, status: result.status, picks: result.confirmedPicks })}\n`);
   if (!result.valid) process.exitCode = 1;

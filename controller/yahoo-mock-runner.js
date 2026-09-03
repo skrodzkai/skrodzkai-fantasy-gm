@@ -1,7 +1,7 @@
 (function installYahooMockRunner(root) {
   "use strict";
 
-  const VERSION = "2.2.0";
+  const VERSION = "2.2.1";
   const GLOBAL_KEY = "__skrodzkaiYahooMockRunnerV1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-runner-receipts-v1";
   const OFFENSE = ["QB", "RB", "WR", "TE"];
@@ -23,6 +23,16 @@
   const QB2_SURVIVAL_CLIFF = 0.35;
   const NORMALIZED_VALUE_CACHE = new Map();
   const SURVIVAL_BUCKET_CACHE = new WeakMap();
+
+  function validRuntimeAttestation(value) {
+    return Boolean(
+      value?.ok === true &&
+      /^\d+\.\d+\.\d+$/.test(String(value.version ?? "")) &&
+      /^[a-f0-9]{64}$/.test(String(value.digest ?? "")) &&
+      String(value.bootId ?? "").length >= 8 &&
+      Number.isFinite(Number(value.bootedAt)),
+    );
+  }
 
   const CONFIGS = Object.freeze({
     public_mock_15: Object.freeze({
@@ -1029,6 +1039,12 @@
     );
   }
 
+  function controllerMinimumAvailableTargets(round, targets, config, minimumFallbacks) {
+    return Number(round) === Number(config.rounds)
+      ? Math.min(Number(minimumFallbacks), Array.from(targets ?? []).length)
+      : Number(minimumFallbacks);
+  }
+
   function create(options = {}, environment = root) {
     const controllerApi = environment.SKRODZKaiYahooDraftController;
     const documentRef = environment.document;
@@ -1070,6 +1086,7 @@
     const replacementBySlot = options.replacementBySlot ?? {};
     const configuredRunPressure = options.runPressureByPosition ?? {};
     const survivalCalibration = options.survivalCalibration ?? null;
+    const runtimeAttestation = options.runtimeAttestation;
     const board = validateBoard(options.board);
     const readManualOverride = typeof options.readManualOverride === "function" ? options.readManualOverride : () => null;
     const consumeManualOverride = typeof options.consumeManualOverride === "function" ? options.consumeManualOverride : () => {};
@@ -1090,6 +1107,14 @@
     if (typeof controllerApi.runtime?.readOwnedTurn !== "function") {
       throw new Error("controller owned-turn runtime hook is required");
     }
+    if (
+      typeof controllerApi.runtime?.readAutodraftState !== "function" ||
+      typeof controllerApi.runtime?.readQueueState !== "function" ||
+      typeof controllerApi.runtime?.readDraftClock !== "function"
+    ) {
+      throw new Error("controller draft-safety runtime hooks are required");
+    }
+    if (!validRuntimeAttestation(runtimeAttestation)) throw new Error("runtime attestation is required");
 
     const room = controllerApi.runtime.parseRoom(locationRef.pathname);
     if (!room || room.roomId !== expectedRoomId || room.seat !== expectedUrlSeat) {
@@ -1100,6 +1125,17 @@
       throw new Error("mock must begin with the expected empty roster");
     }
 
+    function assertDraftSafety(stage) {
+      const autodraftState = controllerApi.runtime.readAutodraftState(documentRef);
+      const queueState = controllerApi.runtime.readQueueState(documentRef);
+      if (autodraftState === "ACTIVE") throw new Error(`autodraft_active_${stage}`);
+      if (autodraftState !== "INACTIVE") throw new Error(`autodraft_state_unknown_${stage}`);
+      if (queueState !== "EMPTY") throw new Error(`yahoo_queue_not_empty_or_unknown_${stage}`);
+      return { autodraftState, queueState };
+    }
+
+    assertDraftSafety("at_create");
+
     const runId = environment.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
     const picks = [];
     let monitorId = null;
@@ -1108,6 +1144,7 @@
     let failure = null;
     let busy = false;
     let pendingDecision = null;
+    let selectionTimerId = null;
     let activeTurnMetrics = null;
     let previousAvailablePlayers = null;
 
@@ -1145,11 +1182,17 @@
       monitorId = null;
     }
 
+    function clearSelectionTimer() {
+      if (selectionTimerId != null) environment.clearTimeout?.(selectionTimerId);
+      selectionTimerId = null;
+    }
+
     function fail(code, details = {}) {
       if (["failed", "completed", "halted", "stopped"].includes(state)) return;
       failure = { code, ...details };
       state = "failed";
       stopMonitor();
+      clearSelectionTimer();
       try {
         currentController?.stop?.("runner_failed");
       } catch (error) {
@@ -1248,6 +1291,7 @@
         targets = [chosen, ...targets.filter((target) => String(target.yahooId) !== chosenId)];
         receipt("runner_on_clock_choice_applied", { turn: pending.turn.label, chosenYahooId: chosenId, source, baselineFallbacks: pending.targets.map((target) => target.yahooId) });
       }
+      clearSelectionTimer();
       pendingDecision = null;
       const elapsed = Date.now() - pending.detectedAt;
       if (elapsed >= TURN_TO_CLICK_BUDGET_MS) throw new Error("turn_to_click_budget_exhausted");
@@ -1258,7 +1302,7 @@
           pollMs: 25,
           selectionDeadlineMs: remainingSelectionBudget,
           confirmationDeadlineMs: 5000,
-          minimumAvailableTargets: minimumFallbacks,
+          minimumAvailableTargets: controllerMinimumAvailableTargets(pending.turn.round, targets, config, minimumFallbacks),
           maxConfirmedPicks: 1,
           expectedRoomId,
           expectedSeat: expectedUrlSeat,
@@ -1268,7 +1312,14 @@
         environment,
       );
       try {
-        activeTurnMetrics = { turn: pending.turn.label, detectedAt: pending.detectedAt, controllerStartedAt: Date.now(), source, availablePlayers:pending.availablePlayers.slice() };
+        activeTurnMetrics = {
+          turn:pending.turn.label,
+          detectedAt:pending.detectedAt,
+          controllerStartedAt:Date.now(),
+          source,
+          availablePlayers:pending.availablePlayers.slice(),
+          clockAtDecision:pending.clockAtDecision,
+        };
         currentController = nextController.start();
       } catch (error) {
         nextController.stop("start_failed");
@@ -1295,6 +1346,7 @@
         throw new Error(`owned_turn_mismatch:expected_R${expectedRound}P${expectedPick}:observed_${turn.label}`);
       }
       const filterLabel = filterLabelForRound(turn.round, picks, config, expectedSeat);
+      const clockAtDecision = controllerApi.runtime.readDraftClock(documentRef);
       const { targets, decision, manualOverride, availablePlayers, filterReadyMs } = await targetsAfterFilter(turn, filterLabel);
       if (state !== "running") return;
       const panelReadyMs = Date.now() - detectedAt;
@@ -1306,15 +1358,17 @@
         allowedPositions: allowedPositions(turn.round, picks, config, expectedSeat),
         panelReadyMs,
         panelBudgetMs: PANEL_BUDGET_MS,
+        clockAtDecision,
         decision,
       });
       if (panelReadyMs >= PANEL_BUDGET_MS) throw new Error("panel_ready_budget_exhausted");
       if (manualOverride.consume) consumeManualOverride(manualOverride);
-      pendingDecision = { turn, detectedAt, targets, decision, availablePlayers };
+      pendingDecision = { turn, detectedAt, targets, decision, availablePlayers, clockAtDecision };
       if (manualOverride.status === "applied" || selectionHoldMs === 0) {
         startPendingController(null, manualOverride.status === "applied" ? "pre_staged_pin" : "baseline_immediate");
       } else {
-        environment.setTimeout(() => {
+        selectionTimerId = environment.setTimeout(() => {
+          selectionTimerId = null;
           try { startPendingController(null, "baseline_timeout"); } catch (error) { fail(String(error?.message ?? error)); }
         }, selectionHoldMs);
       }
@@ -1370,6 +1424,7 @@
           turnDetectionToClickMs,
           turnToClickBudgetMs: TURN_TO_CLICK_BUDGET_MS,
           clickToConfirmationMs: confirmation.clickToConfirmationMs,
+          clockAtDecision: activeTurnMetrics?.clockAtDecision ?? null,
         };
         picks.push(pick);
         if (
@@ -1412,10 +1467,9 @@
       if (!rosterAtStart || rosterAtStart.filled !== 0 || rosterAtStart.total !== config.rosterTotal) {
         throw new Error("draft roster changed after preflight");
       }
-      if (controllerApi.runtime.isAutodraftActive(documentRef)) {
-        fail("autodraft_active_at_start");
-        return api;
-      }
+      let draftSafety;
+      try { draftSafety = assertDraftSafety("at_start"); }
+      catch (error) { fail(String(error?.message ?? error)); return api; }
       state = "running";
       receipt("runner_started", {
         configName: config.name,
@@ -1432,6 +1486,9 @@
             : "HELD_OUT_CALIBRATED_ROOM_RESIDUAL"
           : "UNCALIBRATED_MARKET_FALLBACK",
         selectionHoldMs,
+        runtimeAttestation,
+        autodraftState: draftSafety.autodraftState,
+        queueState: draftSafety.queueState,
         strategy: "weekly_optimal_lineup_utility_plus_probability_weighted_one_turn_vona",
       });
       monitorId = environment.setInterval(advance, pollMs);
@@ -1442,7 +1499,8 @@
     function halt(reason = "kill_switch") {
       if (["halted", "failed", "completed", "stopped"].includes(state)) return api;
       if (state !== "running") return api;
-      if (controllerApi.runtime.isAutodraftActive(documentRef)) return fail("autodraft_active_at_halt");
+      try { assertDraftSafety("at_halt"); }
+      catch (error) { return fail(String(error?.message ?? error)); }
       const controllerStatus = currentController?.getStatus?.() ?? null;
       let controllerReceipts = [];
       try {
@@ -1451,6 +1509,7 @@
         controllerReceipts = [];
       }
       stopMonitor();
+      clearSelectionTimer();
       pendingDecision = null;
       let stopError = null;
       try {
@@ -1476,6 +1535,7 @@
     function stop(reason = "operator_stop") {
       if (["completed", "failed", "halted", "stopped"].includes(state)) return;
       stopMonitor();
+      clearSelectionTimer();
       pendingDecision = null;
       currentController?.stop?.(reason);
       currentController = null;
@@ -1555,6 +1615,8 @@
       buildDecisionLadder,
       applyManualOverride,
       validateCompletedRoster,
+      controllerMinimumAvailableTargets,
+      validRuntimeAttestation,
       rosterSlotAccepts,
       allocateRosterSlots,
       validateObservedTestRoster,
