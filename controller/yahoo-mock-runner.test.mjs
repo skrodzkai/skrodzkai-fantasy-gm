@@ -575,7 +575,7 @@ function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE",
     observedTeamCount:12, observedRosterSlots:mockConfig.rosterSlots, minimumFallbacks:5, pollMs:25,
     filterDeadlineMs:500, selectionHoldMs, replacementBySlot, board,
     assertRunnerLease:() => leaseState.current === true,
-    runtimeAttestation:{ ok:true, version:"0.16.0", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
+    runtimeAttestation:{ ok:true, version:"0.16.1", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
   }, environment);
   return { runner, board, getControllerTargets:() => controllerTargets, getClearedTimeouts:() => clearedTimeouts, getRowReads:() => rowReads };
 }
