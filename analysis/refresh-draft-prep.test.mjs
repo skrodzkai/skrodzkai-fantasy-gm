@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 import { SCORING_SCHEMA_HASH } from "./build-v5-board.mjs";
-import { boardMovers, buildHealth, byeCoverage, discoverPreviousPassingBoard, fetchEspnClayPdf, joinEspnRowsToYahoo, joinProjectionRowsToYahoo, loadOrFetchSleeper, publishSuccessfulRun, refreshDraftPrep, renderBoardMovementMarkdown, writeSleeperCache } from "./refresh-draft-prep.mjs";
+import { applyFreshAdpSnapshot, boardMovers, buildHealth, byeCoverage, discoverPreviousPassingBoard, fetchEspnClayPdf, joinEspnRowsToYahoo, joinProjectionRowsToYahoo, loadOrFetchSleeper, publishSuccessfulRun, refreshDraftPrep, renderBoardMovementMarkdown, writeSleeperCache } from "./refresh-draft-prep.mjs";
 
 function response(bytes, headers = {}) {
   const normalized = new Map(Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]));
@@ -16,6 +16,24 @@ function response(bytes, headers = {}) {
     arrayBuffer: async () => bytes,
   };
 }
+
+function adpSnapshot() {
+  return {
+    status:"Success",
+    meta:{ teams:12, end_date:new Date().toISOString().slice(0, 10) },
+    players:Array.from({ length:150 }, (_, index) => ({ name:`Player ${index}`, team:"BUF", position:"RB", adp:index + 1, high:index + 1, low:index + 2, times_drafted:10 })),
+  };
+}
+
+test("fresh FFC ADP replaces only exact current name-team-position market rows", () => {
+  const baseline = [{ name:"Player 1", team:"BUF", position:"RB", adp:99, payload_json:"{}" }, { name:"Player 1", team:"BUF", position:"WR", adp:88, payload_json:"{}" }];
+  const snapshot = adpSnapshot();
+  snapshot.players[1] = { name:"Player 1", team:"BUF", position:"RB", adp:7.2, high:4, low:11, times_drafted:44 };
+  const result = applyFreshAdpSnapshot(baseline, snapshot);
+  assert.equal(result.rows[0].adp, 7.2);
+  assert.equal(JSON.parse(result.rows[0].payload_json).adp_samples, 44);
+  assert.equal(result.rows[1].adp, 88);
+});
 
 test("fetches the ESPN PDF once and receipts publisher and retrieval timestamps separately", async () => {
   let calls = 0;
@@ -252,6 +270,7 @@ test("stale caller-supplied Yahoo inputs publish a health-only failure atomicall
     return path;
   };
   const baselinePath = await writeJson("baseline.json", []);
+  const adpPath = await writeJson("adp.json", adpSnapshot());
   const stale = {
     leagueId: "420010",
     scoringModel: "2-minute-drillers-2026",
@@ -272,6 +291,7 @@ test("stale caller-supplied Yahoo inputs publish a health-only failure atomicall
     outputParent,
     allowedOutputRoot: allowedRoot,
     baselinePath,
+    adpPath,
     yahooOffensePath,
     yahooSpecialistsPath,
     yahooEligibilityPath,
@@ -321,6 +341,7 @@ test("Yahoo projections must declare the real league and scoring schema", async 
     outputParent,
     allowedOutputRoot: allowedRoot,
     baselinePath: await writeJson("baseline.json", []),
+    adpPath: await writeJson("adp.json", adpSnapshot()),
     yahooOffensePath: await writeJson("offense.json", wrongLeague),
     yahooSpecialistsPath: await writeJson("specialists.json", wrongLeague),
     yahooEligibilityPath: await writeJson("eligibility.json", wrongLeague),
@@ -353,6 +374,7 @@ test("a short parsed ESPN snapshot leaves only a health receipt", async () => {
   const historyPath = join(allowedRoot, "history.csv");
   const runnerPath = join(allowedRoot, "runner.js");
   const baselinePath = await writeJson("baseline.json", []);
+  const adpPath = await writeJson("adp.json", adpSnapshot());
   const yahooOffensePath = await writeJson("offense.json", yahoo);
   const yahooSpecialistsPath = await writeJson("specialists.json", yahoo);
   const yahooEligibilityPath = await writeJson("eligibility.json", yahoo);
@@ -363,6 +385,7 @@ test("a short parsed ESPN snapshot leaves only a health receipt", async () => {
     outputParent,
     allowedOutputRoot: allowedRoot,
     baselinePath,
+    adpPath,
     yahooOffensePath,
     yahooSpecialistsPath,
     yahooEligibilityPath,

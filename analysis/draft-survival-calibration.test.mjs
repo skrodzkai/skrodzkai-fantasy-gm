@@ -47,5 +47,7 @@ test("held-out gate reports missing Yahoo and static BPA evidence instead of inv
   assert.equal(result.calibration.comparisonCoverage.publicAdpSurvivalBenchmark, false);
   assert.equal(result.calibration.comparisonCoverage.yahooPreDraftRank, false);
   assert.equal(result.calibration.comparisonCoverage.staticBpa, false);
+  assert.equal(result.calibration.enabled, false);
+  assert.match(result.calibration.reason, /disabled_without_positive_public_adp_benchmark/);
   assert.match(result.calibration.comparisonCoverage.unavailableReason, /not captured/);
 });

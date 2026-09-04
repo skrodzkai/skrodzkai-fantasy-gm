@@ -1,7 +1,7 @@
 (function installYahooRealShadow(root) {
   "use strict";
 
-  const VERSION = "0.15.0";
+  const VERSION = "0.16.0";
   const LEAGUE_ID = "420010";
   const TEAM_ID = 7;
   const SETTINGS_KEY = "skz.realShadowSettings";

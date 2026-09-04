@@ -7,9 +7,9 @@
   const readers = root.SKRODZKaiYahooPageReaders;
   if (!readers) throw new Error("SKRODZKai Yahoo page readers must load before the controller");
   const {
-    normalize, parseRoom, parseRosterCount, readOwnedTurn, readOwnedTurnState, buttonText,
+    normalize, parseRoom, parseRosterCount, readRosterCount, readOwnedTurn, readOwnedTurnState, buttonText,
     readAutodraftState, isAutodraftActive, readQueueState, readDraftClock,
-    blockers, readPlayerRow, readTeamRosterPlayerIds,
+    isVisible, blockers, readPlayerRow, readAvailablePlayerRows, readTeamRosterPlayerIds,
   } = readers;
 
   function targetKey(target) {
@@ -28,15 +28,13 @@
   }
 
   function findTargetRows(documentRef, target) {
-    return [...documentRef.querySelectorAll("tr")]
-      .map(readPlayerRow)
-      .filter(Boolean)
+    return readAvailablePlayerRows(documentRef, root)
       .filter((player) => matchesTarget(player, target));
   }
 
-  function findDraftButtons(rootRef) {
+  function findDraftButtons(rootRef, environment = root) {
     return [...rootRef.querySelectorAll("button")].filter(
-      (button) => buttonText(button) === "Draft" && !button.disabled,
+      (button) => buttonText(button) === "Draft" && !button.disabled && isVisible(button, environment),
     );
   }
 
@@ -93,6 +91,8 @@
     const confirmationDeadlineMs = Number(options.confirmationDeadlineMs ?? 5000);
     const minimumAvailableTargets = Number(options.minimumAvailableTargets ?? 1);
     const maxConfirmedPicks = Number(options.maxConfirmedPicks ?? Number.MAX_SAFE_INTEGER);
+    const preClickGuard = typeof options.preClickGuard === "function" ? options.preClickGuard : () => true;
+    const minimumClockSeconds = Number(options.minimumClockSeconds ?? 2);
     if (
       pollMs < 25 ||
       selectionDeadlineMs <= 0 ||
@@ -100,7 +100,8 @@
       !Number.isInteger(minimumAvailableTargets) ||
       minimumAvailableTargets <= 0 ||
       !Number.isInteger(maxConfirmedPicks) ||
-      maxConfirmedPicks <= 0
+      maxConfirmedPicks <= 0 ||
+      !Number.isFinite(minimumClockSeconds) || minimumClockSeconds < 1
     ) {
       throw new Error("invalid timing configuration");
     }
@@ -174,9 +175,12 @@
       if (readQueueState(documentRef) !== "EMPTY") throw new Error("yahoo_queue_not_empty_or_unknown");
       const activeBlockers = blockers(documentRef, environment);
       if (activeBlockers.length) throw new Error(`blocking_ui:${activeBlockers.join("|")}`);
-      const currentTurn = readOwnedTurn(documentRef);
-      if (!currentTurn || currentTurn.label !== turn.label) throw new Error("owned_turn_changed");
-      const rosterNow = parseRosterCount(documentRef.body?.innerText);
+      const turnSignal = readOwnedTurnState(documentRef);
+      if (turnSignal.state !== "OWNED" || turnSignal.turn?.label !== turn.label) throw new Error("owned_turn_changed");
+      const clock = readDraftClock(documentRef);
+      if (!clock || clock.seconds < minimumClockSeconds) throw new Error("draft_clock_margin_exhausted");
+      if (preClickGuard({ stage:"before_click", turn, clock }) !== true) throw new Error("runner_lease_not_current");
+      const rosterNow = readRosterCount(documentRef);
       if (!rosterNow || rosterNow.filled !== rosterBefore.filled || rosterNow.total !== rosterBefore.total) {
         throw new Error("roster_changed_before_click");
       }
@@ -184,14 +188,12 @@
 
     async function handleOwnedTurn(turn) {
       const detectedAt = Date.now();
-      const rosterBefore = parseRosterCount(documentRef.body?.innerText);
+      const rosterBefore = readRosterCount(documentRef);
       if (!rosterBefore) throw new Error("roster_count_missing");
       const selections = [];
 
       assertSafeTurn(turn, rosterBefore);
-      const players = [...documentRef.querySelectorAll("tr")]
-        .map(readPlayerRow)
-        .filter(Boolean);
+      const players = readAvailablePlayerRows(documentRef, environment);
       const playersById = new Map();
       const playersByIdentity = new Map();
       for (const player of players) {
@@ -209,7 +211,7 @@
           : playersByIdentity.get(key) ?? [];
         if (matches.length > 1) throw new Error(`ambiguous_target:${key}`);
         if (matches.length === 0) continue;
-        const draftButtons = findDraftButtons(matches[0].row);
+        const draftButtons = findDraftButtons(matches[0].row, environment);
         if (draftButtons.length > 1) throw new Error("ambiguous_draft_button");
         if (draftButtons.length === 0) continue;
         selections.push({ target, key, player: matches[0], draftButton: draftButtons[0] });
@@ -250,7 +252,7 @@
         if (readQueueState(documentRef) !== "EMPTY") throw new Error("yahoo_queue_changed_after_click");
         const activeBlockers = blockers(documentRef, environment);
         if (activeBlockers.length) throw new Error(`blocking_ui_after_click:${activeBlockers.join("|")}`);
-        const rosterAfter = parseRosterCount(documentRef.body?.innerText);
+        const rosterAfter = readRosterCount(documentRef);
         if (rosterAfter && rosterAfter.filled !== rosterBefore.filled) {
           if (rosterAfter.filled !== rosterBefore.filled + 1 || rosterAfter.total !== rosterBefore.total) {
             throw new Error("unexpected_roster_transition");
@@ -262,8 +264,8 @@
           if (!rosterIdentity.yahooIds.includes(selection.player.yahooId)) {
             throw new Error(`confirmed_player_identity_mismatch:expected_${selection.player.yahooId}:observed_${rosterIdentity.yahooIds.join(",")}`);
           }
-          const turnNow = readOwnedTurn(documentRef);
-          if (turnNow?.label === turn.label) continue;
+          const turnNow = readOwnedTurnState(documentRef);
+          if (turnNow.state === "OWNED" && turnNow.turn?.label === turn.label) continue;
           usedTargets.add(selection.key);
           confirmedPicks += 1;
           lastTurn = turn.label;
@@ -301,7 +303,9 @@
         if (readQueueState(documentRef) !== "EMPTY") return fail("yahoo_queue_not_empty_or_unknown");
         const activeBlockers = blockers(documentRef, environment);
         if (activeBlockers.length) return fail("blocking_ui", { blockers: activeBlockers });
-        const turn = readOwnedTurn(documentRef);
+        const turnSignal = readOwnedTurnState(documentRef);
+        if (turnSignal.state === "INCONSISTENT") return fail("owned_turn_signal_inconsistent", { turnSignal });
+        const turn = turnSignal.state === "OWNED" ? turnSignal.turn : null;
         if (!turn || turn.label === lastTurn) return;
         busy = true;
         await handleOwnedTurn(turn);
@@ -326,7 +330,7 @@
       if (queueState !== "EMPTY") throw new Error("Yahoo queue must be visibly empty at start");
       const activeBlockers = blockers(documentRef, environment);
       if (activeBlockers.length) throw new Error(`blocking UI at start: ${activeBlockers.join("|")}`);
-      const roster = parseRosterCount(documentRef.body?.innerText);
+      const roster = readRosterCount(documentRef);
       if (expectedRosterTotal != null && (!roster || roster.total !== expectedRosterTotal)) {
         throw new Error("roster total does not match the approved preflight");
       }
@@ -342,6 +346,7 @@
         failureAction,
         minimumAvailableTargets,
         maxConfirmedPicks,
+        minimumClockSeconds,
         autodraftState,
         queueState,
       });
@@ -377,6 +382,7 @@
     runtime: {
       parseRoom,
       parseRosterCount,
+      readRosterCount,
       readOwnedTurn,
       readOwnedTurnState,
       readAutodraftState,
@@ -384,12 +390,14 @@
       readQueueState,
       readDraftClock,
       readPlayerRow,
+      readAvailablePlayerRows,
       readTeamRosterPlayerIds,
     },
     _test: {
       normalize,
       parseRoom,
       parseRosterCount,
+      readRosterCount,
       readOwnedTurn,
       readOwnedTurnState,
       readAutodraftState,
@@ -397,6 +405,7 @@
       readQueueState,
       readDraftClock,
       readPlayerRow,
+      readAvailablePlayerRows,
       readTeamRosterPlayerIds,
       matchesTarget,
       findTargetRows,

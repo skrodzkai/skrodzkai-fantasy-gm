@@ -15,6 +15,7 @@ const helpers = context.SKRODZKaiYahooRealShadow._test;
 function healthyBoard(now = Date.now()) {
   return {
     generatedAt:new Date(now - 100).toISOString(),
+    marketAdpReceipt:{ observedAt:new Date(now - 100).toISOString(), sourceAsOf:new Date(now - 100).toISOString(), rows:218 },
     injuryCoverage:{ complete:true, checkedPlayers:1, expectedPlayers:1 },
     byeCoverage:{ complete:true, playersWithBye:1, playersTotal:1 },
     players:[],
@@ -75,7 +76,7 @@ test("draft-client snapshot is read-only and uses a fresh exact settings receipt
 
 test("REAL SHADOW displays healthy runtime identity and locks when attestation is unavailable", () => {
   const document = documentFixture(settingsBody);
-  const attestation = { ok:true, version:"0.15.0", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1_000 };
+  const attestation = { ok:true, version:"0.16.0", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1_000 };
   const healthy = helpers.buildSnapshot({ documentRef:document, locationRef:{ pathname:"/f1/420010/settings" }, settings:null, boardData:healthyBoard(1_000), attestation, now:1_001 });
   assert.equal(healthy.label, "REAL SHADOW · READ ONLY");
   assert.equal(healthy.attestation.digest, "a".repeat(64));

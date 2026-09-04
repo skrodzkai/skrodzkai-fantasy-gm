@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SKRODZKai Yahoo Mock Draft Control",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "SKRODZKai command center for MOCK/TEST execution and isolated read-only REAL SHADOW observation.",
   "background": {
     "service_worker": "extension/command-center-background.js"

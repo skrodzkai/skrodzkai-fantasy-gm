@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 
 import { buildDraftWatchlist, compileInjuryBoard } from "./injury-monitor.mjs";
-import { buildPlayerBoard, IDP_SCORING, OFFENSE_SCORING } from "./player-intelligence.mjs";
+import { buildPlayerBoard, IDP_SCORING, KICKER_SCORING, OFFENSE_SCORING } from "./player-intelligence.mjs";
 import { buildWeeklyProjectionProfile, expectedGamesFromInjury } from "./weekly-roster-utility.mjs";
 import { FREE_SOURCE_REGISTRY, validateSourceSnapshot } from "./free-source-registry.mjs";
 
@@ -24,7 +24,12 @@ export const LEAGUE_STARTER_SLOTS = Object.freeze([
 ]);
 
 export const SCORING_SCHEMA_HASH = createHash("sha256")
-  .update(JSON.stringify({ offense: OFFENSE_SCORING, idp: IDP_SCORING }))
+  .update(JSON.stringify({
+    offense:OFFENSE_SCORING,
+    idp:IDP_SCORING,
+    kicker:KICKER_SCORING,
+    teamDefense:{ scoringStatus:"WEEKLY_BUCKETS_UNRECONSTRUCTED", automaticRankingBasis:"YAHOO_PRESEASON_RANK" },
+  }))
   .digest("hex");
 
 const YAHOO_STATUS = Object.freeze({
@@ -396,6 +401,8 @@ export function assembleV5Board({
     const specialistPosition = player.eligible.some((position) => ["K", "DEF", "DL", "LB", "DB", "CB", "S", "D"].includes(position));
     const yahooOnlyLateSpecialist = !offensePosition && player.eligible.some((position) => ["K", "DEF"].includes(position)) && player.sourceFamilies.includes("yahoo") && player.scorableSourceFamilyCount === 1;
     const executable = projectionUsable && injury.executable && (player.executable || yahooOnlyLateSpecialist);
+    const yahooRankRequired = player.eligible.some((position) => ["K", "DEF"].includes(position));
+    const yahooRankVerified = !yahooRankRequired || hasFiniteProjection(player.yahooPreseasonRank);
     const manualEligible = projectionUsable && manualHealthEligible;
     const validationStatus = dualRole
       ? "DUAL_ROLE_SCORING_UNVERIFIED"
@@ -421,7 +428,7 @@ export function assembleV5Board({
       weeklyUncertaintyStatus: weeklyProfile?.uncertaintyStatus ?? "WEEKLY_PROFILE_WITHHELD",
       executable,
       blockReason: executable ? null : [player.blockReason, injury.blockReason].filter(Boolean).join("; "),
-      automaticEligible: executable && !dualRole,
+      automaticEligible: executable && !dualRole && yahooRankVerified,
       manualEligible,
       validationStatus,
       draftPhase: "UNIFIED",

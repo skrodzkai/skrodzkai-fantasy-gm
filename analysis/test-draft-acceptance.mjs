@@ -11,7 +11,7 @@ const ROSTER_VALIDATOR = globalThis.SKRODZKaiYahooMockRunner._test.validateCompl
 const TEST_OVERALL_PICK = globalThis.SKRODZKaiYahooMockRunner._test.overallPick;
 const TEST_SAME_SLOTS = globalThis.SKRODZKaiYahooMockRunner._test.sameSlots;
 const TEST_OBSERVED_ROSTER_VALIDATOR = globalThis.SKRODZKaiYahooMockRunner._test.validateObservedTestRoster;
-const EXTENSION_VERSION = "0.15.0";
+const EXTENSION_VERSION = "0.16.0";
 const PANEL_BUDGET_MS = 250;
 const TURN_TO_CLICK_BUDGET_MS = 2000;
 
@@ -57,11 +57,11 @@ function sameRuntimeAttestation(left, right) {
     left.bootId === right.bootId && Number(left.bootedAt) === Number(right.bootedAt);
 }
 
-function validClock(value, maximumSeconds = 300) {
+function validClock(value, maximumSeconds = 300, minimumSeconds = 1) {
   const match = String(value?.label ?? "").match(/^(\d{1,2}):(\d{2})$/);
   const seconds = Number(value?.seconds);
   return Boolean(match) && Number(match[2]) < 60 && Number.isInteger(seconds) &&
-    seconds === Number(match[1]) * 60 + Number(match[2]) && seconds >= 0 && seconds <= maximumSeconds;
+    seconds === Number(match[1]) * 60 + Number(match[2]) && seconds >= minimumSeconds && seconds <= maximumSeconds;
 }
 
 function countsByPosition(picks) {
@@ -286,7 +286,7 @@ function evaluateDraftExport(payload, options = {}) {
       errors.push(`turn_${turn || "unknown"}_panel_ready_budget_missed`);
     }
     if (Number(entry.panelBudgetMs) !== PANEL_BUDGET_MS) errors.push(`turn_${turn || "unknown"}_panel_budget_contract_failed`);
-    if (!validClock(entry.clockAtDecision, publicMock ? 300 : 60)) errors.push(`turn_${turn || "unknown"}_clock_evidence_missing_or_invalid`);
+    if (!validClock(entry.clockAtDecision, publicMock ? 300 : 60, 5)) errors.push(`turn_${turn || "unknown"}_clock_evidence_missing_or_invalid`);
   }
   if (pickReceipts.length !== config.rounds) errors.push(`exactly_${config.rounds}_runner_pick_receipts_required`);
   if (decisionsByTurn.size !== config.rounds) errors.push(`exactly_${config.rounds}_runner_decisions_required`);
@@ -312,7 +312,7 @@ function evaluateDraftExport(payload, options = {}) {
       errors.push(`round_${round}_turn_to_click_budget_missed`);
     }
     if (pick.turnToClickBudgetMs !== TURN_TO_CLICK_BUDGET_MS) errors.push(`round_${round}_turn_to_click_budget_contract_failed`);
-    if (!validClock(pick.clockAtDecision, publicMock ? 300 : 60)) errors.push(`round_${round}_clock_evidence_missing_or_invalid`);
+    if (!validClock(pick.clockAtDecision, publicMock ? 300 : 60, 5)) errors.push(`round_${round}_clock_evidence_missing_or_invalid`);
     if (seatFitsObservedField) {
       const expectedTurn = `R${round}P${TEST_OVERALL_PICK(round, Number(payload?.seat), observedTeamCount)}`;
       if (pick.turn !== expectedTurn) errors.push(`round_${round}_snake_turn_mismatch`);
@@ -432,7 +432,7 @@ function evaluateDraftExport(payload, options = {}) {
     }
     if (click.autodraftState !== "INACTIVE") errors.push(`round_${index + 1}_controller_autodraft_not_verified_off`);
     if (click.queueState !== "EMPTY") errors.push(`round_${index + 1}_controller_queue_not_verified_empty`);
-    if (!validClock(click.clockAtClick, publicMock ? 300 : 60)) errors.push(`round_${index + 1}_controller_clock_evidence_missing_or_invalid`);
+    if (!validClock(click.clockAtClick, publicMock ? 300 : 60, 2)) errors.push(`round_${index + 1}_controller_clock_evidence_missing_or_invalid`);
   }
 
   if (!publicMock) {
