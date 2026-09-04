@@ -7,14 +7,6 @@
   const OFFENSE = ["QB", "RB", "WR", "TE"];
   const IDP_POSITIONS = Object.freeze(["D", "LB", "CB", "S"]);
   const TEST_SPECIALISTS = ["K", "DEF", "D", "LB", "CB", "S"];
-  const FILTER_LABELS = Object.freeze({
-    K: "Kickers",
-    DEF: "Team Defenses",
-    D: "Defensive Players",
-    LB: "Linebackers",
-    CB: "Defensive Backs",
-    S: "Defensive Backs",
-  });
   const DECISION_RECOMPUTE_BUDGET_MS = 1000;
   const PANEL_BUDGET_MS = 1200;
   const TURN_TO_CLICK_BUDGET_MS = 2000;
@@ -195,7 +187,9 @@
   }
 
   function requiredTestFilterLabels() {
-    return ["All Positions", ...new Set(TEST_SPECIALISTS.map((position) => FILTER_LABELS[position]))];
+    // League Two exposes one generic D filter; exact row eligibility still
+    // separates D/LB/CB/S in the decision ladder, which reads All Positions.
+    return ["All Positions", "Kickers", "Team Defenses", "Defensive Players"];
   }
 
   function boardKey(player) {

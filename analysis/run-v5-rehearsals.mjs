@@ -419,7 +419,7 @@ function createReplayRunner(runtime, seat, selectionHoldMs) {
     replacementBySlot: runtime.replacementBySlot,
     survivalCalibration: runtime.survivalCalibration,
     board: runtime.board,
-    runtimeAttestation: { ok:true, version:"0.16.2", digest:"a".repeat(64), bootId:"replay-boot-1234", bootedAt:1 },
+    runtimeAttestation: { ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"replay-boot-1234", bootedAt:1 },
     assertRunnerLease: () => true,
   }, environment);
   return { runner, poolSize };

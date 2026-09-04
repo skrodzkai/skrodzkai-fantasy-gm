@@ -226,11 +226,47 @@ test("binds League Two team 3 while keeping its live field size and snake slot s
   );
 });
 
-test("requires the draft-home arm token before TEST draftclient execution", () => {
-  assert.deepEqual([...helpers.requiredTestFilterLabels()], ["All Positions", "Kickers", "Team Defenses", "Defensive Players", "Linebackers", "Defensive Backs"]);
-  assert.equal(source.includes("test_armed_from_draftclient"), false);
-  assert.equal(source.includes("parseTestDraftClient"), false);
-  assert.match(source, /verified_test_draft_home_arm_required/);
+test("qualifies the actual TEST prestart snake strip, not Yahoo team number as draft slot", () => {
+  const first = [9,6,5,1,7,10,12,3,2,8,11,4].map(String);
+  const ids = Array.from({ length:19 }, (_, round) => round % 2 ? [...first].reverse() : first).flat();
+  const teams = ids.map((id) => ({ getAttribute:() => id, textContent:id === "3" ? "You" : `Team ${id}` }));
+  const filters = [{ options:["All Positions", "Kickers", "Team Defenses", "Defensive Players"].map((label) => ({ textContent:label })) }];
+  const buttons = [{ textContent:"Autodraft", querySelector:() => null }];
+  const document = { title:"You pick 8th | Live NFL Draft | Yahoo Fantasy Sports",
+    body:{ innerText:"League Two\nDraft Starting Soon\nYOUR TEAM (0/19)\nYour queue is empty." },
+    querySelectorAll:(selector) => selector === '.ys-team[data-id]' ? teams : selector === "select" ? filters : selector === "button" ? buttons : [] };
+  // Build the exact existing settings receipt, retaining its validation fields.
+  const settingsDocument = { body:{ innerText:"League Name:\tLeague Two\nDraft Type:\tLive Standard Draft\nMax Teams:\t12\nLive Draft Pick Time:\t1 Minute\nPassing Touchdowns\t4\nReceptions Yahoo Default\t1\t0.5\nRoster Positions:\tQB, WR, WR, WR, RB, RB, TE, W/R/T, W/R/T, K, DEF, D, D, BN, BN, BN, BN, BN, BN, IR, IR, IR" } };
+  const receipt = helpers.makeTestSettingsReceipt(helpers.parseTestSettings(settingsDocument, { pathname:"/f1/542830/settings" }), 1_000);
+  const location = { pathname:"/draftclient/f1/542830/3" };
+  const parse = (doc = document, loc = location, r = receipt) => helpers.parseTestDraftClient(doc, loc, r, 1_001);
+  assert.deepEqual([...helpers.requiredTestFilterLabels()], ["All Positions", "Kickers", "Team Defenses", "Defensive Players"]);
+  assert.equal(parse().ready, true);
+  assert.equal(parse().seat, 8);
+  assert.equal(parse().urlSeat, 3);
+  assert.equal(parse().teamCount, 12);
+  assert.equal(helpers.makeTestPreflight(parse(), 1_001, healthyBoard()).seat, 8);
+  assert.equal(parse(document, { pathname:"/draftclient/f1/420010/3" }).ready, false);
+  assert.equal(parse(document, { pathname:"/draftclient/f1/542830/8" }).ready, false);
+  assert.equal(parse(document, location, null).ready, false);
+  assert.equal(parse(document, location, { ...receipt, expiresAt:1_000 }).ready, false);
+  assert.equal(parse({ ...document, title:document.title.replace("8th", "3rd") }).ready, false);
+  assert.equal(parse({ ...document, body:{ innerText:document.body.innerText.replace("0/19", "1/19") } }).ready, false);
+  assert.equal(parse({ ...document, body:{ innerText:document.body.innerText.replace("Draft Starting Soon", "YOUR TURN • ROUND 1, PICK 8") } }).ready, false);
+  assert.equal(parse({ ...document, body:{ innerText:document.body.innerText.replace("Your queue is empty.", "Queue has one player") } }).ready, false);
+  buttons[0].querySelector = () => ({});
+  assert.equal(parse().ready, false);
+  buttons[0].querySelector = () => null;
+  buttons.push(buttons[0]);
+  assert.equal(parse().ready, false);
+  buttons.pop();
+  filters[0].options.pop();
+  assert.equal(parse().ready, false);
+  filters[0].options.push({ textContent:"Defensive Players" });
+  teams[12] = teams[13];
+  assert.equal(parse().ready, false);
+  teams.pop();
+  assert.equal(parse().ready, false);
 });
 
 test("attaches current Yahoo defense IDs only to exact ranked teams", () => {
@@ -273,7 +309,7 @@ test("exports runner and controller receipts using distinct draft-slot and Yahoo
     urlSeat: 12,
     storage: { getItem: (key) => values.get(key) ?? null },
     runner: { getStatus: () => ({ state: "completed", picks: Array(15).fill({}) }) },
-    runtimeAttestation:{ ok:true, version:"0.16.2", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
+    runtimeAttestation:{ ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
     operatorAttestation: helpers.makeOperatorAttestation("NONE", "2026-08-23T21:00:00.000Z"),
   });
   assert.deepEqual([...payload.extensionReceipts.map((entry) => entry.kind)], ["keep"]);
@@ -288,7 +324,7 @@ test("exports runner and controller receipts using distinct draft-slot and Yahoo
 test("manifest has only the two public-mock surfaces plus the exact verified test league and no broad permissions", async () => {
   const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "0.16.2");
+  assert.equal(manifest.version, "0.16.3");
   for (const path of ["./yahoo-mock-extension.js", "./yahoo-real-shadow.js", "../analysis/test-draft-acceptance.mjs"]) {
     const versionedSource = await readFile(new URL(path, import.meta.url), "utf8");
     const version = versionedSource.match(/const (?:EXTENSION_)?VERSION = "([^"]+)";/)?.[1];
@@ -428,7 +464,7 @@ test("background exposes session storage to isolated content scripts", () => {
   const session = { ...memorySession(), setAccessLevel(options) { access.push(options); return Promise.resolve(); } };
   const chromeApi = {
     storage:{ session },
-    runtime:{ getManifest:() => ({ version:"0.16.2" }), getURL:(value) => value, onMessage:{ addListener() {} } },
+    runtime:{ getManifest:() => ({ version:"0.16.3" }), getURL:(value) => value, onMessage:{ addListener() {} } },
     windows:{ onRemoved:{ addListener() {} }, update:async () => {}, create:async () => ({ id:1 }) },
     tabs:{ onRemoved:{ addListener() {} }, sendMessage:async () => ({ ok:true }) },
   };
@@ -516,7 +552,7 @@ test("bridge locks every action when Chrome invalidates the extension context", 
 });
 
 test("version handshake requires the current installed background version", async () => {
-  assert.equal((await helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.16.2", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 }) } } })).version, "0.16.2");
+  assert.equal((await helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 }) } } })).version, "0.16.3");
   await assert.rejects(
     helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.7.5" }) } } }),
     /extension_version_mismatch/,
@@ -525,8 +561,8 @@ test("version handshake requires the current installed background version", asyn
     helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage() { throw new Error("invalidated"); } } } }),
     /extension_context_invalidated/,
   );
-  assert.equal(backgroundHelpers.extensionVersion({ runtime:{ getManifest:() => ({ version:"0.16.2" }) } }), "0.16.2");
-  const attestation = { ok:true, version:"0.16.2", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 };
+  assert.equal(backgroundHelpers.extensionVersion({ runtime:{ getManifest:() => ({ version:"0.16.3" }) } }), "0.16.3");
+  const attestation = { ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 };
   assert.equal(helpers.sameRuntimeAttestation(attestation, { ...attestation }), true);
   assert.equal(helpers.sameRuntimeAttestation(attestation, { ...attestation, bootId:"boot-87654321" }), false);
   assert.doesNotMatch(backgroundSource, /identify_arm_surface|tabs\.query/);
@@ -553,12 +589,12 @@ test("runtime attestation hashes the complete manifest-derived runtime set and s
   );
   assert.match(digest, /^[a-f0-9]{64}$/);
   const sourceAttestation = await sourceRuntimeAttestation(fileURLToPath(new URL("..", import.meta.url)));
-  assert.equal(sourceAttestation.version, "0.16.2");
+  assert.equal(sourceAttestation.version, "0.16.3");
   assert.match(sourceAttestation.digest, /^[a-f0-9]{64}$/);
   assert.deepEqual(sourceAttestation.files, [...backgroundHelpers.RUNTIME_FILES]);
 
   const session = memorySession();
-  const chromeApi = { runtime:{ getManifest:() => ({ version:"0.16.2" }) }, storage:{ session } };
+  const chromeApi = { runtime:{ getManifest:() => ({ version:"0.16.3" }) }, storage:{ session } };
   let digestCalls = 0;
   const first = await backgroundHelpers.createRuntimeAttestor(chromeApi, {
     clock:() => 100,
@@ -593,7 +629,7 @@ test("background reload gate permits only an idle TEST/MOCK sender and enforces 
 });
 
 test("reload marker requires a new extension-session boot identity and remains fail closed", () => {
-  const before = { ok:true, version:"0.16.2", digest:"a".repeat(64), bootId:"boot-before", bootedAt:100 };
+  const before = { ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"boot-before", bootedAt:100 };
   const marker = helpers.makeReloadMarker(before, 1_000);
   assert.equal(helpers.evaluateReloadMarker(marker, before, 1_001).status, "failed");
   const after = { ...before, bootId:"boot-after", bootedAt:200 };
@@ -608,7 +644,7 @@ test("reload marker requires a new extension-session boot identity and remains f
 });
 
 test("Reload & Verify locks Yahoo controls, writes a marker, asks the background, and refreshes the same tab", async () => {
-  const attestation = { ok:true, version:"0.16.2", digest:"a".repeat(64), bootId:"boot-before", bootedAt:100 };
+  const attestation = { ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"boot-before", bootedAt:100 };
   const storage = memoryLocalStorage();
   const messages = [];
   let handler = null;

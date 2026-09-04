@@ -76,7 +76,7 @@ test("draft-client snapshot is read-only and uses a fresh exact settings receipt
 
 test("REAL SHADOW displays healthy runtime identity and locks when attestation is unavailable", () => {
   const document = documentFixture(settingsBody);
-  const attestation = { ok:true, version:"0.16.2", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1_000 };
+  const attestation = { ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1_000 };
   const healthy = helpers.buildSnapshot({ documentRef:document, locationRef:{ pathname:"/f1/420010/settings" }, settings:null, boardData:healthyBoard(1_000), attestation, now:1_001 });
   assert.equal(healthy.label, "REAL SHADOW · READ ONLY");
   assert.equal(healthy.attestation.digest, "a".repeat(64));
