@@ -146,12 +146,14 @@ export function evaluateSurvivalCalibration(rows, options = {}) {
   const interval = clusteredImprovementInterval(events, Number(options.bootstrapSamples ?? 3000));
   const meanImprovement = roomResidualBaseline.brier - calibrated.brier;
   const positionLayerEnabled = meanImprovement > 0 && interval[0] != null && interval[0] > 0;
+  const publicAdpSurvivalBenchmark = false;
+  const enabled = positionLayerEnabled && publicAdpSurvivalBenchmark;
   return {
     calibration: {
-      enabled: true,
-      reason: positionLayerEnabled
-        ? "room_survival_enabled_position_layer_cleared_held_out_gate"
-        : "room_survival_enabled_position_layer_failed_held_out_gate",
+      enabled,
+      reason: enabled
+        ? "room_survival_enabled_all_benchmarks_cleared"
+        : "room_survival_disabled_without_positive_public_adp_benchmark",
       positionLayerEnabled,
       holdoutSeason,
       trainingRows: training.length,
@@ -166,7 +168,7 @@ export function evaluateSurvivalCalibration(rows, options = {}) {
       comparisonCoverage: {
         publicMarketAdpInput: true,
         roomResidualBaseline: true,
-        publicAdpSurvivalBenchmark: false,
+        publicAdpSurvivalBenchmark,
         yahooPreDraftRank: holdout.some((row) => row.yahooRank != null),
         staticBpa: holdout.some((row) => row.staticBpaRank != null),
         unavailableReason: "a standalone public-ADP survival benchmark and historical point-in-time Yahoo/static-BPA ranks were not captured",

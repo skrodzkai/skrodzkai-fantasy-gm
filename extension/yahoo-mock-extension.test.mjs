@@ -61,6 +61,7 @@ function waitingFixture({ teams = 12, starters = "QB, WR, WR, RB, RB, TE, W/R/T,
 function healthyBoard(now = 1_000) {
   return {
     generatedAt: new Date(now - 100).toISOString(),
+    marketAdpReceipt: { observedAt:new Date(now - 100).toISOString(), sourceAsOf:new Date(now - 100).toISOString(), rows:218 },
     injuryCoverage: { complete:true, checkedPlayers:872, expectedPlayers:872 },
     byeCoverage: { complete:true, playersWithBye:872, playersTotal:872 },
     players: Array.from({ length:6 }, (_, index) => ({ yahooId:String(index + 1) })),
@@ -272,7 +273,7 @@ test("exports runner and controller receipts using distinct draft-slot and Yahoo
     urlSeat: 12,
     storage: { getItem: (key) => values.get(key) ?? null },
     runner: { getStatus: () => ({ state: "completed", picks: Array(15).fill({}) }) },
-    runtimeAttestation:{ ok:true, version:"0.15.0", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
+    runtimeAttestation:{ ok:true, version:"0.16.0", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
     operatorAttestation: helpers.makeOperatorAttestation("NONE", "2026-08-23T21:00:00.000Z"),
   });
   assert.deepEqual([...payload.extensionReceipts.map((entry) => entry.kind)], ["keep"]);
@@ -287,7 +288,7 @@ test("exports runner and controller receipts using distinct draft-slot and Yahoo
 test("manifest has only the two public-mock surfaces plus the exact verified test league and no broad permissions", async () => {
   const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "0.15.0");
+  assert.equal(manifest.version, "0.16.0");
   assert.deepEqual(manifest.permissions, ["storage"]);
   assert.equal(manifest.host_permissions, undefined);
   assert.deepEqual(manifest.background, { service_worker: "extension/command-center-background.js" });
@@ -348,6 +349,16 @@ test("popup command center uses the canonical blue SKRODZKai app language and a 
   assert.match(backgroundSource, /tabs\.sendMessage/);
   assert.match(source, /open_command_center/);
   assert.match(source, /skrodzkai-globe-mark\.png/);
+  assert.match(popupSource, /ON_CLOCK/);
+  assert.match(popupSource, /NEXT_PICK/);
+  assert.match(popupSource, /UNKNOWN \/ BLOCKED/);
+  assert.match(source, /on_clock_command_intent_mismatch/);
+  assert.match(source, /next_pick_command_intent_mismatch/);
+  assert.match(source, /manual_command_rejected/);
+});
+
+test("synthetic Travis Hunter identities cannot be sent to Yahoo", () => {
+  assert.throws(() => helpers.validateExactYahooTargets([{ yahooId:"99001", name:"Travis Hunter", position:"WR", team:"JAX" }]), /synthetic identity/);
 });
 
 test("command-center relay binds kill and pin to the runner tab even when an arm page keeps publishing", async () => {
@@ -412,7 +423,7 @@ test("background exposes session storage to isolated content scripts", () => {
   const session = { ...memorySession(), setAccessLevel(options) { access.push(options); return Promise.resolve(); } };
   const chromeApi = {
     storage:{ session },
-    runtime:{ getManifest:() => ({ version:"0.15.0" }), getURL:(value) => value, onMessage:{ addListener() {} } },
+    runtime:{ getManifest:() => ({ version:"0.16.0" }), getURL:(value) => value, onMessage:{ addListener() {} } },
     windows:{ onRemoved:{ addListener() {} }, update:async () => {}, create:async () => ({ id:1 }) },
     tabs:{ onRemoved:{ addListener() {} }, sendMessage:async () => ({ ok:true }) },
   };
@@ -468,7 +479,7 @@ test("bridge locks every action when Chrome invalidates the extension context", 
 });
 
 test("version handshake requires the current installed background version", async () => {
-  assert.equal((await helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.15.0", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 }) } } })).version, "0.15.0");
+  assert.equal((await helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.16.0", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 }) } } })).version, "0.16.0");
   await assert.rejects(
     helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage:async () => ({ ok:true, version:"0.7.5" }) } } }),
     /extension_version_mismatch/,
@@ -477,8 +488,8 @@ test("version handshake requires the current installed background version", asyn
     helpers.requireCurrentExtensionVersion({ chrome:{ runtime:{ sendMessage() { throw new Error("invalidated"); } } } }),
     /extension_context_invalidated/,
   );
-  assert.equal(backgroundHelpers.extensionVersion({ runtime:{ getManifest:() => ({ version:"0.15.0" }) } }), "0.15.0");
-  const attestation = { ok:true, version:"0.15.0", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 };
+  assert.equal(backgroundHelpers.extensionVersion({ runtime:{ getManifest:() => ({ version:"0.16.0" }) } }), "0.16.0");
+  const attestation = { ok:true, version:"0.16.0", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 };
   assert.equal(helpers.sameRuntimeAttestation(attestation, { ...attestation }), true);
   assert.equal(helpers.sameRuntimeAttestation(attestation, { ...attestation, bootId:"boot-87654321" }), false);
   assert.doesNotMatch(backgroundSource, /identify_arm_surface|tabs\.query/);
@@ -505,12 +516,12 @@ test("runtime attestation hashes the complete manifest-derived runtime set and s
   );
   assert.match(digest, /^[a-f0-9]{64}$/);
   const sourceAttestation = await sourceRuntimeAttestation(fileURLToPath(new URL("..", import.meta.url)));
-  assert.equal(sourceAttestation.version, "0.15.0");
+  assert.equal(sourceAttestation.version, "0.16.0");
   assert.match(sourceAttestation.digest, /^[a-f0-9]{64}$/);
   assert.deepEqual(sourceAttestation.files, [...backgroundHelpers.RUNTIME_FILES]);
 
   const session = memorySession();
-  const chromeApi = { runtime:{ getManifest:() => ({ version:"0.15.0" }) }, storage:{ session } };
+  const chromeApi = { runtime:{ getManifest:() => ({ version:"0.16.0" }) }, storage:{ session } };
   let digestCalls = 0;
   const first = await backgroundHelpers.createRuntimeAttestor(chromeApi, {
     clock:() => 100,
@@ -545,7 +556,7 @@ test("background reload gate permits only an idle TEST/MOCK sender and enforces 
 });
 
 test("reload marker requires a new extension-session boot identity and remains fail closed", () => {
-  const before = { ok:true, version:"0.15.0", digest:"a".repeat(64), bootId:"boot-before", bootedAt:100 };
+  const before = { ok:true, version:"0.16.0", digest:"a".repeat(64), bootId:"boot-before", bootedAt:100 };
   const marker = helpers.makeReloadMarker(before, 1_000);
   assert.equal(helpers.evaluateReloadMarker(marker, before, 1_001).status, "failed");
   const after = { ...before, bootId:"boot-after", bootedAt:200 };
@@ -560,7 +571,7 @@ test("reload marker requires a new extension-session boot identity and remains f
 });
 
 test("Reload & Verify locks Yahoo controls, writes a marker, asks the background, and refreshes the same tab", async () => {
-  const attestation = { ok:true, version:"0.15.0", digest:"a".repeat(64), bootId:"boot-before", bootedAt:100 };
+  const attestation = { ok:true, version:"0.16.0", digest:"a".repeat(64), bootId:"boot-before", bootedAt:100 };
   const storage = memoryLocalStorage();
   const messages = [];
   let handler = null;

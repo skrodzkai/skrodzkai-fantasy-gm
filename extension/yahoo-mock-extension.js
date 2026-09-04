@@ -1,7 +1,7 @@
 (function installYahooMockExtension(root) {
   "use strict";
 
-  const VERSION = "0.15.0";
+  const VERSION = "0.16.0";
   const GLOBAL_KEY = "__skrodzkaiYahooMockExtensionV1";
   const PREFLIGHT_KEY = "skrodzkai-yahoo-mock-extension-preflight-v1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-extension-receipts-v1";
@@ -50,6 +50,7 @@
     return targets.map((target, index) => {
       const yahooId = String(target?.yahooId ?? "").trim();
       if (!/^\d+$/.test(yahooId)) throw new Error(`manual target ${index} requires an exact Yahoo ID`);
+      if (["99001", "99002"].includes(yahooId)) throw new Error(`manual target ${yahooId} is a synthetic identity and cannot be sent to Yahoo`);
       if (seen.has(yahooId)) throw new Error(`manual target ${yahooId} is duplicated`);
       seen.add(yahooId);
       return {
@@ -78,6 +79,12 @@
       .replace(/[^a-zA-Z0-9/]+/g, " ")
       .trim()
       .toUpperCase();
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+      "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;",
+    })[character]);
   }
 
   function recommendationHotkeyPlayer(state, event) {
@@ -494,8 +501,13 @@
 
   function enableExport(environment, rail, room, runner = null) {
     if (!room) return;
-    rail.controls.export.disabled = false;
+    const runnerState = runner?.getStatus?.().state;
+    rail.controls.export.disabled = ["created", "running"].includes(runnerState);
     rail.controls.export.onclick = async () => {
+      if (["created", "running"].includes(runner?.getStatus?.().state)) {
+        rail.addEvent?.("export rejected", "runner is active; export unlocks after a terminal receipt");
+        return;
+      }
       const runtimeAttestation = await verifyCurrentExtensionVersion(environment, rail);
       if (!runtimeAttestation) return;
       const attestation = makeOperatorAttestation(environment.prompt?.(
@@ -670,6 +682,14 @@
     };
     const controls = { arm: shadow.querySelector(".arm"), halt: shadow.querySelector(".halt"), export: shadow.querySelector(".export"), dock: shadow.querySelector(".dock-kill"), expand: shadow.querySelector(".expand"), reload:shadow.querySelector(".reload") };
     const ui = { mode:"MOCK", kind:"", label:"LOCKED", detail:"Waiting for a verified draft room.", context:{}, roster:[], recommendations:[], board:[], between:{}, warnings:[], staged:[], pinned:null, pinOutcome:null, pinText:"No pin staged. Five verified fallbacks remain active.", pinLabel:"BASELINE", ladderState:"BASELINE READY", latestText:"No confirmed selection yet.", events:[], latestPickId:"", attestation:null, onManualConfirm:null, onManualClear:null, onOpen:null, onReload:null, locked:false, observers:[] };
+    const commandIntent = () => {
+      const round = ui.context.ownedTurn === true && Number.isInteger(Number(ui.context.round))
+        ? Number(ui.context.round)
+        : ui.roster.filter((slot) => slot.player).length + 1;
+      return ui.context.ownedTurn === true
+        ? { mode:"ON_CLOCK", round, turnLabel:`R${round}P${Number(ui.context.pick)}` }
+        : { mode:"NEXT_PICK", round, turnLabel:`R${round}` };
+    };
     const redrawManual = () => {
       if (ui.locked) {
         data.manualList.innerHTML = `<div class="event">Use Reload & Verify to restore extension controls.</div>`;
@@ -680,14 +700,14 @@
       }
       const query = String(data.search.value ?? "").trim().toUpperCase();
       const matches = ui.board.filter((player) => `${player.name} ${player.position} ${player.team} ${player.yahooId}`.toUpperCase().includes(query)).slice(0, 10);
-      data.manualList.innerHTML = matches.map((player) => `<div class="manual-row"><button type="button" data-stage-id="${player.yahooId}">${player.name} <small>${player.position} · ${player.team} · Y!${player.yahooId}</small></button></div>`).join("") || `<div class="event">No verified Yahoo IDs match.</div>`;
+      data.manualList.innerHTML = matches.map((player) => `<div class="manual-row"><button type="button" data-stage-id="${escapeHtml(player.yahooId)}">${escapeHtml(player.name)} <small>${escapeHtml(player.position)} · ${escapeHtml(player.team)} · Y!${escapeHtml(player.yahooId)}</small></button></div>`).join("") || `<div class="event">No verified Yahoo IDs match.</div>`;
       for (const button of data.manualList.querySelectorAll("[data-stage-id]")) button.addEventListener("click", () => {
         const player = ui.board.find((candidate) => String(candidate.yahooId) === String(button.dataset.stageId));
         if (!player || ui.staged.some((candidate) => String(candidate.yahooId) === String(player.yahooId))) return;
         ui.staged.push({ yahooId:String(player.yahooId), name:String(player.name ?? ""), position:String(player.position ?? ""), team:String(player.team ?? "") });
         redrawManual();
       });
-      data.manualList.insertAdjacentHTML("afterbegin", ui.staged.map((player, index) => `<div class="manual-row"><button type="button" data-remove-stage="${player.yahooId}">${index + 1}. ${player.name || `Yahoo ${player.yahooId}`} <small>${player.position} · Y!${player.yahooId} · click to remove</small></button></div>`).join(""));
+      data.manualList.insertAdjacentHTML("afterbegin", ui.staged.map((player, index) => `<div class="manual-row"><button type="button" data-remove-stage="${escapeHtml(player.yahooId)}">${index + 1}. ${escapeHtml(player.name || `Yahoo ${player.yahooId}`)} <small>${escapeHtml(player.position)} · Y!${escapeHtml(player.yahooId)} · click to remove</small></button></div>`).join(""));
       for (const button of data.manualList.querySelectorAll("[data-remove-stage]")) button.addEventListener("click", () => { ui.staged = ui.staged.filter((player) => String(player.yahooId) !== String(button.dataset.removeStage)); redrawManual(); });
       data.confirm.disabled = ui.staged.length === 0;
       data.clearPin.disabled = !ui.pinned;
@@ -706,12 +726,12 @@
       const player = recommendationHotkeyPlayer(ui, event);
       if (player && typeof ui.onManualConfirm === "function") {
         event.preventDefault();
-        ui.onManualConfirm([player]);
+        ui.onManualConfirm([player], commandIntent());
       }
     });
     data.confirm.addEventListener("click", () => {
       if (typeof ui.onManualConfirm !== "function") return;
-      const result = ui.onManualConfirm(ui.staged.slice());
+      const result = ui.onManualConfirm(ui.staged.slice(), commandIntent());
       if (result !== false) { ui.staged = []; redrawManual(); }
     });
     data.clearPin.addEventListener("click", () => { if (typeof ui.onManualClear === "function" && ui.onManualClear() !== false) { ui.pinned = null; ui.pinOutcome = { status:"cleared", expectedRound:null, reason:"deterministic baseline active" }; redrawManual(); } });
@@ -744,26 +764,26 @@
         data.compact.textContent = `${ui.mode} · ${roomId} · S${context.seat ?? "—"} · ${context.round == null ? "—" : `R${context.round}P${context.pick ?? "—"}`}`;
       },
       setRoster(roster = [], latest = null) {
-        ui.roster = Array.isArray(roster) ? roster : []; data.roster.innerHTML = ui.roster.map((slot) => `<div class="slot ${slot.player ? "filled" : "open"}"><span>${slot.slot}</span><b>${slot.player?.name ?? "OPEN"}</b></div>`).join("") || `<div class="event">Roster readback unavailable.</div>`; data.rosterCount.textContent = `${ui.roster.filter((slot) => slot.player).length} / ${ui.roster.length || 15}`;
+        ui.roster = Array.isArray(roster) ? roster : []; data.roster.innerHTML = ui.roster.map((slot) => `<div class="slot ${slot.player ? "filled" : "open"}"><span>${escapeHtml(slot.slot)}</span><b>${escapeHtml(slot.player?.name ?? "OPEN")}</b></div>`).join("") || `<div class="event">Roster readback unavailable.</div>`; data.rosterCount.textContent = `${ui.roster.filter((slot) => slot.player).length} / ${ui.roster.length || 15}`;
         const counts = ui.roster.filter((slot) => slot.player).reduce((map, slot) => { const position = normalize(slot.player.position); map[position] = (map[position] ?? 0) + 1; return map; }, {}); data.composition.innerHTML = ["QB","RB","WR","TE","K","DEF","IDP"].map((position) => `<span class="pill">${position} <b>${position === "IDP" ? (counts.D ?? 0) + (counts.LB ?? 0) + (counts.CB ?? 0) + (counts.S ?? 0) : counts[position] ?? 0}</b></span>`).join("");
         ui.latestText = latest ? `${latest.name ?? `Y!${latest.yahooId}`} · ${latest.position ?? "—"} · ${latest.detectionToClickMs ?? "—"}ms` : "No confirmed selection yet."; data.latestPick.textContent = ui.latestText; const latestId = String(latest?.yahooId ?? ""); if (latest && latestId !== ui.latestPickId) { ui.latestPickId = latestId; api.addEvent("pick confirmed", `${latest.name ?? "Yahoo ID " + latest.yahooId} · ${latest.position ?? "—"}`); }
       },
       setRecommendations(recommendations = [], meta = {}) {
         if (Array.isArray(meta.fullBoard)) ui.board = meta.fullBoard; const rows = Array.isArray(recommendations) ? recommendations : []; ui.recommendations = rows;
-        data.board.innerHTML = rows.slice(0, 6).map((player, index) => `<button type="button" data-live-choice="${player.yahooId}" class="board-row ${index === 0 ? "primary" : ""} ${player.manual ? "pinned" : ""}"><span class="rank">${player.manual ? "PIN" : index < 3 ? `${index + 1}` : `F${index}`}</span><div><div class="player">${player.name ?? `Yahoo ${player.yahooId}`} <em>${player.position ?? "—"} · ${player.team ?? "—"}</em></div><div class="reason">${player.reason ?? "verified local ladder"}</div></div><div class="metrics">${player.edge ?? "—"}<br><span class="dim">${player.confidence ?? "—"} · ${player.freshness ?? "—"}</span></div></button>`).join("") || `<div class="event">Ladder resolves on our owned turn after Yahoo availability is validated.</div>`;
+        data.board.innerHTML = rows.slice(0, 6).map((player, index) => `<button type="button" data-live-choice="${escapeHtml(player.yahooId)}" class="board-row ${index === 0 ? "primary" : ""} ${player.manual ? "pinned" : ""}"><span class="rank">${player.manual ? "PIN" : index < 3 ? `${index + 1}` : `F${index}`}</span><div><div class="player">${escapeHtml(player.name ?? `Yahoo ${player.yahooId}`)} <em>${escapeHtml(player.position ?? "—")} · ${escapeHtml(player.team ?? "—")}</em></div><div class="reason">${escapeHtml(player.reason ?? "verified local ladder")}</div></div><div class="metrics">${escapeHtml(player.edge ?? "—")}<br><span class="dim">${escapeHtml(player.confidence ?? "—")} · ${escapeHtml(player.freshness ?? "—")}</span></div></button>`).join("") || `<div class="event">Ladder resolves on our owned turn after Yahoo availability is validated.</div>`;
         for (const button of data.board.querySelectorAll("[data-live-choice]")) button.addEventListener("click", () => {
           const player = rows.find((candidate) => String(candidate.yahooId) === String(button.dataset.liveChoice));
-          if (player && typeof ui.onManualConfirm === "function") ui.onManualConfirm([player]);
+          if (player && typeof ui.onManualConfirm === "function") ui.onManualConfirm([player], commandIntent());
         });
         const manual = rows[0]?.manual; ui.ladderState = meta.disagreement ? "MODEL DISAGREEMENT" : manual ? "MANUAL PIN APPLIED" : "BASELINE READY"; data.disagreement.textContent = ui.ladderState; data.disagreement.className = meta.disagreement ? "danger" : ""; data.dockTarget.textContent = rows[0] ? `${rows[0].name ?? `Y!${rows[0].yahooId}`} · ${rows[0].position ?? "—"}` : "Waiting for Yahoo availability"; redrawManual();
       },
       setBetweenTurns(info = {}) {
         ui.between = info;
         const atRisk = Array.isArray(info.atRisk) && info.atRisk.length ? info.atRisk.join(", ") : "Targets withheld until Yahoo availability is read.";
-        data.between.innerHTML = `<div class="window-grid"><div class="window-cell"><span>Current</span><b>${info.currentPick ?? "—"}</b></div><div class="window-cell"><span>Next ours</span><b>${info.nextPick ?? "—"}</b></div><div class="window-cell"><span>Between</span><b>${info.intervening ?? "—"}</b></div></div><div class="pressure"><b>At risk:</b> ${atRisk}</div><div class="manager-note">${info.managerNote ?? "PUBLIC MOCK · room behavior only; historical 2 Minute Drillers manager profiles are not applicable."}</div>`;
+        data.between.innerHTML = `<div class="window-grid"><div class="window-cell"><span>Current</span><b>${escapeHtml(info.currentPick ?? "—")}</b></div><div class="window-cell"><span>Next ours</span><b>${escapeHtml(info.nextPick ?? "—")}</b></div><div class="window-cell"><span>Between</span><b>${escapeHtml(info.intervening ?? "—")}</b></div></div><div class="pressure"><b>At risk:</b> ${escapeHtml(atRisk)}</div><div class="manager-note">${escapeHtml(info.managerNote ?? "PUBLIC MOCK · room behavior only; historical 2 Minute Drillers manager profiles are not applicable.")}</div>`;
       },
-      setWarnings(warnings = []) { const list = Array.isArray(warnings) ? warnings.filter(Boolean) : []; ui.warnings=list; data.warningCount.textContent = String(list.length); data.warnings.innerHTML = list.length ? list.map((warning) => `<div class="warning ${warning.severity === "danger" ? "danger" : ""}">⚠ ${warning.text ?? warning}</div>`).join("") : `<div class="warning">No active warnings.</div>`; },
-      addEvent(kind, detailText = "") { ui.events.unshift({ at:new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" }), kind, detail:detailText }); ui.events = ui.events.slice(0, 18); data.events.innerHTML = ui.events.map((event) => `<div class="event">${event.at} <b>${event.kind}</b>${event.detail ? ` · ${event.detail}` : ""}</div>`).join(""); },
+      setWarnings(warnings = []) { const list = Array.isArray(warnings) ? warnings.filter(Boolean) : []; ui.warnings=list; data.warningCount.textContent = String(list.length); data.warnings.innerHTML = list.length ? list.map((warning) => `<div class="warning ${warning.severity === "danger" ? "danger" : ""}">⚠ ${escapeHtml(warning.text ?? warning)}</div>`).join("") : `<div class="warning">No active warnings.</div>`; },
+      addEvent(kind, detailText = "") { ui.events.unshift({ at:new Date().toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", second:"2-digit" }), kind, detail:detailText }); ui.events = ui.events.slice(0, 18); data.events.innerHTML = ui.events.map((event) => `<div class="event">${escapeHtml(event.at)} <b>${escapeHtml(event.kind)}</b>${event.detail ? ` · ${escapeHtml(event.detail)}` : ""}</div>`).join(""); },
       setBoard(board = []) { ui.board = Array.isArray(board) ? board : []; redrawManual(); },
       setManualHandler(confirmHandler, clearHandler = null) { if (ui.locked) return; ui.onManualConfirm = confirmHandler; ui.onManualClear = clearHandler; },
       setPinned(stage = null) { ui.pinned = stage; if (stage) ui.pinOutcome = null; redrawManual(); },
@@ -797,7 +817,7 @@
           if (cleared !== false) { ui.pinned = null; ui.pinOutcome = { status:"cleared", expectedRound:null, reason:"deterministic baseline active" }; redrawManual(); }
           return cleared;
         }
-        if (name === "pin" && typeof ui.onManualConfirm === "function") return ui.onManualConfirm(Array.isArray(payload?.targets) ? payload.targets : []);
+        if (name === "pin" && typeof ui.onManualConfirm === "function") return ui.onManualConfirm(Array.isArray(payload?.targets) ? payload.targets : [], payload?.intent);
         return false;
       },
       getSnapshot() {
@@ -938,6 +958,7 @@
     let snapshotHash = "";
     let timer = null;
     let stopped = false;
+    let runnerLeaseAcceptedAt = 0;
     const stop = () => {
       if (stopped) return;
       stopped = true;
@@ -955,6 +976,7 @@
         const pending = runtime.sendMessage(message);
         void Promise.resolve(pending).then((response) => {
           if (message?.type === "state" && response?.ok === false) invalidate(new Error("runner_lease_conflict"));
+          if (message?.type === "state" && role === "runner" && response?.ok === true) runnerLeaseAcceptedAt = Date.now();
         }).catch(invalidate);
         return pending;
       } catch (error) {
@@ -974,19 +996,29 @@
       const snapshotChanged = nextSnapshotHash !== snapshotHash;
       if (boardChanged) boardHash = nextBoardHash;
       if (snapshotChanged) snapshotHash = nextSnapshotHash;
-      send({ type:"state", role, at:Date.now(), snapshot:snapshotChanged ? snapshot : undefined, board:role === "runner" && boardChanged ? board : undefined });
+      return send({ type:"state", role, at:Date.now(), snapshot:snapshotChanged ? snapshot : undefined, board:role === "runner" && boardChanged ? board : undefined });
     };
+    const claimRunner = async () => {
+      if (role !== "runner") return true;
+      const response = await publish();
+      if (response?.ok !== true) throw new Error("runner_lease_not_acquired");
+      runnerLeaseAcceptedAt = Date.now();
+      return true;
+    };
+    const hasFreshRunnerLease = () => role === "runner" && !stopped && Date.now() - runnerLeaseAcceptedAt <= 1000;
     rail.setOpenHandler(() => send({ type:"open_command_center" }));
     const onMessage = (message, _sender, sendResponse) => {
       if (message?.type !== "command") return;
-      const ok = rail.command(message.command, message.payload);
-      publish();
-      sendResponse({ ok:ok !== false });
+      void Promise.resolve(rail.command(message.command, message.payload)).then((ok) => {
+        publish();
+        sendResponse({ ok:ok !== false, status:ok !== false ? "APPLIED" : "REJECTED", error:ok === false ? "command rejected by page-local guard" : null });
+      }).catch((error) => sendResponse({ ok:false, status:"REJECTED", error:String(error?.message ?? error) }));
+      return true;
     };
     runtime.onMessage.addListener(onMessage);
     publish();
     if (!stopped) timer = environment.setInterval(publish, 250);
-    return { publish, stop };
+    return { publish, stop, claimRunner, hasFreshRunnerLease };
   }
 
   async function waitForEmptyDraft(documentRef, controllerApi, environment, expectedRosterTotal = 15, executionMode = "MOCK", deadlineMs = 15000) {
@@ -1333,7 +1365,7 @@
     }
   }
 
-  async function bootDraft(environment, rail) {
+  async function bootDraft(environment, rail, bridge) {
     const controllerApi = environment.SKRODZKaiYahooDraftController;
     const runnerApi = environment.SKRODZKaiYahooMockRunner;
     const boardData = environment.SKRODZKaiYahooMockBoard;
@@ -1402,6 +1434,7 @@
       replacementBySlot: boardData.replacementBySlot,
       survivalCalibration: boardData.survivalCalibration,
       runtimeAttestation,
+      assertRunnerLease: () => bridge?.hasFreshRunnerLease?.() === true,
       board,
       readManualOverride: () => readJson(environment.sessionStorage, MANUAL_STAGE_KEY, null),
       consumeManualOverride: (outcome) => {
@@ -1415,12 +1448,15 @@
       onAlert: ({ state, failure, reason }) => rail.render("bad", state, failure?.code ?? reason ?? "runner stopped"),
     }, environment);
     environment[GLOBAL_KEY] = { runner, room, token: armRecord, statusTimer:null };
-    rail.setManualHandler((targets) => {
+    rail.setManualHandler((targets, intent = null) => {
       try {
         const status = runner.getStatus();
         if (status.state !== "created" && status.state !== "running") throw new Error("manual pin requires an active runner");
         const chosen = Array.from(targets ?? [])[0];
         if (status.pendingDecision) {
+          const expectedTurnLabel = String(status.pendingDecision.turn);
+          const expectedRound = status.picks.length + 1;
+          if (intent?.mode !== "ON_CLOCK" || Number(intent?.round) !== expectedRound || String(intent?.turnLabel) !== expectedTurnLabel) throw new Error("on_clock_command_intent_mismatch");
           if (!chosen?.yahooId) throw new Error("on-clock choice requires one exact Yahoo player");
           const applied = runner.chooseOnClock(chosen.yahooId, "command_center");
           writeReceipt(environment.localStorage, { kind: applied ? "on_clock_choice_applied" : "on_clock_choice_rejected", roomId: room.roomId, seat: draftSeat, expectedRound: status.picks.length + 1, chosenYahooId: String(chosen.yahooId), injury:chosen.injury ?? null, baselineRetained: !applied });
@@ -1432,6 +1468,7 @@
           throw new Error("owned-turn decision window is not ready; baseline remains active");
         }
         const expectedRound = status.picks.length + 1;
+        if (intent?.mode !== "NEXT_PICK" || Number(intent?.round) !== expectedRound || String(intent?.turnLabel) !== `R${expectedRound}`) throw new Error("next_pick_command_intent_mismatch");
         const stage = stageManualTargets(environment.sessionStorage, targets, { ...receiptRoom, expectedRound });
         writeReceipt(environment.localStorage, { kind: "manual_pin_staged", roomId: room.roomId, seat: draftSeat, expectedRound, targetYahooIds: stage.targets.map((target) => target.yahooId) });
         rail.setPinned(stage);
@@ -1439,6 +1476,7 @@
         rail.render("ok", "NEXT PICK PINNED", `Round ${expectedRound} · conditional priority with five verified baseline fallbacks`);
         return true;
       } catch (error) {
+        writeReceipt(environment.localStorage, { kind:"manual_command_rejected", roomId:room.roomId, seat:draftSeat, intent:intent ?? null, failure:String(error?.message ?? error), baselineRetained:true });
         rail.addEvent("manual pin rejected", String(error?.message ?? error));
         rail.render("bad", "PIN REJECTED", String(error?.message ?? error));
         return false;
@@ -1506,6 +1544,7 @@
         rail.setPinned(null);
         rail.controls.halt.disabled = true;
         rail.controls.dock.disabled = true;
+        enableExport(environment, rail, receiptRoom, runner);
       }
     }, 100);
     environment[GLOBAL_KEY].statusTimer = statusTimer;
@@ -1515,7 +1554,7 @@
     if (!environment.document || !environment.location) return null;
     const rail = createRail(environment.document);
     installReloadAndVerify(environment, rail);
-    attachCommandCenterBridge(environment, rail);
+    const bridge = attachCommandCenterBridge(environment, rail);
     try {
       const markerRaw = environment.sessionStorage.getItem(RELOAD_MARKER_KEY);
       const marker = markerRaw == null ? null : readJson(environment.sessionStorage, RELOAD_MARKER_KEY, { invalid:true });
@@ -1538,7 +1577,9 @@
       } else if (environment.location.pathname === `/f1/${TEST_LEAGUE_ID}/${TEST_TEAM_ID}`) {
         bootTestTeamRoster(environment, rail);
       } else if (/^\/draftclient\/f1\/\d+\/\d+\/?$/.test(environment.location.pathname)) {
-        await bootDraft(environment, rail);
+        if (!bridge) throw new Error("runner_lease_bridge_missing");
+        await bridge.claimRunner();
+        await bootDraft(environment, rail, bridge);
       }
     } catch (error) {
       rail.render("bad", "FAILED CLOSED", String(error?.message ?? error));

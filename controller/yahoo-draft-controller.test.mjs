@@ -160,6 +160,17 @@ test("detects checked Autodraft rather than the unrelated refresh icon", () => {
   assert.equal(helpers.readDraftClock(documentFixture({ body:"00:37\n01:05" })), null);
 });
 
+test("excludes chat text from turn, queue, and clock signals and blocks Yahoo selection takeover banners", () => {
+  const chat = { innerText:"YOUR TURN • ROUND 9, PICK 99\n00:00\nQueue" };
+  const document = documentFixture({ title:"2 picks until your turn", body:"00:37\nYOUR TEAM (0/15)\nAutodraft will pick from queue\nYour queue is empty.\nYOUR TURN • ROUND 9, PICK 99\n00:00\nQueue" });
+  document.querySelectorAll = (selector) => selector.includes("contenteditable") ? [chat] : selector === "button" ? [button("Autodraft")] : [];
+  assert.equal(helpers.readOwnedTurnState(document).state, "OFF_TURN");
+  assert.equal(helpers.readQueueState(document), "EMPTY");
+  assert.deepEqual(JSON.parse(JSON.stringify(helpers.readDraftClock(document))), { label:"00:37", seconds:37 });
+  const blocked = documentFixture({ body:"Yahoo is preparing your selection" });
+  assert.deepEqual(Array.from(context.SKRODZKaiYahooPageReaders.blockers(blocked, context)), ["YAHOO PREPARING SELECTION"]);
+});
+
 test("parses the Yahoo room and roster transition", () => {
   assert.deepEqual(
     JSON.parse(JSON.stringify(helpers.parseRoom("/draftclient/f1/9369352/8"))),

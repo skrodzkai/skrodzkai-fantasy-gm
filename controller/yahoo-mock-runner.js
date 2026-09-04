@@ -18,6 +18,7 @@
   const DECISION_RECOMPUTE_BUDGET_MS = 250;
   const PANEL_BUDGET_MS = 250;
   const TURN_TO_CLICK_BUDGET_MS = 2000;
+  const MINIMUM_OWNED_CLOCK_SECONDS = 5;
   const NEXT_TURN_COMPARISON_POOL = 6;
   const BYE_CONCENTRATION_LIMIT = 2;
   const QB2_SURVIVAL_CLIFF = 0.35;
@@ -302,9 +303,7 @@
   function readAvailablePlayers(documentRef, controllerApi) {
     const runtime = controllerApi?.runtime;
     if (!runtime) throw new Error("Yahoo draft controller runtime helpers are unavailable");
-    return [...documentRef.querySelectorAll("tr")]
-      .map((row) => runtime.readPlayerRow(row))
-      .filter(Boolean);
+    return runtime.readAvailablePlayerRows(documentRef, root);
   }
 
   function overallPick(round, seat, teams = 12) {
@@ -584,6 +583,35 @@
     return true;
   }
 
+  function benchDepthMultiplier(player, picks, config) {
+    const position = normalize(player?.position);
+    const counts = positionCounts(picks);
+    const count = Number(counts[position] ?? 0);
+    if (position === "RB") return count < 4 ? 0.30 : 0.12;
+    if (position === "WR") return count < Number(config?.offenseStarters?.WR ?? 2) + 2 ? 0.24 : 0.12;
+    if (position === "QB") return count === 1 ? 0.06 : 0.01;
+    if (position === "TE") return count === 1 ? 0.05 : 0.01;
+    return 0;
+  }
+
+  function benchLineupMultiplier(player, picks) {
+    const position = normalize(player?.position);
+    const count = Number(positionCounts(picks)[position] ?? 0);
+    if (position === "QB" || position === "TE") return count === 1 ? 0.35 : 0.10;
+    return 1;
+  }
+
+  function completionFloorsCanComplete(player, picks, config) {
+    if (Number(config?.rounds) !== 19) return true;
+    const after = [...Array.from(picks ?? []), player];
+    const counts = positionCounts(after);
+    const rbMissing = Math.max(0, 3 - Number(counts.RB ?? 0));
+    const kDefMissing = Number((counts.K ?? 0) < 1) + Number((counts.DEF ?? 0) < 1);
+    const idpCount = IDP_POSITIONS.reduce((sum, position) => sum + Number(counts[position] ?? 0), 0);
+    const idpMissing = Math.max(0, Number(config.categoryLimits?.IDP ?? 0) - idpCount);
+    return rbMissing + kDefMissing + idpMissing <= Number(config.rounds) - after.length;
+  }
+
   function survivalProbability(player, nextPick, runPressure = 0, survivalCalibration = null) {
     if (!Number.isFinite(nextPick)) return 0;
     const packet = survivalCalibration?.model ? survivalCalibration : null;
@@ -722,6 +750,7 @@
       .filter((player) => automaticCandidateAllowed({ player, round, picks, config }))
       .filter((player) => withinPositionLimit(player, picks, config))
       .filter((player) => slots.length - assignmentWithOne(player, filledWithoutSlot, baseFilled) <= remainingAfterCandidate)
+      .filter((player) => completionFloorsCanComplete(player, picks, config))
       .map((player) => {
         const eligible = playerEligibility(player);
         const slotIndexes = slots.map((slot, index) => normalizedRosterSlotAccepts(eligible, slot) ? index : -1).filter((index) => index >= 0);
@@ -756,15 +785,20 @@
         }, 0);
         const starterMarginalUtility = Math.max(0, withCandidate - baseUtility);
         const fillsStarter = assignmentWithOne(player, filledWithoutSlot, baseFilled) > baseFilled;
+        const benchMultiplier = benchDepthMultiplier(player, picks, config);
+        const perGamePoints = Number.isFinite(Number(player.perGamePoints))
+          ? Number(player.perGamePoints)
+          : Number(player.projection) / Math.max(1, Number(player.expectedGamesThroughWeek17) || 17);
         const benchOpportunityValue = !fillsStarter && OFFENSE.includes(normalize(player.position))
-          ? Math.max(0, Number(player.vor) || 0) * 0.15
+          ? Math.max(0, Number(player.vor) || 0) * benchMultiplier + Math.max(0, perGamePoints) * benchMultiplier * 0.1
           : 0;
-        const marginalUtility = starterMarginalUtility + benchOpportunityValue;
+        const lineupUtility = fillsStarter ? starterMarginalUtility : starterMarginalUtility * benchLineupMultiplier(player, picks);
+        const marginalUtility = lineupUtility + benchOpportunityValue;
         const pressure = Math.max(...playerEligibility(player).map((position) => Number(runPressureByPosition[position] ?? 0)));
         return {
           player,
           marginalUtility,
-          starterMarginalUtility,
+          starterMarginalUtility:lineupUtility,
           benchOpportunityValue,
           utilityAfter: withCandidate,
           slotIndexes,
@@ -1080,6 +1114,7 @@
     return (
       picks.length === config.rounds &&
       maximumFilledStarterSlots(picks, config) === starterSlots(config).length &&
+      (Number(config.rounds) !== 19 || Number(counts.RB ?? 0) >= 3) &&
       Object.entries(config.positionLimits).every(([position, limit]) => (counts[position] ?? 0) <= limit) &&
       (config.categoryLimits?.IDP == null || idpCount <= config.categoryLimits.IDP)
     );
@@ -1133,6 +1168,7 @@
     const configuredRunPressure = options.runPressureByPosition ?? {};
     const survivalCalibration = options.survivalCalibration ?? null;
     const runtimeAttestation = options.runtimeAttestation;
+    const assertRunnerLease = options.assertRunnerLease;
     const board = validateBoard(options.board);
     const readManualOverride = typeof options.readManualOverride === "function" ? options.readManualOverride : () => null;
     const consumeManualOverride = typeof options.consumeManualOverride === "function" ? options.consumeManualOverride : () => {};
@@ -1156,22 +1192,26 @@
     if (
       typeof controllerApi.runtime?.readAutodraftState !== "function" ||
       typeof controllerApi.runtime?.readQueueState !== "function" ||
-      typeof controllerApi.runtime?.readDraftClock !== "function"
+      typeof controllerApi.runtime?.readDraftClock !== "function" ||
+      typeof controllerApi.runtime?.readRosterCount !== "function" ||
+      typeof controllerApi.runtime?.readAvailablePlayerRows !== "function"
     ) {
       throw new Error("controller draft-safety runtime hooks are required");
     }
     if (!validRuntimeAttestation(runtimeAttestation)) throw new Error("runtime attestation is required");
+    if (typeof assertRunnerLease !== "function" || assertRunnerLease() !== true) throw new Error("runner lease is required");
 
     const room = controllerApi.runtime.parseRoom(locationRef.pathname);
     if (!room || room.roomId !== expectedRoomId || room.seat !== expectedUrlSeat) {
       throw new Error("draft room or URL team does not match the approved preflight");
     }
-    const rosterAtCreate = controllerApi.runtime.parseRosterCount(documentRef.body?.innerText);
+    const rosterAtCreate = controllerApi.runtime.readRosterCount(documentRef);
     if (!rosterAtCreate || rosterAtCreate.total !== config.rosterTotal || rosterAtCreate.filled !== 0) {
       throw new Error("mock must begin with the expected empty roster");
     }
 
     function assertDraftSafety(stage) {
+      if (assertRunnerLease() !== true) throw new Error(`runner_lease_not_current_${stage}`);
       const currentRoom = controllerApi.runtime.parseRoom(locationRef.pathname);
       if (!currentRoom || currentRoom.roomId !== expectedRoomId || currentRoom.seat !== expectedUrlSeat) {
         throw new Error(`draft_room_or_url_team_changed_${stage}`);
@@ -1182,6 +1222,12 @@
       if (autodraftState !== "INACTIVE") throw new Error(`autodraft_state_unknown_${stage}`);
       if (queueState !== "EMPTY") throw new Error(`yahoo_queue_not_empty_or_unknown_${stage}`);
       return { autodraftState, queueState };
+    }
+
+    function assertOwnedClock(stage, minimumSeconds = MINIMUM_OWNED_CLOCK_SECONDS) {
+      const clock = controllerApi.runtime.readDraftClock(documentRef);
+      if (!clock || clock.seconds < minimumSeconds) throw new Error(`draft_clock_margin_exhausted_${stage}`);
+      return clock;
     }
 
     assertDraftSafety("at_create");
@@ -1344,6 +1390,10 @@
       let targets = pending.targets;
       if (chosenYahooId) {
         const chosenId = String(chosenYahooId);
+        if (["99001", "99002"].includes(chosenId)) {
+          receipt("runner_on_clock_choice_rejected", { turn: pending.turn.label, chosenYahooId: chosenId, reason:"synthetic_yahoo_identity_manual_only", baselineRetained:true });
+          return false;
+        }
         const boardPlayer = board.find((player) => player.yahooId === chosenId);
         const livePlayer = pending.availablePlayers.find((player) => String(player.yahooId) === chosenId);
         if (!boardPlayer || !livePlayer || boardPlayer.manualEligible === false ||
@@ -1380,6 +1430,8 @@
           expectedSeat: expectedUrlSeat,
           expectedRosterTotal: config.rosterTotal,
           failureAction: "stay",
+          minimumClockSeconds: 2,
+          preClickGuard: () => assertRunnerLease() === true,
         },
         environment,
       );
@@ -1418,9 +1470,10 @@
         throw new Error(`owned_turn_mismatch:expected_R${expectedRound}P${expectedPick}:observed_${turn.label}`);
       }
       const filterLabel = filterLabelForRound(turn.round, picks, config, expectedSeat);
-      const clockAtDecision = controllerApi.runtime.readDraftClock(documentRef);
+      const clockAtDecision = assertOwnedClock("at_detection");
       const { targets, decision, manualOverride, availablePlayers, filterReadyMs } = await targetsAfterFilter(turn, filterLabel);
       if (state !== "running") return;
+      assertOwnedClock("after_decision");
       const panelReadyMs = Date.now() - detectedAt;
       receipt("runner_turn_resolved", {
         turn: turn.label,
@@ -1522,7 +1575,7 @@
         activeTurnMetrics = null;
 
         if (picks.length === config.rounds) {
-          const roster = controllerApi.runtime.parseRosterCount(documentRef.body?.innerText);
+          const roster = controllerApi.runtime.readRosterCount(documentRef);
           if (!roster || roster.filled !== config.rosterTotal || roster.total !== config.rosterTotal) {
             throw new Error("completed_roster_readback_failed");
           }
@@ -1545,7 +1598,7 @@
       storage.setItem(probeKey, "ok");
       if (storage.getItem(probeKey) !== "ok") throw new Error("runner receipt storage probe failed");
       storage.removeItem(probeKey);
-      const rosterAtStart = controllerApi.runtime.parseRosterCount(documentRef.body?.innerText);
+      const rosterAtStart = controllerApi.runtime.readRosterCount(documentRef);
       if (!rosterAtStart || rosterAtStart.filled !== 0 || rosterAtStart.total !== config.rosterTotal) {
         throw new Error("draft roster changed after preflight");
       }

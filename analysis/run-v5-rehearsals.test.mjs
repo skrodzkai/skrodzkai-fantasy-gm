@@ -12,6 +12,9 @@ test("current bundled board completes the 30-second rehearsal with two fresh fam
   assert.equal(report.accepted, true);
   assert.equal(report.policyChecks.realLeagueExecutionDisabled, true);
   assert.equal(report.policyChecks.scoringSchemaReceipted, true);
+  assert.equal(report.policyChecks.minimumThreeRunningBacks, true);
+  assert.equal(report.policyChecks.rosterConstructionVaries, true);
+  assert.equal(report.policyChecks.thirdTightEndNotDeterministic, true);
   assert.ok(report.latency.recomputeMaxMs < report.latency.ownedTurnBudgetMs);
 });
 

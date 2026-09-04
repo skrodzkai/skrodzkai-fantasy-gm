@@ -233,6 +233,9 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     realLeagueExecutionDisabled: config.qualification === "unverified-real-room",
     vmExecutionGlobalsAbsent: forbiddenVmGlobals.length === 0,
     scoringSchemaReceipted: /^[a-f0-9]{64}$/.test(String(scoringSchemaHash ?? "")),
+    minimumThreeRunningBacks: simulations.every((simulation) => Number(simulation.counts.RB ?? 0) >= 3),
+    rosterConstructionVaries: new Set(simulations.map((simulation) => JSON.stringify(simulation.counts))).size > 1,
+    thirdTightEndNotDeterministic: simulations.some((simulation) => Number(simulation.counts.TE ?? 0) < 3),
   };
   const chaos = {
     wrongTeamIdentity: { pass: identityChaos.status === "LOCKED", observed: identityChaos },
@@ -331,6 +334,7 @@ function runnerLoopEnvironment(runtime, seat) {
   const runtimeHooks = {
     parseRoom: () => ({ roomId: "542830", seat: 3 }),
     parseRosterCount: () => ({ filled: state.filled, total: config.rosterTotal }),
+    readRosterCount: () => ({ filled: state.filled, total: config.rosterTotal }),
     readAutodraftState: () => "INACTIVE",
     readQueueState: () => "EMPTY",
     readDraftClock: () => ({ label: "00:59", seconds: 59 }),
@@ -346,6 +350,7 @@ function runnerLoopEnvironment(runtime, seat) {
       return turn ? { state:"OWNED", turn } : { state:"OFF_TURN", turn:null };
     },
     readPlayerRow: (row) => row.player,
+    readAvailablePlayerRows: () => rows.filter((row) => !state.unavailable.has(row.player.yahooId)).map((row) => row.player),
   };
   const controllerApi = {
     runtime: runtimeHooks,
@@ -414,7 +419,8 @@ function createReplayRunner(runtime, seat, selectionHoldMs) {
     replacementBySlot: runtime.replacementBySlot,
     survivalCalibration: runtime.survivalCalibration,
     board: runtime.board,
-    runtimeAttestation: { ok:true, version:"0.15.0", digest:"a".repeat(64), bootId:"replay-boot-1234", bootedAt:1 },
+    runtimeAttestation: { ok:true, version:"0.16.0", digest:"a".repeat(64), bootId:"replay-boot-1234", bootedAt:1 },
+    assertRunnerLease: () => true,
   }, environment);
   return { runner, poolSize };
 }

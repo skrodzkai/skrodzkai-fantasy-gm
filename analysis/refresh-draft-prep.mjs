@@ -254,6 +254,67 @@ async function readJsonReceipt(path) {
   return { path, text, value: JSON.parse(text), contentSha256: sha256(text) };
 }
 
+export function applyFreshAdpSnapshot(baselineRows, snapshot) {
+  if (snapshot?.status !== "Success" || Number(snapshot?.meta?.teams) !== 12 || !Array.isArray(snapshot?.players) || snapshot.players.length < 150) {
+    throw new Error("FFC ADP snapshot is incomplete or not a 12-team success payload");
+  }
+  const byIdentity = new Map();
+  const ambiguous = new Set();
+  for (const player of snapshot.players) {
+    const key = `${identityKey(player.name, player.team)}:${String(player.position ?? "").toUpperCase()}`;
+    if (byIdentity.has(key)) { byIdentity.delete(key); ambiguous.add(key); }
+    else if (!ambiguous.has(key)) byIdentity.set(key, player);
+  }
+  let joined = 0;
+  const rows = Array.from(baselineRows ?? [], (row) => {
+    const key = `${identityKey(row.name, row.team)}:${String(row.position ?? "").toUpperCase()}`;
+    const market = byIdentity.get(key);
+    if (!market || !Number.isFinite(Number(market.adp))) return row;
+    joined += 1;
+    let payload = {};
+    try { payload = row?.payload_json ? JSON.parse(row.payload_json) : {}; } catch { payload = {}; }
+    return {
+      ...row,
+      adp:Number(market.adp),
+      adp_low:Number.isFinite(Number(market.low)) ? Number(market.low) : row.adp_low,
+      adp_high:Number.isFinite(Number(market.high)) ? Number(market.high) : row.adp_high,
+      payload_json:JSON.stringify({
+        ...payload,
+        adp:Number(market.adp),
+        adp_low:Number.isFinite(Number(market.low)) ? Number(market.low) : payload.adp_low,
+        adp_high:Number.isFinite(Number(market.high)) ? Number(market.high) : payload.adp_high,
+        adp_samples:Number.isFinite(Number(market.times_drafted)) ? Number(market.times_drafted) : payload.adp_samples,
+        adp_source:"ffc-adp",
+      }),
+    };
+  });
+  const minimumJoined = Array.from(baselineRows ?? []).length >= 150 ? 100 : 1;
+  if (joined < minimumJoined) throw new Error(`FFC ADP identity coverage is too small: ${joined}`);
+  return { rows, joined, ambiguousIdentities:ambiguous.size };
+}
+
+function adpSourceHealth(receipt, fileStat, asOf) {
+  const sourceAsOf = String(receipt.value?.meta?.end_date ?? "");
+  const sourceDate = Date.parse(`${sourceAsOf}T23:59:59Z`);
+  const observedAt = fileStat.mtime.toISOString();
+  const ageHours = (Date.parse(asOf) - Date.parse(observedAt)) / 3_600_000;
+  const fresh = receipt.value?.status === "Success" && Number(receipt.value?.meta?.teams) === 12 &&
+    Array.isArray(receipt.value?.players) && receipt.value.players.length >= 150 && Number.isFinite(sourceDate) &&
+    Number.isFinite(ageHours) && ageHours >= 0 && ageHours <= 24;
+  return {
+    callerSupplied:true,
+    fetched:false,
+    sourceId:"ffc-adp",
+    sourceAsOf,
+    observedAt,
+    ageHours,
+    maximumAgeHours:24,
+    rows:receipt.value?.players?.length ?? 0,
+    fresh,
+    contentSha256:receipt.contentSha256,
+  };
+}
+
 function observedHealth(receipt, asOf, maximumAgeHours) {
   const observedAt = receipt.value?.observedAt;
   const ageHours = (Date.parse(asOf) - Date.parse(observedAt)) / 3_600_000;
@@ -399,11 +460,12 @@ export function byeCoverage(players) {
   };
 }
 
-export function buildHealth({ generatedAt, clock, yahoo, espnHealth, sleeperHealth, sleeperReused, board, movement, rehearsal, packets, opponentWarRoom, realShadowAcceptance, identityReceipt, draftSignals = null, failure = null }) {
+export function buildHealth({ generatedAt, clock, yahoo, adpHealth, espnHealth, sleeperHealth, sleeperReused, board, movement, rehearsal, packets, opponentWarRoom, realShadowAcceptance, identityReceipt, draftSignals = null, failure = null }) {
   const automatic = (board?.players ?? []).filter((player) => player.automaticEligible === true);
   const byes = byeCoverage(board?.players);
   const reasons = [
     ...Object.entries(yahoo ?? {}).filter(([, value]) => !value.fresh).map(([key]) => `stale_or_missing_yahoo_${key}`),
+    ...(adpHealth && !adpHealth.fresh ? ["stale_or_missing_ffc_adp"] : []),
     ...(espnHealth && !espnHealth.fresh ? ["stale_espn_projection_family"] : []),
     ...(sleeperHealth && !sleeperHealth.fresh ? ["stale_sleeper_identity_injury_map"] : []),
     ...(rehearsal && rehearsal.accepted !== true ? ["rehearsal_not_accepted"] : []),
@@ -430,7 +492,7 @@ export function buildHealth({ generatedAt, clock, yahoo, espnHealth, sleeperHeal
     posture: "preparation-only; no Yahoo action or real-league execution authority",
     reasons,
     clock: clock ?? null,
-    sources: { yahoo, espn: espnHealth ?? null, sleeper: sleeperHealth ? { ...sleeperHealth, reusedSameDayCache: sleeperReused } : null },
+    sources: { yahoo, adp:adpHealth ?? null, espn: espnHealth ?? null, sleeper: sleeperHealth ? { ...sleeperHealth, reusedSameDayCache: sleeperReused } : null },
     identity: identityReceipt ?? null,
     injuries: board?.injuryCoverage ?? null,
     eligibility: {
@@ -492,8 +554,10 @@ export async function refreshDraftPrep(options) {
   try {
     if (!clock.fresh) throw new Error(`generatedAt differs from wall clock by ${clock.generatedAtSkewMinutes.toFixed(2)} minutes`);
     const prior = await discoverPreviousPassingBoard(outputParent, finalPath);
-    const [baseline, yahooOffense, yahooSpecialists, yahooEligibility, historyText, opponentCalibration, externalInjuries, survivalCalibration, runnerSource] = await Promise.all([
+    const [baseline, adp, adpFile, yahooOffense, yahooSpecialists, yahooEligibility, historyText, opponentCalibration, externalInjuries, survivalCalibration, runnerSource] = await Promise.all([
       readJsonReceipt(options.baselinePath),
+      readJsonReceipt(options.adpPath),
+      stat(options.adpPath),
       readJsonReceipt(options.yahooOffensePath),
       readJsonReceipt(options.yahooSpecialistsPath),
       readJsonReceipt(options.yahooEligibilityPath),
@@ -509,6 +573,8 @@ export async function refreshDraftPrep(options) {
       eligibility: yahooSourceHealth(yahooEligibility, clock.wallClockAt, "Yahoo eligibility snapshot"),
     };
     if (Object.values(yahoo).some((receipt) => !receipt.fresh)) throw new Error("caller-supplied Yahoo snapshots are stale or missing observedAt");
+    const adpHealth = adpSourceHealth(adp, adpFile, clock.wallClockAt);
+    if (!adpHealth.fresh) throw new Error("caller-supplied FFC ADP snapshot is stale or incomplete");
     const sourceDirectory = join(staging, "source-snapshots");
     await mkdir(sourceDirectory);
     const espnPdf = await fetchEspnClayPdf({ fetchImpl: options.fetchImpl, retrievedAt: clock.wallClockAt });
@@ -518,9 +584,12 @@ export async function refreshDraftPrep(options) {
     const extraction = await (options.extractPdf ?? extractPdfLayout)({ pdfPath, textPath });
     const espnSnapshot = makeEspnClaySnapshot({ ...espnPdf, text: extraction.text, pdfBytes: espnPdf.bytes, extraction: extraction.receipt });
     validateEspnCoverage(espnSnapshot);
+    const refreshedBaseline = applyFreshAdpSnapshot(baseline.value, adp.value);
+    adpHealth.joinedRows = refreshedBaseline.joined;
+    adpHealth.ambiguousIdentities = refreshedBaseline.ambiguousIdentities;
 
     const sleeper = await loadOrFetchSleeper({ fetchImpl: options.fetchImpl, cachePath: options.sleeperCachePath, retrievedAt: clock.wallClockAt });
-    const joined = joinEspnRowsToYahoo({ rows: espnSnapshot.rows, sleeperPlayers: sleeper.snapshot.players, baselineRows: baseline.value, yahooRows: yahooOffense.value.players ?? [] });
+    const joined = joinEspnRowsToYahoo({ rows: espnSnapshot.rows, sleeperPlayers: sleeper.snapshot.players, baselineRows: refreshedBaseline.rows, yahooRows: yahooOffense.value.players ?? [] });
     espnSnapshot.rows = joined.rows;
     espnSnapshot.identityReceipt = joined.receipt;
     const [espnHealth, sleeperHealth] = validateSourceSnapshot([espnSnapshot.manifest, sleeper.snapshot.manifest], clock.wallClockAt);
@@ -541,7 +610,7 @@ export async function refreshDraftPrep(options) {
     ]);
 
     let board = assembleV5Board({
-      baselineRows: baseline.value,
+      baselineRows: refreshedBaseline.rows,
       offenseSnapshot: yahooOffense.value,
       specialistSnapshot: yahooSpecialists.value,
       eligibilitySnapshot: yahooEligibility.value,
@@ -552,6 +621,7 @@ export async function refreshDraftPrep(options) {
       survivalCalibration,
       asOf: clock.wallClockAt,
     });
+    board = Object.freeze({ ...board, marketAdpReceipt:adpHealth });
     const rankingContextPaths = [options.nflverseDepthPath, options.nflverseRosterPath, options.nflverseSchedulePath];
     if (rankingContextPaths.some(Boolean) && !rankingContextPaths.every(Boolean)) throw new Error("all nflverse ranking-context paths are required together");
     if (rankingContextPaths.every(Boolean)) {
@@ -599,7 +669,7 @@ export async function refreshDraftPrep(options) {
     const movementMarkdown = renderBoardMovementMarkdown(board, movement);
     const engine = await loadDecisionEngine(options.runnerPath);
     const realShadowAcceptance = runRealShadowAcceptance({ engine, boardData:extensionBoard, settingsSnapshot:realSettings });
-    health = buildHealth({ generatedAt: clock.wallClockAt, clock, yahoo, espnHealth, sleeperHealth, sleeperReused: sleeper.reused, board, movement, rehearsal, packets, opponentWarRoom, realShadowAcceptance, identityReceipt: joined.receipt, draftSignals: board.draftSignalOverlay ?? null });
+    health = buildHealth({ generatedAt: clock.wallClockAt, clock, yahoo, adpHealth, espnHealth, sleeperHealth, sleeperReused: sleeper.reused, board, movement, rehearsal, packets, opponentWarRoom, realShadowAcceptance, identityReceipt: joined.receipt, draftSignals: board.draftSignalOverlay ?? null });
     if (health.status !== "PASS") throw new Error(health.reasons.join("; "));
     if (!sleeper.reused) await writeSleeperCache(options.sleeperCachePath, sleeper.snapshot);
 
@@ -634,12 +704,13 @@ function parseArgs(argv) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const required = ["generated-at", "output-parent", "baseline", "yahoo-offense", "yahoo-specialists", "yahoo-eligibility", "history", "opponent-calibration", "teams", "manager-map", "real-settings", "runner", "nflverse-depth", "nflverse-roster", "nflverse-schedule", "market-overlay"];
+  const required = ["generated-at", "output-parent", "baseline", "adp", "yahoo-offense", "yahoo-specialists", "yahoo-eligibility", "history", "opponent-calibration", "teams", "manager-map", "real-settings", "runner", "nflverse-depth", "nflverse-roster", "nflverse-schedule", "market-overlay"];
   for (const key of required) if (!args[key]) throw new Error(`missing --${key}=...`);
   const result = await refreshDraftPrep({
     generatedAt: args["generated-at"],
     outputParent: args["output-parent"],
     baselinePath: args.baseline,
+    adpPath: args.adp,
     yahooOffensePath: args["yahoo-offense"],
     yahooSpecialistsPath: args["yahoo-specialists"],
     yahooEligibilityPath: args["yahoo-eligibility"],

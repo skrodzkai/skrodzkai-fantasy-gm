@@ -187,8 +187,8 @@ test("offensive bench candidates retain bounded opportunity value after starters
   const pool = helpers.validateBoard([player("RB", 2, 2, { projection:400, vor:200 })]);
   const [candidate] = helpers.scoreCandidates({ round:2, seat:1, picks, pool, config, replacementBySlot }).ranked;
   assert.equal(candidate.starterMarginalUtility, 0);
-  assert.equal(candidate.benchOpportunityValue, 30);
-  assert.equal(candidate.marginalUtility, 30);
+  assert.equal(candidate.benchOpportunityValue, 60);
+  assert.equal(candidate.marginalUtility, 60);
 });
 
 test("league-scored quarterback value can beat generic Yahoo order with an explicit VONA reason", () => {
@@ -517,7 +517,7 @@ test("observed TEST roster validation rejects a specialist displaced to the benc
   assert.equal(helpers.validateObservedTestRoster(bad, picks), false);
 });
 
-function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE", queueState = "EMPTY", unstableRows = false, ownedSignalState = "OWNED" } = {}) {
+function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE", queueState = "EMPTY", unstableRows = false, ownedSignalState = "OWNED", draftClockSeconds = 59, leaseState = { current:true } } = {}) {
   const board = boardForConfig(mockConfig);
   const rows = board.slice(0, 20).map((entry) => ({ player:entry }));
   const staleRows = board.slice(60, 80).map((entry) => ({ player:entry }));
@@ -532,13 +532,18 @@ function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE",
     runtime:{
       parseRoom:() => ({ roomId:"99", seat:6 }),
       parseRosterCount:() => ({ filled:0, total:15 }),
+      readRosterCount:() => ({ filled:0, total:15 }),
       readAutodraftState:() => autodraftState,
       readQueueState:() => queueState,
-      readDraftClock:() => ({ label:"00:59", seconds:59 }),
+      readDraftClock:() => ({ label:`00:${String(draftClockSeconds).padStart(2, "0")}`, seconds:draftClockSeconds }),
       isAutodraftActive:() => false,
       readOwnedTurn:() => ({ label:"R1P6", round:1, pick:6 }),
       readOwnedTurnState:() => ownedSignalState === "OWNED" ? { state:"OWNED", turn:{ label:"R1P6", round:1, pick:6 } } : { state:ownedSignalState, turn:null },
       readPlayerRow:(row) => row.player,
+      readAvailablePlayerRows:() => {
+        rowReads += 1;
+        return unstableRows && rowReads === 1 ? staleRows.map((row) => row.player) : rows.map((row) => row.player);
+      },
     },
     create(options) {
       controllerTargets = options.targets;
@@ -569,7 +574,8 @@ function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE",
     configName:"public_mock_15", executionMode:"MOCK", expectedRoomId:"99", expectedSeat:6, expectedUrlSeat:6,
     observedTeamCount:12, observedRosterSlots:mockConfig.rosterSlots, minimumFallbacks:5, pollMs:25,
     filterDeadlineMs:500, selectionHoldMs, replacementBySlot, board,
-    runtimeAttestation:{ ok:true, version:"0.15.0", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
+    assertRunnerLease:() => leaseState.current === true,
+    runtimeAttestation:{ ok:true, version:"0.16.0", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
   }, environment);
   return { runner, board, getControllerTargets:() => controllerTargets, getClearedTimeouts:() => clearedTimeouts, getRowReads:() => rowReads };
 }
@@ -577,6 +583,26 @@ function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE",
 test("runner creation refuses unknown Autodraft state or a nonempty Yahoo queue", () => {
   assert.throws(() => integrationFixture({ autodraftState:"UNKNOWN" }), /autodraft_state_unknown_at_create/);
   assert.throws(() => integrationFixture({ queueState:"NONEMPTY_OR_UNKNOWN" }), /yahoo_queue_not_empty_or_unknown_at_create/);
+});
+
+test("runner requires an acknowledged live lease and a five-second owned-turn clock margin", async () => {
+  assert.throws(() => integrationFixture({ leaseState:{ current:false } }), /runner lease is required/);
+  const fixture = integrationFixture({ draftClockSeconds:4 });
+  fixture.runner.start();
+  await waitFor(() => fixture.runner.getStatus().state === "failed");
+  assert.match(fixture.runner.getStatus().failure.code, /draft_clock_margin_exhausted_at_detection/);
+  assert.equal(fixture.getControllerTargets(), null);
+});
+
+test("runner lease loss before selection fails closed without constructing a controller", async () => {
+  const leaseState = { current:true };
+  const fixture = integrationFixture({ selectionHoldMs:100, leaseState });
+  fixture.runner.start();
+  await waitFor(() => fixture.runner.getStatus().pendingDecision);
+  leaseState.current = false;
+  await waitFor(() => fixture.runner.getStatus().state === "failed");
+  assert.match(fixture.runner.getStatus().failure.code, /runner_lease_not_current/);
+  assert.equal(fixture.getControllerTargets(), null);
 });
 
 test("runner fails closed on an inconsistent owned-turn signal", async () => {
