@@ -11,7 +11,7 @@ const ROSTER_VALIDATOR = globalThis.SKRODZKaiYahooMockRunner._test.validateCompl
 const TEST_OVERALL_PICK = globalThis.SKRODZKaiYahooMockRunner._test.overallPick;
 const TEST_SAME_SLOTS = globalThis.SKRODZKaiYahooMockRunner._test.sameSlots;
 const TEST_OBSERVED_ROSTER_VALIDATOR = globalThis.SKRODZKaiYahooMockRunner._test.validateObservedTestRoster;
-const EXTENSION_VERSION = "0.14.2";
+const EXTENSION_VERSION = "0.15.0";
 const PANEL_BUDGET_MS = 250;
 const TURN_TO_CLICK_BUDGET_MS = 2000;
 
@@ -347,6 +347,7 @@ function evaluateDraftExport(payload, options = {}) {
 
   const replays = picks.map((pick, index) => {
     const replay = replayDecision(pick.decision);
+    if (replay.fallbackUsed) errors.push(`round_${index + 1}_decision_fallback_forbidden`);
     if (!replay.consistent) errors.push(`round_${index + 1}_decision_replay_mismatch`);
     const targets = asArray(pick.decision?.targetYahooIds).map(String);
     const targetIndex = targets.indexOf(pick.yahooId);
@@ -425,9 +426,20 @@ function evaluateDraftExport(payload, options = {}) {
     if (String(click.yahooId) !== pick.yahooId || String(confirmation.yahooId) !== pick.yahooId) errors.push(`round_${index + 1}_controller_player_mismatch`);
     if (String(click.turn) !== pick.turn || String(confirmation.turn) !== pick.turn) errors.push(`round_${index + 1}_controller_turn_mismatch`);
     if (Number(click.rosterBefore?.filled) !== index || Number(confirmation.rosterAfter?.filled) !== index + 1) errors.push(`round_${index + 1}_controller_roster_transition_mismatch`);
+    const rosterYahooIds = asArray(confirmation.rosterYahooIds).map(String);
+    if (rosterYahooIds.length !== index + 1 || new Set(rosterYahooIds).size !== rosterYahooIds.length || !rosterYahooIds.includes(pick.yahooId)) {
+      errors.push(`round_${index + 1}_controller_exact_roster_identity_missing`);
+    }
     if (click.autodraftState !== "INACTIVE") errors.push(`round_${index + 1}_controller_autodraft_not_verified_off`);
     if (click.queueState !== "EMPTY") errors.push(`round_${index + 1}_controller_queue_not_verified_empty`);
     if (!validClock(click.clockAtClick, publicMock ? 300 : 60)) errors.push(`round_${index + 1}_controller_clock_evidence_missing_or_invalid`);
+  }
+
+  if (!publicMock) {
+    const kDef = picks.filter((pick) => ["K", "DEF"].includes(pick.position));
+    const idp = picks.filter((pick) => ["D", "LB", "CB", "S"].includes(pick.position));
+    if (kDef.some((pick) => pick.round < 15) || kDef.filter((pick) => pick.round <= 16).length !== 2) errors.push("test_specialist_k_def_timing_failed");
+    if (idp.some((pick) => pick.round < 17)) errors.push("test_specialist_idp_timing_failed");
   }
 
   return {

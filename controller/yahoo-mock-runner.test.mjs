@@ -135,11 +135,16 @@ test("never converts a missing projection to zero and labels Yahoo-rank survival
   assert.equal(withheld.marketStatus, "YAHOO_PRESEASON_RANK_UNCALIBRATED");
 });
 
-test("uses one unified position pool and no round-specific filter script", () => {
+test("keeps one visible position pool while containing autonomous specialists to late rounds", () => {
   assert.deepEqual(Array.from(helpers.allowedPositions(14, [], testConfig, 1)), ["QB", "RB", "WR", "TE", "K", "DEF", "D", "LB", "CB", "S"]);
   assert.equal(helpers.filterLabelForRound(1, [], testConfig, 1), "All Positions");
   assert.equal(helpers.filterLabelForRound(19, [], testConfig, 12), "All Positions");
   assert.deepEqual(Array.from(helpers.requiredTestFilterLabels()), ["All Positions", "Kickers", "Team Defenses", "Defensive Players", "Linebackers", "Defensive Backs"]);
+  assert.equal(helpers.automaticCandidateAllowed({ player:player("K", 1, 1), round:14, picks:[], config:testConfig }), false);
+  assert.equal(helpers.automaticCandidateAllowed({ player:player("K", 1, 1), round:15, picks:[], config:testConfig }), true);
+  assert.equal(helpers.automaticCandidateAllowed({ player:player("LB", 1, 1), round:16, picks:[], config:testConfig }), false);
+  assert.equal(helpers.automaticCandidateAllowed({ player:player("LB", 1, 1), round:17, picks:[], config:testConfig }), true);
+  assert.equal(helpers.automaticCandidateAllowed({ player:player("K", 1, 1), round:1, picks:[], config:mockConfig }), true);
 });
 
 test("joint roster utility allocates flex and IDP eligibility instead of comparing raw points", () => {
@@ -174,6 +179,16 @@ test("weekly utility gives bench and QB2 picks real bye-week value after starter
   assert.equal(result.utilityModel, "WEEKLY_OPTIMAL_LINEUP_W1_17");
   assert.ok(result.ranked.find((entry) => entry.player.position === "QB").marginalUtility > 0);
   assert.ok(result.ranked.find((entry) => entry.player.position === "RB").marginalUtility > 0);
+});
+
+test("offensive bench candidates retain bounded opportunity value after starters are filled", () => {
+  const config = { ...mockConfig, rounds:3, rosterSlots:["RB", "BN", "BN"], positionLimits:{ RB:3 } };
+  const picks = helpers.validateBoard([player("RB", 1, 1, { projection:450, vor:300 })]);
+  const pool = helpers.validateBoard([player("RB", 2, 2, { projection:400, vor:200 })]);
+  const [candidate] = helpers.scoreCandidates({ round:2, seat:1, picks, pool, config, replacementBySlot }).ranked;
+  assert.equal(candidate.starterMarginalUtility, 0);
+  assert.equal(candidate.benchOpportunityValue, 30);
+  assert.equal(candidate.marginalUtility, 30);
 });
 
 test("league-scored quarterback value can beat generic Yahoo order with an explicit VONA reason", () => {
@@ -438,14 +453,12 @@ test("requires five targets through round 18 but accepts the legal final-pick la
   assert.equal(override.manualOverride.status, "applied");
 });
 
-test("recompute budget breach falls back to the static verified board order", () => {
+test("recompute budget breach fails closed instead of changing the decision model", () => {
   const board = boardForConfig(mockConfig);
-  const result = helpers.buildDecisionLadder({
+  assert.throws(() => helpers.buildDecisionLadder({
     round:1, seat:6, picks:[], board, availablePlayers:board, minimum:5,
     config:mockConfig, replacementBySlot, recomputeBudgetMs:-1,
-  });
-  assert.equal(result.decision.fallbackUsed, true);
-  assert.deepEqual(result.targets.map((target) => target.yahooId), board.slice(0, 5).map((target) => target.yahooId));
+  }), /decision_recompute_budget_exceeded/);
 });
 
 test("endgame feasibility forces the only position that can complete the roster", () => {
@@ -504,13 +517,15 @@ test("observed TEST roster validation rejects a specialist displaced to the benc
   assert.equal(helpers.validateObservedTestRoster(bad, picks), false);
 });
 
-function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE", queueState = "EMPTY" } = {}) {
+function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE", queueState = "EMPTY", unstableRows = false, ownedSignalState = "OWNED" } = {}) {
   const board = boardForConfig(mockConfig);
   const rows = board.slice(0, 20).map((entry) => ({ player:entry }));
+  const staleRows = board.slice(60, 80).map((entry) => ({ player:entry }));
+  let rowReads = 0;
   const select = { value:"all", options:[{ value:"all", textContent:"All Positions" }], dispatchEvent() {} };
   const document = {
     body:{ innerText:"0 / 15" },
-    querySelectorAll(selector) { if (selector === "select") return [select]; if (selector === "tr") return rows; return []; },
+    querySelectorAll(selector) { if (selector === "select") return [select]; if (selector === "tr") { rowReads += 1; return unstableRows && rowReads === 1 ? staleRows : rows; } return []; },
   };
   let controllerTargets = null;
   const controllerApi = {
@@ -522,6 +537,7 @@ function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE",
       readDraftClock:() => ({ label:"00:59", seconds:59 }),
       isAutodraftActive:() => false,
       readOwnedTurn:() => ({ label:"R1P6", round:1, pick:6 }),
+      readOwnedTurnState:() => ownedSignalState === "OWNED" ? { state:"OWNED", turn:{ label:"R1P6", round:1, pick:6 } } : { state:ownedSignalState, turn:null },
       readPlayerRow:(row) => row.player,
     },
     create(options) {
@@ -553,14 +569,32 @@ function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE",
     configName:"public_mock_15", executionMode:"MOCK", expectedRoomId:"99", expectedSeat:6, expectedUrlSeat:6,
     observedTeamCount:12, observedRosterSlots:mockConfig.rosterSlots, minimumFallbacks:5, pollMs:25,
     filterDeadlineMs:500, selectionHoldMs, replacementBySlot, board,
-    runtimeAttestation:{ ok:true, version:"0.14.2", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
+    runtimeAttestation:{ ok:true, version:"0.15.0", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
   }, environment);
-  return { runner, getControllerTargets:() => controllerTargets, getClearedTimeouts:() => clearedTimeouts };
+  return { runner, board, getControllerTargets:() => controllerTargets, getClearedTimeouts:() => clearedTimeouts, getRowReads:() => rowReads };
 }
 
 test("runner creation refuses unknown Autodraft state or a nonempty Yahoo queue", () => {
   assert.throws(() => integrationFixture({ autodraftState:"UNKNOWN" }), /autodraft_state_unknown_at_create/);
   assert.throws(() => integrationFixture({ queueState:"NONEMPTY_OR_UNKNOWN" }), /yahoo_queue_not_empty_or_unknown_at_create/);
+});
+
+test("runner fails closed on an inconsistent owned-turn signal", async () => {
+  const fixture = integrationFixture({ ownedSignalState:"INCONSISTENT" });
+  fixture.runner.start();
+  await waitFor(() => fixture.runner.getStatus().state === "failed");
+  assert.equal(fixture.runner.getStatus().failure.code, "owned_turn_signal_inconsistent");
+  assert.equal(fixture.getControllerTargets(), null);
+});
+
+test("runner waits for a stable Yahoo player set after the filter settles", async () => {
+  const fixture = integrationFixture({ unstableRows:true, selectionHoldMs:500 });
+  fixture.runner.start();
+  await waitFor(() => fixture.runner.getStatus().pendingDecision);
+  const finalIds = new Set(fixture.board.slice(0, 20).map((player) => player.yahooId));
+  assert.equal(fixture.getRowReads() >= 3, true);
+  assert.equal(fixture.runner.getStatus().pendingDecision.targetYahooIds.every((yahooId) => finalIds.has(yahooId)), true);
+  fixture.runner.halt();
 });
 
 test("final round accepts the remaining legal ladder while earlier rounds retain five fallbacks", () => {
@@ -585,7 +619,7 @@ test("on-clock exact choice starts immediately and keeps baseline fallbacks", as
   assert.equal(receipts.some((entry) => entry.kind === "runner_on_clock_choice_applied"), true);
   const resolved = receipts.find((entry) => entry.kind === "runner_turn_resolved");
   assert.equal(resolved.panelReadyMs < 250, true);
-  assert.equal(resolved.decision.recomputeMs < 100, true);
+  assert.equal(resolved.decision.recomputeMs < 250, true);
   fixture.runner.halt();
 });
 

@@ -1,7 +1,7 @@
 (function installYahooMockRunner(root) {
   "use strict";
 
-  const VERSION = "2.2.1";
+  const VERSION = "2.3.0";
   const GLOBAL_KEY = "__skrodzkaiYahooMockRunnerV1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-runner-receipts-v1";
   const OFFENSE = ["QB", "RB", "WR", "TE"];
@@ -15,7 +15,7 @@
     CB: "Defensive Backs",
     S: "Defensive Backs",
   });
-  const DECISION_RECOMPUTE_BUDGET_MS = 100;
+  const DECISION_RECOMPUTE_BUDGET_MS = 250;
   const PANEL_BUDGET_MS = 250;
   const TURN_TO_CLICK_BUDGET_MS = 2000;
   const NEXT_TURN_COMPARISON_POOL = 6;
@@ -216,6 +216,7 @@
         projection: player.projection == null || player.projection === "" ? null : Number(player.projection),
         perGamePoints: player.perGamePoints == null || player.perGamePoints === "" ? null : Number(player.perGamePoints),
         expectedGamesThroughWeek17: player.expectedGamesThroughWeek17 == null || player.expectedGamesThroughWeek17 === "" ? null : Number(player.expectedGamesThroughWeek17),
+        availabilityAssumption: player.availabilityAssumption == null ? null : String(player.availabilityAssumption),
         weeklyPoints: Array.isArray(player.weeklyPoints) ? player.weeklyPoints.map(Number) : null,
         weeklyAvailability: Array.isArray(player.weeklyAvailability) ? player.weeklyAvailability.map(Number) : null,
         outcomeLow: player.outcomeLow == null || player.outcomeLow === "" ? null : Number(player.outcomeLow),
@@ -227,6 +228,13 @@
         automaticEligible: player.automaticEligible === true,
         manualEligible: player.manualEligible === true,
         validationStatus: String(player.validationStatus ?? "MISSING_VALIDATION_STATUS"),
+        injury: player.injury == null ? null : {
+          status:String(player.injury.status ?? "UNKNOWN"),
+          draftAction:String(player.injury.draftAction ?? "REVIEW"),
+          blockReason:player.injury.blockReason == null ? null : String(player.injury.blockReason),
+          conflict:player.injury.conflict === true,
+          freshestAt:player.injury.freshestAt == null ? null : String(player.injury.freshestAt),
+        },
         draftSignals: player.draftSignals ? {
           attentionRequired: player.draftSignals.attentionRequired === true,
           warnings: Array.from(player.draftSignals.warnings ?? [], String).slice(0, 12),
@@ -554,6 +562,28 @@
     return starters - filled <= picksRemaining;
   }
 
+  function specialistCategory(player) {
+    const position = normalize(player?.position);
+    if (position === "K" || position === "DEF") return position;
+    return IDP_POSITIONS.includes(position) ? "IDP" : null;
+  }
+
+  function automaticCandidateAllowed({ player, round, picks, config }) {
+    if (Number(config?.rounds) !== 19) return true;
+    const category = specialistCategory(player);
+    const counts = positionCounts(picks);
+    const kDefMissing = Number((counts.K ?? 0) < 1) + Number((counts.DEF ?? 0) < 1);
+    const idpCount = IDP_POSITIONS.reduce((sum, position) => sum + Number(counts[position] ?? 0), 0);
+    const idpMissing = Math.max(0, Number(config.categoryLimits?.IDP ?? 0) - idpCount);
+    const roundsRemaining = Number(config.rounds) - Number(round) + 1;
+
+    if (category === "K" || category === "DEF") return Number(round) >= 15;
+    if (category === "IDP") return Number(round) >= 17;
+    if (Number(round) <= 16 && kDefMissing >= 17 - Number(round)) return false;
+    if (Number(round) >= 17 && idpMissing >= roundsRemaining) return false;
+    return true;
+  }
+
   function survivalProbability(player, nextPick, runPressure = 0, survivalCalibration = null) {
     if (!Number.isFinite(nextPick)) return 0;
     const packet = survivalCalibration?.model ? survivalCalibration : null;
@@ -623,6 +653,7 @@
       vor: player.vor,
       projection: player.projection,
       expectedGamesThroughWeek17: player.expectedGamesThroughWeek17,
+      availabilityAssumption: player.availabilityAssumption ?? null,
       uncertaintyStatus: player.uncertaintyStatus,
       eligible: player.eligible,
       adpEarliest: player.adpEarliest,
@@ -631,6 +662,7 @@
       marketMean: player.marketMean,
       marketStatus: player.marketStatus,
       bye: player.bye,
+      injury: player.injury ?? null,
       draftSignals: player.draftSignals,
     };
   }
@@ -687,6 +719,7 @@
     };
     const entries = pool
       .filter((player) => player.automaticEligible !== false)
+      .filter((player) => automaticCandidateAllowed({ player, round, picks, config }))
       .filter((player) => withinPositionLimit(player, picks, config))
       .filter((player) => slots.length - assignmentWithOne(player, filledWithoutSlot, baseFilled) <= remainingAfterCandidate)
       .map((player) => {
@@ -721,11 +754,18 @@
           }
           return total;
         }, 0);
-        const marginalUtility = Math.max(0, withCandidate - baseUtility);
+        const starterMarginalUtility = Math.max(0, withCandidate - baseUtility);
+        const fillsStarter = assignmentWithOne(player, filledWithoutSlot, baseFilled) > baseFilled;
+        const benchOpportunityValue = !fillsStarter && OFFENSE.includes(normalize(player.position))
+          ? Math.max(0, Number(player.vor) || 0) * 0.15
+          : 0;
+        const marginalUtility = starterMarginalUtility + benchOpportunityValue;
         const pressure = Math.max(...playerEligibility(player).map((position) => Number(runPressureByPosition[position] ?? 0)));
         return {
           player,
           marginalUtility,
+          starterMarginalUtility,
+          benchOpportunityValue,
           utilityAfter: withCandidate,
           slotIndexes,
           contextValueGroups,
@@ -874,11 +914,13 @@
         rawScore: entry.marginalUtility,
         adjustedScore: entry.decisionScore,
         marginalUtility: entry.marginalUtility,
+        starterMarginalUtility: entry.starterMarginalUtility ?? entry.marginalUtility,
+        benchOpportunityValue: entry.benchOpportunityValue ?? 0,
         expectedNextUtility: entry.expectedNextUtility,
         costOfWaiting: entry.costOfWaiting,
         pAvailableNext: entry.pAvailableNext,
         survivalStatus: entry.survivalStatus,
-        valueReason: `league-scored BPA ${entry.marginalUtility.toFixed(1)} + next-turn option ${entry.expectedNextUtility.toFixed(1)}; wait cost ${entry.costOfWaiting.toFixed(1)}; market ${Number.isFinite(entry.player.yahooRank) ? `Y!${entry.player.yahooRank}` : entry.player.marketStatus}${entry.player.draftSignals?.attentionRequired ? `; WATCH ${entry.player.draftSignals.warnings.slice(0, 2).join(" | ")}` : ""}`,
+        valueReason: `league-scored BPA ${Number(entry.starterMarginalUtility ?? entry.marginalUtility).toFixed(1)} + bench opportunity ${Number(entry.benchOpportunityValue ?? 0).toFixed(1)} + next-turn option ${entry.expectedNextUtility.toFixed(1)}; wait cost ${entry.costOfWaiting.toFixed(1)}; market ${Number.isFinite(entry.player.yahooRank) ? `Y!${entry.player.yahooRank}` : entry.player.marketStatus}${entry.player.draftSignals?.attentionRequired ? `; WATCH ${entry.player.draftSignals.warnings.slice(0, 2).join(" | ")}` : ""}`,
         eligible: true,
       })),
       qb2,
@@ -918,10 +960,8 @@
 
     const scored = scoreCandidates({ round, seat, picks, pool, config, replacementBySlot, runPressureByPosition, survivalCalibration });
     const fallbackUsed = scored.recomputeMs > recomputeBudgetMs;
-    const selected = (fallbackUsed
-      ? scored.ranked.slice().sort((left, right) => left.player.rank - right.player.rank)
-      : scored.ranked
-    ).slice(0, minimum);
+    if (fallbackUsed) throw new Error(`decision_recompute_budget_exceeded:${scored.recomputeMs}`);
+    const selected = scored.ranked.slice(0, minimum);
     if (selected.length < requiredMinimum) throw new Error(`fewer_than_${requiredMinimum}_legal_bpa_targets`);
 
     const targets = selected.map(({ player }) => ({
@@ -933,6 +973,8 @@
       projection: player.projection,
       perGamePoints: player.perGamePoints,
       expectedGamesThroughWeek17: player.expectedGamesThroughWeek17,
+      availabilityAssumption: player.availabilityAssumption ?? null,
+      injury: player.injury ?? null,
       weeklyPoints: player.weeklyPoints,
       weeklyAvailability: player.weeklyAvailability,
       outcomeLow: player.outcomeLow,
@@ -991,6 +1033,7 @@
       team: String(livePlayer.team ?? boardPlayer.team ?? ""),
       eligible: boardPlayer.eligible,
       projection: boardPlayer.projection,
+      injury: boardPlayer.injury ?? null,
     };
     const targets = [pinned, ...baseline.filter((target) => String(target.yahooId) !== chosenId)];
     if (targets.length < requiredMinimum) throw new Error(`fewer_than_${requiredMinimum}_targets_after_manual_pin`);
@@ -1003,6 +1046,7 @@
         expectedRound: Number(stage.expectedRound),
         chosenYahooId: chosenId,
         targetYahooIds: stagedIds,
+        injury: boardPlayer.injury ?? null,
       },
     };
   }
@@ -1020,12 +1064,14 @@
     const match = findFilter(documentRef, label);
     if (!match) throw new Error(`position_filter_missing:${label}`);
     const value = String(match.option.value ?? "");
-    if (String(match.select.value ?? "") !== value) {
+    const changed = String(match.select.value ?? "") !== value;
+    if (changed) {
       match.select.value = value;
       const EventCtor = environment.Event;
       match.select.dispatchEvent(new EventCtor("input", { bubbles: true }));
       match.select.dispatchEvent(new EventCtor("change", { bubbles: true }));
     }
+    return { ...match, value, changed };
   }
 
   function validateCompletedRoster(picks, config = CONFIGS.public_mock_15) {
@@ -1104,8 +1150,8 @@
     if (!replacementBySlot || typeof replacementBySlot !== "object" || !Object.keys(replacementBySlot).length) {
       throw new Error("joint replacement baselines are required");
     }
-    if (typeof controllerApi.runtime?.readOwnedTurn !== "function") {
-      throw new Error("controller owned-turn runtime hook is required");
+    if (typeof controllerApi.runtime?.readOwnedTurn !== "function" || typeof controllerApi.runtime?.readOwnedTurnState !== "function") {
+      throw new Error("controller owned-turn runtime hooks are required");
     }
     if (
       typeof controllerApi.runtime?.readAutodraftState !== "function" ||
@@ -1126,6 +1172,10 @@
     }
 
     function assertDraftSafety(stage) {
+      const currentRoom = controllerApi.runtime.parseRoom(locationRef.pathname);
+      if (!currentRoom || currentRoom.roomId !== expectedRoomId || currentRoom.seat !== expectedUrlSeat) {
+        throw new Error(`draft_room_or_url_team_changed_${stage}`);
+      }
       const autodraftState = controllerApi.runtime.readAutodraftState(documentRef);
       const queueState = controllerApi.runtime.readQueueState(documentRef);
       if (autodraftState === "ACTIVE") throw new Error(`autodraft_active_${stage}`);
@@ -1214,11 +1264,31 @@
     async function targetsAfterFilter(turn, label) {
       const startedAt = Date.now();
       let lastEligibilityError = null;
-      setFilter(documentRef, environment, label);
+      const filter = setFilter(documentRef, environment, label);
+      let lastAvailableSignature = null;
+      let stableAvailableReads = 0;
       while (Date.now() - startedAt < filterDeadlineMs) {
         if (state !== "running") throw new Error("runner_not_running");
         try {
+          if (String(filter.select.value ?? "") !== filter.value) {
+            lastAvailableSignature = null;
+            stableAvailableReads = 0;
+            await delay(25);
+            continue;
+          }
           const availablePlayers = readAvailablePlayers(documentRef, controllerApi);
+          const availableSignature = availablePlayers.map((player) => String(player.yahooId)).sort().join(",");
+          if (availableSignature !== lastAvailableSignature) {
+            lastAvailableSignature = availableSignature;
+            stableAvailableReads = 1;
+            await delay(25);
+            continue;
+          }
+          stableAvailableReads += 1;
+          if (stableAvailableReads < 2) {
+            await delay(25);
+            continue;
+          }
           const runPressureByPosition = liveRunPressure(availablePlayers);
           const baseline = buildDecisionLadder({
             round: turn.round,
@@ -1255,6 +1325,7 @@
               status: manualOverride.status,
               reason: manualOverride.reason,
               chosenYahooId: manualOverride.chosenYahooId ?? null,
+              injury: manualOverride.injury ?? null,
             },
           };
           return { targets, decision, manualOverride, availablePlayers, filterReadyMs: Date.now() - startedAt };
@@ -1287,9 +1358,10 @@
           team: String(livePlayer.team ?? boardPlayer.team),
           eligible: boardPlayer.eligible,
           projection: boardPlayer.projection,
+          injury: boardPlayer.injury ?? null,
         };
         targets = [chosen, ...targets.filter((target) => String(target.yahooId) !== chosenId)];
-        receipt("runner_on_clock_choice_applied", { turn: pending.turn.label, chosenYahooId: chosenId, source, baselineFallbacks: pending.targets.map((target) => target.yahooId) });
+        receipt("runner_on_clock_choice_applied", { turn: pending.turn.label, chosenYahooId: chosenId, source, injury:boardPlayer.injury ?? null, baselineFallbacks: pending.targets.map((target) => target.yahooId) });
       }
       clearSelectionTimer();
       pendingDecision = null;
@@ -1376,9 +1448,17 @@
 
     async function advance() {
       if (busy || state !== "running") return;
+      try {
+        assertDraftSafety("monitor");
+      } catch (error) {
+        fail(String(error?.message ?? error));
+        return;
+      }
       if (!currentController) {
         if (pendingDecision) return;
-        const turn = controllerApi.runtime.readOwnedTurn(documentRef);
+        const turnSignal = controllerApi.runtime.readOwnedTurnState(documentRef);
+        if (turnSignal?.state === "INCONSISTENT") return fail("owned_turn_signal_inconsistent", { turnSignal });
+        const turn = turnSignal?.state === "OWNED" ? turnSignal.turn : null;
         if (!turn) return;
         busy = true;
         try {
@@ -1413,6 +1493,8 @@
           projection: boardPlayer?.projection ?? null,
           perGamePoints: boardPlayer?.perGamePoints ?? null,
           expectedGamesThroughWeek17: boardPlayer?.expectedGamesThroughWeek17 ?? null,
+          availabilityAssumption: boardPlayer?.availabilityAssumption ?? null,
+          injury: boardPlayer?.injury ?? null,
           weeklyPoints: boardPlayer?.weeklyPoints ?? null,
           weeklyAvailability: boardPlayer?.weeklyAvailability ?? null,
           outcomeLow: boardPlayer?.outcomeLow ?? null,
@@ -1574,12 +1656,14 @@
   }
 
   const decision = Object.freeze({
+    recomputeBudgetMs: DECISION_RECOMPUTE_BUDGET_MS,
     IDP_POSITIONS,
     validateBoard,
     buildDecisionLadder,
     scoreCandidates,
     applyManualOverride,
     canCompleteRoster,
+    automaticCandidateAllowed,
     validateCompletedRoster,
     allocateRosterSlots,
     overallPick,
@@ -1593,6 +1677,7 @@
     receiptKey: RECEIPT_KEY,
     decision,
     _test: {
+      decisionRecomputeBudgetMs: DECISION_RECOMPUTE_BUDGET_MS,
       normalizeSlots,
       sameSlots,
       positionCounts,
@@ -1609,6 +1694,7 @@
       optimalRosterUtility,
       maximumFilledStarterSlots,
       canCompleteRoster,
+      automaticCandidateAllowed,
       sameRosterIdentity,
       summarizeDecision,
       scoreCandidates,

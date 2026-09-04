@@ -84,10 +84,11 @@
       if (!Number.isInteger(tabId)) return false;
       const at = Number.isFinite(Number(message?.at)) ? Number(message.at) : clock();
       const role = message?.role;
-      const stored = await session.get(["skz.runnerSeenAt", "skz.armSeenAt", "skz.armSnapshot", "skz.observerSnapshot"]);
+      const stored = await session.get(["skz.runnerTabId", "skz.runnerSeenAt", "skz.armSeenAt", "skz.armSnapshot", "skz.observerSnapshot"]);
       const update = {};
 
       if (role === "runner") {
+        if (fresh(stored["skz.runnerSeenAt"]) && Number(stored["skz.runnerTabId"]) !== tabId) return false;
         update["skz.runnerTabId"] = tabId;
         update["skz.runnerSeenAt"] = at;
         update["skz.heartbeatAt"] = at;

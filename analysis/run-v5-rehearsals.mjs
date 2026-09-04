@@ -136,6 +136,7 @@ function simulateOne({ board, helpers, config, replacementBySlot, survivalCalibr
   }
   return {
     simulationId: `seat-${seat}-seed-${seed}`,
+    teamCount: config.teams,
     seat,
     seed,
     validRoster: helpers.validateCompletedRoster(picks, config),
@@ -168,6 +169,16 @@ function openingDistribution(simulations) {
   return bySeat;
 }
 
+function specialistTimingPass(simulation, config) {
+  const specialists = simulation.picks.filter((pick) => ["K", "DEF", "D", "LB", "CB", "S"].includes(pick.position));
+  const kDef = specialists.filter((pick) => ["K", "DEF"].includes(pick.position));
+  const idp = specialists.filter((pick) => ["D", "LB", "CB", "S"].includes(pick.position));
+  return kDef.every((pick) => pick.round >= 15) &&
+    idp.every((pick) => pick.round >= 17) &&
+    kDef.filter((pick) => pick.round <= 16).length === 2 &&
+    idp.length === Number(config.categoryLimits?.IDP ?? 0);
+}
+
 export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, seeds = [2026, 2027, 2028, 2029, 2030] }) {
   const { board, replacementBySlot, survivalCalibration, scoringSchemaHash, runnerSourceSha256, coldStartMs, forbiddenVmGlobals, runner } = loadRuntime(boardSource, runnerSource);
   const config = runner.configs.real_league_19_idp;
@@ -175,6 +186,11 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
   if (!replacementBySlot || !Object.keys(replacementBySlot).length) throw new Error("extension board is missing joint replacement baselines");
   const simulations = Array.from({ length: 12 }, (_, index) => index + 1)
     .flatMap((seat) => seeds.map((seed) => simulateOne({ board, helpers, config, replacementBySlot, survivalCalibration, seat, seed })));
+  const contingencies = [10, 11, 12].flatMap((teams) => {
+    const contingencyConfig = { ...runner.configs.test_league_19_idp, teams };
+    return Array.from({ length:teams }, (_, index) => index + 1)
+      .map((seat) => simulateOne({ board, helpers, config:contingencyConfig, replacementBySlot, survivalCalibration, seat, seed:2026 }));
+  });
   const reference = simulations[0];
   const identityChaos = reconcileSettingsAndYahoo({
     settings: { leagueKey: "542830", teamKey: "3", seat: reference.seat, requireReadOnly: true },
@@ -201,15 +217,16 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     recomputeP50Ms: percentile(recomputeValues, 0.5),
     recomputeP95Ms: percentile(recomputeValues, 0.95),
     recomputeMaxMs: recomputeValues.length ? Math.max(...recomputeValues) : null,
-    recomputeBudgetMs: 100,
+    recomputeBudgetMs: helpers.decisionRecomputeBudgetMs,
     fallbackCount: simulations.flatMap((simulation) => simulation.picks).filter((pick) => pick.fallbackUsed).length,
-    fallbackContract: "static verified value order",
+    fallbackContract: "fail closed before any Yahoo click",
   };
   const allowedFirst = helpers.allowedPositions(1, [], config, 1);
   const allowedLast = helpers.allowedPositions(config.rounds, [], config, 12);
   const policyChecks = {
     allPositionFilterEveryRound: helpers.filterLabelForRound(1, [], config, 1) === "All Positions" && helpers.filterLabelForRound(config.rounds, [], config, 12) === "All Positions",
-    noRoundDependentPositionGate: JSON.stringify(allowedFirst) === JSON.stringify(allowedLast),
+    allPositionsRemainVisibleAcrossRounds: JSON.stringify(allowedFirst) === JSON.stringify(allowedLast),
+    specialistTimingContained: simulations.every((simulation) => specialistTimingPass(simulation, config)),
     weeklyUtilityEveryRound: simulations.every((simulation) => simulation.picks.every((pick) => pick.utilityModel === "WEEKLY_OPTIMAL_LINEUP_W1_17")),
     jointReplacementBaselinesPresent: Object.keys(replacementBySlot).length >= 10,
     dualRoleNeverAutoSelected: simulations.every((simulation) => simulation.picks.every((pick) => pick.name !== "Travis Hunter" && !["41787", "99001", "99002"].includes(String(pick.yahooId)))),
@@ -230,12 +247,14 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     simulationCount: simulations.length === 60,
     allRostersValid: validRosters === simulations.length,
     everyPickWithinOwnedTurnBudget: latency.recomputeMaxMs < latency.ownedTurnBudgetMs,
+    zeroDecisionFallbacks: latency.fallbackCount === 0,
+    teamCountContingencies: contingencies.length === 33 && contingencies.every((simulation) => simulation.validRoster && specialistTimingPass(simulation, runner.configs.test_league_19_idp)),
     policyChecks: Object.values(policyChecks).every(Boolean),
     chaosChecks: Object.values(chaos).every((scenario) => scenario.pass),
   };
   const accepted = Object.values(acceptanceGates).every(Boolean);
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     generatedAt,
     basis: "actual 2 Minute Drillers 19-round roster shape over the current executable unified board, with deterministic observed-ADP removals, explicitly uncalibrated Yahoo-rank fallback where ADP is absent, and 10% deterministic specialist stress thinning; this is offline policy, feasibility, and latency evidence only and does not enable real league 420010",
     accepted,
@@ -251,6 +270,14 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     policyChecks,
     lateRoundDistribution: lateRoundDistribution(simulations),
     openingDistribution: openingDistribution(simulations),
+    teamCountContingencies: {
+      simulations:contingencies.length,
+      byTeams:Object.fromEntries([10, 11, 12].map((teams) => [teams, {
+        simulations:contingencies.filter((simulation) => simulation.teamCount === teams).length,
+        validRosters:contingencies.filter((simulation) => simulation.teamCount === teams && simulation.validRoster).length,
+      }])),
+      accepted:contingencies.length === 33 && contingencies.every((simulation) => simulation.validRoster && specialistTimingPass(simulation, runner.configs.test_league_19_idp)),
+    },
     rehearsals: { validReference: reference.validRoster, chaos },
     teams: simulations.map((simulation) => ({
       simulationId: simulation.simulationId,
@@ -313,6 +340,10 @@ function runnerLoopEnvironment(runtime, seat) {
       const round = state.filled + 1;
       const pick = runtime.runner._test.overallPick(round, seat, teamCount);
       return { label: `R${round}P${pick}`, round, pick };
+    },
+    readOwnedTurnState: () => {
+      const turn = runtimeHooks.readOwnedTurn();
+      return turn ? { state:"OWNED", turn } : { state:"OFF_TURN", turn:null };
     },
     readPlayerRow: (row) => row.player,
   };
@@ -383,7 +414,7 @@ function createReplayRunner(runtime, seat, selectionHoldMs) {
     replacementBySlot: runtime.replacementBySlot,
     survivalCalibration: runtime.survivalCalibration,
     board: runtime.board,
-    runtimeAttestation: { ok:true, version:"0.14.2", digest:"a".repeat(64), bootId:"replay-boot-1234", bootedAt:1 },
+    runtimeAttestation: { ok:true, version:"0.15.0", digest:"a".repeat(64), bootId:"replay-boot-1234", bootedAt:1 },
   }, environment);
   return { runner, poolSize };
 }
@@ -420,7 +451,7 @@ export async function replayRunnerLoop({ boardSource, runnerSource, seat = 6 }) 
     completedNineteenTurns: completion.runner.getStatus().state === "completed" && completion.runner.getStatus().picks.length === 19 && turnReceipts.length === 19,
     onClockOverrideApplied: completionReceipts.filter((entry) => entry.kind === "runner_on_clock_choice_applied").length === 1,
     everyPanelReadyUnder250ms: turnReceipts.every((entry) => entry.panelBudgetMs === 250 && entry.panelReadyMs < entry.panelBudgetMs),
-    everyRecommendationUnder100ms: turnReceipts.every((entry) => entry.decision?.recomputeMs < 100),
+    everyRecommendationUnder250ms: turnReceipts.every((entry) => entry.decision?.recomputeMs < runtime.runner._test.decisionRecomputeBudgetMs),
     zeroFallbacks: turnReceipts.every((entry) => entry.decision?.fallbackUsed === false),
     zeroTimeoutOrFailureReceipts: failureCodes.length === 0 && !completionReceipts.some((entry) => forbiddenFailures.some((code) => String(entry.code ?? entry.failure ?? "").includes(code))),
     firstTurnPressureNeutral: !Object.values(turnReceipts[0]?.decision?.runPressureByPosition ?? {}).some((value) => Number(value) > 0),

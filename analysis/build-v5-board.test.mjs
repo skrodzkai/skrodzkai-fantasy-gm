@@ -144,6 +144,25 @@ test("uses the baseline Sleeper ID when the current Sleeper record omits its Yah
   assert.equal(board.players[0].automaticEligible, false);
 });
 
+test("fresh non-conflicting injury review remains manual-only", () => {
+  const board = fixture({
+    offenseSnapshot: {
+      observedAt:"2026-08-22T10:00:00Z",
+      players:[{ yahooId:"1", name:"Quarterback", team:"BUF", position:"QB", yahooProjectedPoints:420, injuryStatus:"Q" }],
+    },
+    sleeperPlayers:{ s1:{ yahoo_id:1, status:"Active", injury_status:"Questionable", injury_body_part:"Knee" } },
+    projectionSnapshots:[{
+      manifest:{ snapshotId:"espn-clay-test", sourceId:"espn-mike-clay", sourceFamily:"espn-clay", sourceAsOf:"2026-08-22T11:00:00Z", retrievedAt:"2026-08-22T11:10:00Z", contentSha256:"a".repeat(64), gamesBasis:"17", projectionPeriod:"2026", licenseUseNote:"test" },
+      rows:[{ playerId:"1", name:"Quarterback", team:"BUF", position:"QB", projectionGames:17, stats:{ passingCompletions:300, passingYards:4000, passingTouchdowns:30, interceptions:10 } }],
+    }],
+  });
+  assert.equal(board.players[0].injury.draftAction, "REVIEW");
+  assert.equal(board.players[0].injury.conflict, false);
+  assert.equal(board.players[0].automaticEligible, false);
+  assert.equal(board.players[0].manualEligible, true);
+  assert.equal(board.players[0].validationStatus, "INJURY_REVIEW");
+});
+
 test("filter membership preserves dual-role Yahoo eligibility evidence", () => {
   const board = fixture({
     specialistSnapshot: {

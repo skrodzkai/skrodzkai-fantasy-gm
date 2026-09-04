@@ -1,7 +1,7 @@
 (function installYahooMockExtension(root) {
   "use strict";
 
-  const VERSION = "0.14.2";
+  const VERSION = "0.15.0";
   const GLOBAL_KEY = "__skrodzkaiYahooMockExtensionV1";
   const PREFLIGHT_KEY = "skrodzkai-yahoo-mock-extension-preflight-v1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-extension-receipts-v1";
@@ -953,7 +953,9 @@
       if (stopped) return null;
       try {
         const pending = runtime.sendMessage(message);
-        void Promise.resolve(pending).catch(invalidate);
+        void Promise.resolve(pending).then((response) => {
+          if (message?.type === "state" && response?.ok === false) invalidate(new Error("runner_lease_conflict"));
+        }).catch(invalidate);
         return pending;
       } catch (error) {
         invalidate(error);
@@ -1406,8 +1408,9 @@
         const stage = readJson(environment.sessionStorage, MANUAL_STAGE_KEY, null);
         environment.sessionStorage.removeItem(MANUAL_STAGE_KEY);
         rail.setPinOutcome(outcome);
-        writeReceipt(environment.localStorage, { kind: `manual_pin_${outcome.status}`, roomId: room.roomId, seat: draftSeat, expectedRound: outcome.expectedRound, chosenYahooId: outcome.chosenYahooId ?? null, failure: outcome.reason ?? null, baselineRetained: outcome.status === "rejected" });
-        rail.addEvent(`manual pin ${outcome.status}`, outcome.chosenYahooId ? `Y!${outcome.chosenYahooId} · R${outcome.expectedRound}` : `${outcome.reason ?? "not applied"} · ${stage?.targets?.length ?? 0} staged`);
+        writeReceipt(environment.localStorage, { kind: `manual_pin_${outcome.status}`, roomId: room.roomId, seat: draftSeat, expectedRound: outcome.expectedRound, chosenYahooId: outcome.chosenYahooId ?? null, injury:outcome.injury ?? null, failure: outcome.reason ?? null, baselineRetained: outcome.status === "rejected" });
+        const injuryWarning = outcome.injury?.draftAction === "REVIEW" ? ` · INJURY REVIEW: ${outcome.injury.status ?? "UNKNOWN"}` : "";
+        rail.addEvent(`manual pin ${outcome.status}`, outcome.chosenYahooId ? `Y!${outcome.chosenYahooId} · R${outcome.expectedRound}${injuryWarning}` : `${outcome.reason ?? "not applied"} · ${stage?.targets?.length ?? 0} staged`);
       },
       onAlert: ({ state, failure, reason }) => rail.render("bad", state, failure?.code ?? reason ?? "runner stopped"),
     }, environment);
@@ -1420,8 +1423,8 @@
         if (status.pendingDecision) {
           if (!chosen?.yahooId) throw new Error("on-clock choice requires one exact Yahoo player");
           const applied = runner.chooseOnClock(chosen.yahooId, "command_center");
-          writeReceipt(environment.localStorage, { kind: applied ? "on_clock_choice_applied" : "on_clock_choice_rejected", roomId: room.roomId, seat: draftSeat, expectedRound: status.picks.length + 1, chosenYahooId: String(chosen.yahooId), baselineRetained: !applied });
-          rail.addEvent(applied ? "on-clock choice applied" : "on-clock choice rejected", `${chosen.name ?? `Y!${chosen.yahooId}`} · baseline ${applied ? "fallbacks retained" : "unchanged"}`);
+          writeReceipt(environment.localStorage, { kind: applied ? "on_clock_choice_applied" : "on_clock_choice_rejected", roomId: room.roomId, seat: draftSeat, expectedRound: status.picks.length + 1, chosenYahooId: String(chosen.yahooId), injury:chosen.injury ?? null, baselineRetained: !applied });
+          rail.addEvent(applied ? "on-clock choice applied" : "on-clock choice rejected", `${chosen.name ?? `Y!${chosen.yahooId}`} · baseline ${applied ? "fallbacks retained" : "unchanged"}${chosen.injury?.draftAction === "REVIEW" ? ` · INJURY REVIEW: ${chosen.injury.status ?? "UNKNOWN"}` : ""}`);
           if (applied) rail.render("ok", "CHOICE LOCKED", `${chosen.name ?? `Y!${chosen.yahooId}`} · Yahoo click in progress`);
           return applied;
         }
