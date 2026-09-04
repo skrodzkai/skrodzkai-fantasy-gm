@@ -20,6 +20,7 @@ function compactOffense(player) {
     projection: Number(player.consensusPoints),
     perGamePoints: finite(player.perGamePoints) ? Number(player.perGamePoints) : null,
     expectedGamesThroughWeek17: finite(player.expectedGamesThroughWeek17) ? Number(player.expectedGamesThroughWeek17) : null,
+    availabilityAssumption: player.availabilityAssumption ?? null,
     weeklyPoints: Array.isArray(player.weeklyPoints) ? player.weeklyPoints.map(Number) : null,
     weeklyAvailability: Array.isArray(player.weeklyAvailability) ? player.weeklyAvailability.map(Number) : null,
     outcomeLow: finite(player.outcomeLow) ? Number(player.outcomeLow) : null,
@@ -35,6 +36,13 @@ function compactOffense(player) {
     omittedScoringCategories: Array.from(player.omittedScoringCategories ?? []),
     projectionBlendPolicy: player.projectionBlendPolicy ?? "unspecified",
     draftSignals: player.draftSignals ?? null,
+    injury: player.injury == null ? null : {
+      status: player.injury.status ?? "UNKNOWN",
+      draftAction: player.injury.draftAction ?? "REVIEW",
+      blockReason: player.injury.blockReason ?? null,
+      conflict: player.injury.conflict === true,
+      freshestAt: player.injury.freshestAt ?? null,
+    },
   };
 }
 
@@ -61,6 +69,7 @@ function compactSpecialist(player, positionOverride = null) {
     perGamePoints: finite(player.rankingPerGamePoints) ? Number(player.rankingPerGamePoints) : finite(player.perGamePoints) ? Number(player.perGamePoints) : null,
     rawPerGamePoints: finite(player.perGamePoints) ? Number(player.perGamePoints) : null,
     expectedGamesThroughWeek17: finite(player.expectedGamesThroughWeek17) ? Number(player.expectedGamesThroughWeek17) : null,
+    availabilityAssumption: player.availabilityAssumption ?? null,
     weeklyPoints: Array.isArray(player.weeklyPoints) ? player.weeklyPoints.map(Number) : null,
     rawWeeklyPoints: Array.isArray(player.rawWeeklyPoints) ? player.rawWeeklyPoints.map(Number) : null,
     weeklyAvailability: Array.isArray(player.weeklyAvailability) ? player.weeklyAvailability.map(Number) : null,
@@ -86,15 +95,24 @@ function compactSpecialist(player, positionOverride = null) {
     idpModelWarning: player.idpModelWarning ?? null,
     idpCalibrationHash: player.idpCalibrationHash ?? null,
     draftSignals: player.draftSignals ?? null,
+    injury: player.injury == null ? null : {
+      status: player.injury.status ?? "UNKNOWN",
+      draftAction: player.injury.draftAction ?? "REVIEW",
+      blockReason: player.injury.blockReason ?? null,
+      conflict: player.injury.conflict === true,
+      freshestAt: player.injury.freshestAt ?? null,
+    },
   };
 }
 
-function specialistHealthClear(player) {
-  return player.injury != null && player.injury.draftAction === "CLEAR" && player.injury.conflict !== true;
+function specialistHealthAllowed(player) {
+  if (player.injury == null || player.injury.conflict === true) return false;
+  if (player.injury.draftAction === "CLEAR") return true;
+  return player.injury.draftAction === "REVIEW" && player.manualEligible === true;
 }
 
 function specialistUsable(player) {
-  return specialistHealthClear(player) && finite(player.consensusPoints) && Number(player.consensusPoints) > 0;
+  return specialistHealthAllowed(player) && finite(player.consensusPoints) && Number(player.consensusPoints) > 0;
 }
 
 export function extensionBoardFromV5(board) {

@@ -26,7 +26,7 @@ const settingsBody = [
   "Draft Type:\tLive Standard Draft",
   "Max Teams:\t12",
   "Live Draft Pick Time:\t30 Seconds",
-  "Passing Touchdowns\t6",
+  "Passing Touchdowns\tYahoo Default\t6",
   "Receptions\t.25",
   "Roster Positions:\tQB, WR, WR, WR, RB, RB, TE, W/R/T, K, DEF, D, DB, LB, BN, BN, BN, BN, BN, BN, IR",
 ].join("\n");
@@ -47,7 +47,8 @@ test("verifies the exact real league settings while keeping team ID separate fro
 test("fails closed on any clock, scoring, identity, or roster mismatch", () => {
   for (const changed of [
     settingsBody.replace("30 Seconds", "1 Minute"),
-    settingsBody.replace("Passing Touchdowns\t6", "Passing Touchdowns\t4"),
+    settingsBody.replace("Passing Touchdowns\tYahoo Default\t6", "Passing Touchdowns\tYahoo Default\t4"),
+    settingsBody.replace("Passing Touchdowns\tYahoo Default\t6", "Passing Touchdowns\tYahoo Default\t6.5"),
     settingsBody.replace("Receptions\t.25", "Receptions\t1"),
     settingsBody.replace("2 minute Drillers", "Other League"),
     settingsBody.replace(", DB", ""),
@@ -74,7 +75,7 @@ test("draft-client snapshot is read-only and uses a fresh exact settings receipt
 
 test("REAL SHADOW displays healthy runtime identity and locks when attestation is unavailable", () => {
   const document = documentFixture(settingsBody);
-  const attestation = { ok:true, version:"0.14.2", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1_000 };
+  const attestation = { ok:true, version:"0.15.0", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1_000 };
   const healthy = helpers.buildSnapshot({ documentRef:document, locationRef:{ pathname:"/f1/420010/settings" }, settings:null, boardData:healthyBoard(1_000), attestation, now:1_001 });
   assert.equal(healthy.label, "REAL SHADOW · READ ONLY");
   assert.equal(healthy.attestation.digest, "a".repeat(64));

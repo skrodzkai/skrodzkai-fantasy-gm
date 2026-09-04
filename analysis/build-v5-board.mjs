@@ -364,7 +364,11 @@ export function assembleV5Board({
       splitDualRoleIdentities.has(identityKey(player.name, player.team)) ||
       (player.eligible.some((position) => ["QB", "RB", "WR", "TE"].includes(position)) &&
       player.eligible.some((position) => ["DL", "LB", "DB", "CB", "S", "D"].includes(position)));
-    const expectedGamesThroughWeek17 = expectedGamesFromInjury(injury);
+    const freshInjuryEvidence = injury.evidence.some((entry) => entry?.fresh === true);
+    const manualHealthEligible = injury.draftAction === "CLEAR" ||
+      (injury.draftAction === "REVIEW" && injury.conflict !== true && freshInjuryEvidence);
+    const reviewedAvailabilityAssumption = injury.draftAction === "REVIEW" && manualHealthEligible ? 16 : null;
+    const expectedGamesThroughWeek17 = expectedGamesFromInjury(injury) ?? reviewedAvailabilityAssumption;
     const projectionGames = Number(player.expectedGames);
     const hasOutcomeRate = Number.isFinite(projectionGames) && projectionGames > 0;
     const rawWeeklyProfile = Number.isFinite(Number(player.perGamePoints)) && expectedGamesThroughWeek17 != null
@@ -392,9 +396,11 @@ export function assembleV5Board({
     const specialistPosition = player.eligible.some((position) => ["K", "DEF", "DL", "LB", "DB", "CB", "S", "D"].includes(position));
     const yahooOnlyLateSpecialist = !offensePosition && player.eligible.some((position) => ["K", "DEF"].includes(position)) && player.sourceFamilies.includes("yahoo") && player.scorableSourceFamilyCount === 1;
     const executable = projectionUsable && injury.executable && (player.executable || yahooOnlyLateSpecialist);
-    const manualEligible = projectionUsable && injury.executable;
+    const manualEligible = projectionUsable && manualHealthEligible;
     const validationStatus = dualRole
       ? "DUAL_ROLE_SCORING_UNVERIFIED"
+      : injury.draftAction === "REVIEW"
+        ? "INJURY_REVIEW"
       : yahooOnlyLateSpecialist
           ? "UNVALIDATED_SPECIALIST_PROJECTION"
           : player.executable
@@ -405,6 +411,7 @@ export function assembleV5Board({
     return {
       ...player,
       injury,
+      availabilityAssumption: reviewedAvailabilityAssumption == null ? null : "MANUAL_REVIEW_ASSUMES_AVAILABLE_EXCEPT_BYE",
       expectedGamesThroughWeek17,
       weeklyPoints: weeklyProfile?.weeklyPoints ?? null,
       rawWeeklyPoints: rawWeeklyProfile?.weeklyPoints ?? null,

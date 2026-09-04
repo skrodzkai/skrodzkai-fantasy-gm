@@ -46,6 +46,15 @@
     return match ? { label: `R${match[1]}P${match[2]}`, round: Number(match[1]), pick: Number(match[2]) } : null;
   }
 
+  function readOwnedTurnState(documentRef) {
+    const titleOwned = String(documentRef.title ?? "").startsWith("YOUR TURN");
+    const banners = textLines(documentRef.body?.innerText)
+      .filter((line) => /^YOUR TURN • ROUND \d+, PICK \d+$/.test(line));
+    if (titleOwned && banners.length === 1) return { state:"OWNED", turn:readOwnedTurn(documentRef) };
+    if (!titleOwned && banners.length === 0) return { state:"OFF_TURN", turn:null };
+    return { state:"INCONSISTENT", turn:null, titleOwned, bannerCount:banners.length };
+  }
+
   function buttonText(button) {
     return String(button?.innerText ?? button?.textContent ?? "").trim();
   }
@@ -113,6 +122,30 @@
     };
   }
 
+  function readTeamRosterPlayerIds(documentRef, expectedRoster = null) {
+    const roster = expectedRoster ?? parseRosterCount(documentRef.body?.innerText);
+    if (!roster || !Number.isInteger(roster.filled) || roster.filled < 0 || !Number.isInteger(roster.total) || roster.total <= 0) return null;
+    if (roster.filled === 0) return { ...roster, yahooIds:[] };
+    const headingPattern = new RegExp(`^YOUR TEAM ${roster.filled}/${roster.total}$`);
+    const headings = [...documentRef.querySelectorAll("h1,h2,h3,h4,h5,h6,div,span")]
+      .filter((element) => textLines(element?.innerText).some((line) => headingPattern.test(normalize(line))));
+    const candidates = [];
+    for (const heading of headings) {
+      let node = heading;
+      for (let depth = 0; node && depth <= 8; depth += 1, node = node.parentElement) {
+        const playerNodes = [...(node.querySelectorAll?.(".ys-player[data-id]") ?? [])];
+        const yahooIds = [...new Set(playerNodes.map((player) => String(player.getAttribute?.("data-id") ?? "")).filter(Boolean))];
+        if (yahooIds.length === roster.filled && playerNodes.length === roster.filled) {
+          candidates.push({ yahooIds, depth, textLength:String(node.innerText ?? "").length });
+          break;
+        }
+      }
+    }
+    if (!candidates.length) return null;
+    candidates.sort((left, right) => left.textLength - right.textLength || left.depth - right.depth);
+    return { ...roster, yahooIds:candidates[0].yahooIds };
+  }
+
   function boardHealthReceipt(boardData, now = Date.now(), maximumAgeMs = 24 * 60 * 60 * 1000) {
     const generatedAtMs = Date.parse(boardData?.generatedAt);
     const ageMs = Number.isFinite(generatedAtMs) ? now - generatedAtMs : null;
@@ -141,8 +174,8 @@
   }
 
   root.SKRODZKaiYahooPageReaders = Object.freeze({
-    normalize, textLines, parseRoom, parseRosterCount, parseRosterSlots, readOwnedTurn,
+    normalize, textLines, parseRoom, parseRosterCount, parseRosterSlots, readOwnedTurn, readOwnedTurnState,
     buttonText, readAutodraftState, isAutodraftActive, readQueueState, readDraftClock,
-    isVisible, blockers, readPlayerRow, boardHealthReceipt, boardHealthGate,
+    isVisible, blockers, readPlayerRow, readTeamRosterPlayerIds, boardHealthReceipt, boardHealthGate,
   });
 })(globalThis);

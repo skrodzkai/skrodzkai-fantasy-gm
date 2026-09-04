@@ -77,6 +77,7 @@ test("exports only executable offense while retaining explicitly labeled special
   assert.equal(board.offense.some((entry) => entry.yahooId === "RB-2"), true);
   assert.equal(board.offense.find((entry) => entry.yahooId === "RB-2").adpLow, null);
   assert.equal(board.kickers[0].confidence, "YAHOO_ONLY");
+  assert.equal(board.kickers.some((entry) => entry.yahooId === "K-2"), true);
   assert.equal(board.defenses.length, 32);
   assert.equal(board.idp.length, 4);
   const linebacker = board.idp.find((entry) => entry.yahooId === "LB-1");
@@ -103,6 +104,39 @@ test("exports only executable offense while retaining explicitly labeled special
   const csv = renderOfflineBoardCsv(board);
   assert.match(csv, /^value_rank,name,team,position,eligible,projection,vor,bye,yahoo_rank,confidence,automatic_eligible,manual_eligible,validation_status,attention_required,signal_warnings/m);
   assert.match(csv, /RB 2,TST,RB/);
+});
+
+test("fresh REVIEW specialists remain visible for manual selection while blocked records stay excluded", () => {
+  const offense = Array.from({ length: 100 }, (_, index) => player("RB", index + 1));
+  const kickers = Array.from({ length: 12 }, (_, index) => player("K", index + 1));
+  kickers[0] = player("K", 1, {
+    automaticEligible: false,
+    manualEligible: true,
+    validationStatus: "INJURY_REVIEW",
+    availabilityAssumption: "MANUAL_REVIEW_ASSUMES_AVAILABLE_EXCEPT_BYE",
+    injury: { status:"QUESTIONABLE", draftAction:"REVIEW", conflict:false, evidence:[{ fresh:true, sourceKind:"yahoo" }] },
+  });
+  kickers.push(player("K", 13, {
+    automaticEligible: false,
+    manualEligible: false,
+    injury: { status:"OUT", draftAction:"EXCLUDE", conflict:false, evidence:[{ fresh:true, sourceKind:"yahoo" }] },
+  }));
+  const board = extensionBoardFromV5({
+    generatedAt: "2026-09-03T00:00:00Z",
+    boards: {
+      offense,
+      specialists: {
+        K: kickers,
+        DEF: Array.from({ length: 32 }, (_, index) => player("DEF", index + 1)),
+      },
+    },
+  });
+  const review = board.kickers.find((entry) => entry.yahooId === "K-1");
+  assert.equal(review.manualEligible, true);
+  assert.equal(review.automaticEligible, false);
+  assert.equal(review.injury.draftAction, "REVIEW");
+  assert.equal(review.availabilityAssumption, "MANUAL_REVIEW_ASSUMES_AVAILABLE_EXCEPT_BYE");
+  assert.equal(board.kickers.some((entry) => entry.yahooId === "K-13"), false);
 });
 
 test("eligible-player injury coverage uses the bye denominator and missing evidence fails closed", () => {

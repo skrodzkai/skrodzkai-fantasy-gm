@@ -70,6 +70,23 @@ function liveEnvironment({ click, confirmationDeadlineMs = 200 } = {}) {
     title: "YOUR TURN, DRAFT NOW | Live NFL Draft",
     body: "00:59\nYOUR TURN • ROUND 1, PICK 8\nYOUR TEAM (0/15)\nAutodraft will pick from queue\nYour queue is empty.",
   });
+  document.confirmedYahooIds = null;
+  const rosterPlayerNode = (yahooId) => ({ getAttribute:(name) => name === "data-id" ? yahooId : null });
+  const rosterPanel = {
+    get innerText() { return document.body.innerText; },
+    querySelectorAll(selector) {
+      if (selector !== ".ys-player[data-id]") return [];
+      const filled = Number(document.body.innerText.match(/YOUR TEAM \((\d+)\//)?.[1] ?? 0);
+      const ids = document.confirmedYahooIds ?? (filled > 0 ? ["31838"] : []);
+      return ids.map(rosterPlayerNode);
+    },
+    parentElement:null,
+  };
+  const rosterHeading = {
+    get innerText() { return document.body.innerText.match(/YOUR TEAM \(\d+\/\d+\)/)?.[0] ?? ""; },
+    querySelectorAll:() => [],
+    parentElement:rosterPanel,
+  };
   draftButton.click = () => click?.({ document, location });
   const row = {
     querySelector: (selector) => (selector === ".ys-player[data-id]" ? playerNode : null),
@@ -79,6 +96,7 @@ function liveEnvironment({ click, confirmationDeadlineMs = 200 } = {}) {
     if (selector === "button") return [draftButton, button("Autodraft")];
     if (selector === "tr") return [row];
     if (selector === '[role="dialog"]') return [];
+    if (selector === "h1,h2,h3,h4,h5,h6,div,span") return [rosterHeading];
     return [];
   };
   return {
@@ -122,6 +140,9 @@ test("requires both the live title and exact owned-turn banner", () => {
     JSON.parse(JSON.stringify(controllerApi.runtime.readOwnedTurn(live))),
     { label: "R1P8", round: 1, pick: 8 },
   );
+  assert.equal(controllerApi.runtime.readOwnedTurnState(live).state, "OWNED");
+  assert.equal(controllerApi.runtime.readOwnedTurnState(stale).state, "OFF_TURN");
+  assert.equal(controllerApi.runtime.readOwnedTurnState(documentFixture({ title:"YOUR TURN, DRAFT NOW", body:"YOUR TEAM (0/15)" })).state, "INCONSISTENT");
 });
 
 test("detects checked Autodraft rather than the unrelated refresh icon", () => {
@@ -302,6 +323,23 @@ test("clicks the exact row and confirms the roster transition", async (t) => {
   );
   assert.equal(environment.location.assigned, null);
   controller.stop();
+});
+
+test("fails closed when Yahoo rosters a different player ID after the click", async (t) => {
+  const environment = liveEnvironment({
+    click: ({ document }) => {
+      document.confirmedYahooIds = ["99999"];
+      document.title = "14 picks until your turn | Live NFL Draft";
+      document.body.innerText = "BRIAN's Pick • You're up in 14 Picks\nYOUR TEAM (1/15)\nAutodraft will pick from queue\nYour queue is empty.";
+    },
+  });
+  const controller = controllerApi
+    .create({ targets:[{ yahooId:"31838" }], pollMs:25, confirmationDeadlineMs:200, failureAction:"stay" }, environment)
+    .start();
+  t.after(() => controller.stop());
+  await waitFor(() => controller.getStatus().state === "failed");
+  assert.match(controller.getStatus().failure.code, /^confirmed_player_identity_mismatch:expected_31838:observed_99999$/);
+  assert.equal(controller.getStatus().confirmedPicks, 0);
 });
 
 test("waits for the turn banner after a non-atomic roster repaint", async (t) => {

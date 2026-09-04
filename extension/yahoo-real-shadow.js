@@ -1,7 +1,7 @@
 (function installYahooRealShadow(root) {
   "use strict";
 
-  const VERSION = "0.14.2";
+  const VERSION = "0.15.0";
   const LEAGUE_ID = "420010";
   const TEAM_ID = 7;
   const SETTINGS_KEY = "skz.realShadowSettings";
@@ -44,7 +44,7 @@
     if (!/League Name:\s*2 minute Drillers/i.test(body)) errors.push("real_league_identity_mismatch");
     if (!/Draft Type:\s*Live Standard Draft/i.test(body)) errors.push("real_draft_type_mismatch");
     if (!/Live Draft Pick Time:\s*30 Seconds/i.test(body)) errors.push("real_clock_mismatch");
-    if (!/Passing Touchdowns\s+6\b/i.test(body)) errors.push("real_passing_td_mismatch");
+    if (!/Passing Touchdowns(?:\s+Yahoo Default)?\s+6(?!\.\d)(?:\s|$)/i.test(body)) errors.push("real_passing_td_mismatch");
     if (!/Receptions(?:\s+Yahoo Default)?\s+0?\.25(?:\s|$)/i.test(body)) errors.push("real_reception_scoring_mismatch");
     if (teamCount !== 12) errors.push("real_team_count_not_12");
     if (!same(rosterSlots, EXPECTED_ROSTER)) errors.push("real_roster_shape_mismatch");

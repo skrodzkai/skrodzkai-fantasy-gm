@@ -1,15 +1,15 @@
 (function installYahooDraftController(root) {
   "use strict";
 
-  const VERSION = "1.1.3";
+  const VERSION = "1.2.0";
   const GLOBAL_KEY = "__skrodzkaiYahooDraftControllerV1";
   const RECEIPT_KEY = "skrodzkai-yahoo-draft-controller-receipts-v1";
   const readers = root.SKRODZKaiYahooPageReaders;
   if (!readers) throw new Error("SKRODZKai Yahoo page readers must load before the controller");
   const {
-    normalize, parseRoom, parseRosterCount, readOwnedTurn, buttonText,
+    normalize, parseRoom, parseRosterCount, readOwnedTurn, readOwnedTurnState, buttonText,
     readAutodraftState, isAutodraftActive, readQueueState, readDraftClock,
-    blockers, readPlayerRow,
+    blockers, readPlayerRow, readTeamRosterPlayerIds,
   } = readers;
 
   function targetKey(target) {
@@ -238,19 +238,30 @@
 
       const confirmationStart = Date.now();
       let sawRosterIncrement = false;
+      let sawRosterIdentity = false;
       while (Date.now() - confirmationStart < confirmationDeadlineMs) {
         await delay(25);
         if (state !== "running") return;
+        const currentRoom = parseRoom(locationRef.pathname);
+        if (!currentRoom || currentRoom.roomId !== room.roomId || currentRoom.seat !== room.seat) throw new Error("room_changed_after_click");
         const autodraftState = readAutodraftState(documentRef);
         if (autodraftState === "ACTIVE") throw new Error("autodraft_activated_after_click");
         if (autodraftState !== "INACTIVE") throw new Error("autodraft_state_unknown_after_click");
         if (readQueueState(documentRef) !== "EMPTY") throw new Error("yahoo_queue_changed_after_click");
+        const activeBlockers = blockers(documentRef, environment);
+        if (activeBlockers.length) throw new Error(`blocking_ui_after_click:${activeBlockers.join("|")}`);
         const rosterAfter = parseRosterCount(documentRef.body?.innerText);
         if (rosterAfter && rosterAfter.filled !== rosterBefore.filled) {
           if (rosterAfter.filled !== rosterBefore.filled + 1 || rosterAfter.total !== rosterBefore.total) {
             throw new Error("unexpected_roster_transition");
           }
           sawRosterIncrement = true;
+          const rosterIdentity = readTeamRosterPlayerIds(documentRef, rosterAfter);
+          if (!rosterIdentity) continue;
+          sawRosterIdentity = true;
+          if (!rosterIdentity.yahooIds.includes(selection.player.yahooId)) {
+            throw new Error(`confirmed_player_identity_mismatch:expected_${selection.player.yahooId}:observed_${rosterIdentity.yahooIds.join(",")}`);
+          }
           const turnNow = readOwnedTurn(documentRef);
           if (turnNow?.label === turn.label) continue;
           usedTargets.add(selection.key);
@@ -264,6 +275,7 @@
             team: selection.player.team,
             rosterBefore,
             rosterAfter,
+            rosterYahooIds: rosterIdentity.yahooIds,
             clickToConfirmationMs: Date.now() - confirmationStart,
           });
           if (confirmedPicks >= maxConfirmedPicks) {
@@ -273,7 +285,7 @@
           return;
         }
       }
-      throw new Error(sawRosterIncrement ? "turn_did_not_advance" : "pick_confirmation_timeout");
+      throw new Error(sawRosterIncrement ? sawRosterIdentity ? "turn_did_not_advance" : "confirmed_roster_identity_unavailable" : "pick_confirmation_timeout");
     }
 
     async function tick() {
@@ -366,22 +378,26 @@
       parseRoom,
       parseRosterCount,
       readOwnedTurn,
+      readOwnedTurnState,
       readAutodraftState,
       isAutodraftActive,
       readQueueState,
       readDraftClock,
       readPlayerRow,
+      readTeamRosterPlayerIds,
     },
     _test: {
       normalize,
       parseRoom,
       parseRosterCount,
       readOwnedTurn,
+      readOwnedTurnState,
       readAutodraftState,
       isAutodraftActive,
       readQueueState,
       readDraftClock,
       readPlayerRow,
+      readTeamRosterPlayerIds,
       matchesTarget,
       findTargetRows,
       findDraftButtons,
