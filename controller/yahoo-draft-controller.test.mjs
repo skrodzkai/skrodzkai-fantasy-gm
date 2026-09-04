@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
+import { evaluateTestDraftExport } from "../analysis/test-draft-acceptance.mjs";
 
 const source = await readFile(new URL("./yahoo-draft-controller.js", import.meta.url), "utf8");
 const readerSource = await readFile(new URL("./yahoo-page-readers.js", import.meta.url), "utf8");
@@ -123,7 +124,7 @@ async function waitFor(predicate, timeoutMs = 500) {
   assert.fail("condition was not reached before timeout");
 }
 
-test("production readers, runner and click controller complete 19 exact-ID TEST picks without a controller stub", async () => {
+test("production readers, runner and click controller produce 19 gradeable TEST picks including an on-clock override", async () => {
   const runnerApi = context.SKRODZKaiYahooMockRunner;
   const config = runnerApi.configs.test_league_19_idp;
   const board = ["QB", "RB", "WR", "TE", "K", "DEF", "LB", "CB"].flatMap((position, positionIndex) =>
@@ -182,15 +183,21 @@ test("production readers, runner and click controller complete 19 exact-ID TEST 
     getComputedStyle:() => ({ display:"block", visibility:"visible" }),
     SKRODZKaiYahooDraftController:controllerApi,
   };
+  const runtimeAttestation = { ok:true, version:"0.16.2", digest:"a".repeat(64), bootId:"synthetic-boot-1234", bootedAt:1 };
   const runner = runnerApi.create({
     configName:"test_league_19_idp", executionMode:"TEST", expectedRoomId:"542830", expectedSeat:1, expectedUrlSeat:3,
-    observedTeamCount:12, observedRosterSlots:config.rosterSlots, board, selectionHoldMs:0, minimumFallbacks:5,
+    observedTeamCount:12, observedRosterSlots:config.rosterSlots, board, selectionHoldMs:100, minimumFallbacks:5,
     replacementBySlot:{ QB:300, RB:180, WR:170, TE:140, "W/R/T":175, K:80, DEF:75, D:70 },
     assertRunnerLease:() => true,
-    runtimeAttestation:{ ok:true, version:"0.16.2", digest:"a".repeat(64), bootId:"synthetic-boot-1234", bootedAt:1 },
+    runtimeAttestation,
   }, environment);
   runner.start();
   try {
+    await waitFor(() => runner.getStatus().pendingDecision !== null);
+    const baseline = runner.exportReceipts().find((row) => row.kind === "runner_turn_resolved").decision.targetYahooIds;
+    const override = board.find((player) => player.position === "RB" && !baseline.includes(player.yahooId));
+    assert.ok(override, "the override must be outside all five baseline targets");
+    assert.equal(runner.chooseOnClock(override.yahooId, "test_operator"), true);
     await waitFor(() => ["completed", "failed"].includes(runner.getStatus().state), 10_000);
     const status = runner.getStatus();
     assert.equal(status.state, "completed", JSON.stringify(status.failure));
@@ -201,6 +208,30 @@ test("production readers, runner and click controller complete 19 exact-ID TEST 
     assert.equal(controllers.filter((row) => row.kind === "pick_confirmed").length, 19);
     assert.ok(status.picks.every((pick) => pick.turnDetectionToClickMs < 2000));
     assert.ok(!runner.exportReceipts().some((row) => row.kind === "runner_failed"));
+    assert.equal(clickedIds[0], override.yahooId);
+    // Only the final Yahoo roster/attestation envelope is synthetic. Runner and
+    // click-controller receipts are consumed untouched, as the extension exports them.
+    const finalRosterSlots = runnerApi._test.allocateRosterSlots(status.picks, config.rosterSlots).map((entry) => ({
+      slot:entry.slot, yahooId:entry.player?.yahooId ?? null, name:entry.player?.name ?? null, empty:!entry.player,
+    }));
+    const payload = {
+      extensionVersion:"0.16.2", runtimeAttestation, roomId:status.roomId, seat:status.seat, urlSeat:status.urlSeat, status,
+      operatorAttestation:{ status:"none", source:"operator_attested", attestedAt:new Date().toISOString(), interventions:[] },
+      runnerReceipts:runner.exportReceipts(), controllerReceipts:controllers,
+      extensionReceipts:[{ at:new Date().toISOString(), version:"0.16.2", roomId:status.roomId, seat:status.seat,
+        urlSeat:status.urlSeat, runId:status.runId, kind:"final_roster_readback", valid:true, finalRosterSlots }],
+    };
+    const result = evaluateTestDraftExport(payload);
+    assert.equal(result.status, "PASS", JSON.stringify(result.errors));
+    assert.equal(result.picks[0].replayMode, "ON_CLOCK_OVERRIDE");
+    assert.equal(result.picks[0].targetIndex, -1);
+    const choice = payload.runnerReceipts.find((entry) => entry.kind === "runner_on_clock_choice_applied");
+    assert.equal(typeof choice.turn, "string", "the grader must use the producer's string turn contract");
+    const wrongTurn = structuredClone(payload);
+    wrongTurn.runnerReceipts.find((entry) => entry.kind === "runner_on_clock_choice_applied").turn = { label:choice.turn };
+    assert.ok(evaluateTestDraftExport(wrongTurn).errors.includes("on_clock_choice_unknown_turn"));
+    const missingChoice = { ...payload, runnerReceipts:payload.runnerReceipts.filter((entry) => entry !== choice) };
+    assert.ok(evaluateTestDraftExport(missingChoice).errors.includes("round_1_unintended_selection"));
   } finally { runner.stop("test_cleanup"); }
 });
 

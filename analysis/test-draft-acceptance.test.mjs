@@ -152,7 +152,7 @@ test("intentional on-clock choice outside the baseline is joined to its click", 
   decision.targetYahooIds[0] = "99901";
   decision.positionLeaders[0].player.yahooId = "99901";
   const choice = { at:iso(850), runId:"runner-1", roomId:"542830", seat:6, urlSeat:3,
-    kind:"runner_on_clock_choice_applied", turn:{ label:decisionReceipt.turn, round:1 },
+    kind:"runner_on_clock_choice_applied", turn:decisionReceipt.turn,
     chosenYahooId:chosen, source:"operator", baselineFallbacks:[...decision.targetYahooIds] };
   payload.runnerReceipts.push(choice);
   const result = evaluateTestDraftExport(payload);
@@ -164,6 +164,19 @@ test("intentional on-clock choice outside the baseline is joined to its click", 
   choice.at = iso(850);
   choice.baselineFallbacks = ["wrong"];
   assert.ok(evaluateTestDraftExport(payload).errors.includes("round_1_on_clock_choice_invalid"));
+});
+
+test("an applied pre-staged pin cannot coexist with an on-clock choice", () => {
+  const payload = validPublicPayload();
+  const receipt = payload.runnerReceipts.filter((entry) => entry.kind === "runner_turn_resolved")[1];
+  payload.runnerReceipts.push({
+    at:iso(1850), runId:"public-runner-1", roomId:payload.roomId, seat:payload.seat, urlSeat:payload.urlSeat,
+    kind:"runner_on_clock_choice_applied", turn:receipt.turn,
+    chosenYahooId:receipt.decision.chosenYahooId, source:"operator", baselineFallbacks:[...receipt.decision.targetYahooIds],
+  });
+  const result = evaluatePublicMockExport(payload);
+  assert.equal(result.status, "LOCKED");
+  assert.ok(result.errors.includes("round_2_conflicting_override_receipts"));
 });
 
 test("a different baseline target is not silently graded as the intended selection", () => {

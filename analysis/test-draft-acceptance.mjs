@@ -346,14 +346,15 @@ function evaluateDraftExport(payload, options = {}) {
   }
 
   const onClockChoices = runReceipts.filter((entry) => entry.kind === "runner_on_clock_choice_applied");
-  if (onClockChoices.some((entry) => !picks.some((pick) => pick.turn === entry.turn?.label))) errors.push("on_clock_choice_unknown_turn");
+  if (onClockChoices.some((entry) => !picks.some((pick) => pick.turn === entry.turn))) errors.push("on_clock_choice_unknown_turn");
   const replays = picks.map((pick, index) => {
     const replay = replayDecision(pick.decision);
     if (replay.fallbackUsed) errors.push(`round_${index + 1}_decision_fallback_forbidden`);
     if (!replay.consistent) errors.push(`round_${index + 1}_decision_replay_mismatch`);
     const targets = asArray(pick.decision?.targetYahooIds).map(String);
     const targetIndex = targets.indexOf(pick.yahooId);
-    const choices = onClockChoices.filter((entry) => entry.turn?.label === pick.turn);
+    const choices = onClockChoices.filter((entry) => entry.turn === pick.turn);
+    if (choices.length && pick.decision?.manualOverride?.status === "applied") errors.push(`round_${index + 1}_conflicting_override_receipts`);
     const choice = choices[0];
     const decisionAt = timestamp(decisionsByTurn.get(pick.turn)?.at);
     const choiceAt = timestamp(choice?.at);

@@ -29,7 +29,10 @@ were made during this source audit.
   five-target ladder was incorrectly rejected. It now requires one same-run,
   same-turn choice receipt, an unchanged baseline, and choice-before-click timing.
   Conversely, selecting a different baseline target without a matching intentional
-  override is now rejected as unintended selection.
+  override is now rejected as unintended selection. Fable caught a follow-up
+  receipt-shape mistake: the runner emits a string turn, not an object with a
+  label. The grader now joins the actual string contract and rejects impossible
+  coexistence of an applied pre-staged pin and an on-clock choice on one turn.
 - **Team-defense display names.** Final roster readback can join a mascot-only
   draft name to the full city/team name only for a DEF roster slot, a DEF pick,
   a Yahoo NFL team link, a whole-word suffix, and a unique match. Player identities
@@ -37,8 +40,12 @@ were made during this source audit.
 - **Incomplete integration proof.** The existing offline runner replay replaced
   the click controller. A new synthetic-DOM test drives all 19 TEST turns through
   the production page readers, runner, actual click controller, and exact roster-ID
-  confirmation, including immediate adjacent snake turns. It does not claim to
-  reproduce Yahoo rendering, Chrome timers, or a live draft.
+  confirmation, including immediate adjacent snake turns and an outside-baseline
+  on-clock override. The actual runner/controller receipts go untouched into the
+  acceptance grader; only the final roster/attestation envelope is fabricated.
+  This reproduced the receipt-shape failure before the correction and passes
+  afterward. Wrong-shaped or missing choice receipts still fail. It does not
+  claim to reproduce Yahoo rendering, Chrome timers, or a live draft.
 - **Version drift risk.** A test now checks manifest, content script, shadow script,
   and acceptance-grader version agreement. Version-only fixtures move together.
 
@@ -46,7 +53,7 @@ The changes reuse the existing files and contracts: no dependency, service,
 storage schema, provider spend, fallback, or new execution permission. Feasibility
 caching is local to one decision and caches roster geometry, never player scores.
 
-Local verification: `npm run test:draft` passed **283/283** on this candidate;
+Local verification: `npm run test:draft` passed **284/284** on this candidate;
 `git diff --check` passed. Fable review, CI, deployment, current-data refresh, and
 live Yahoo acceptance are separate gates, not implied by this result.
 
