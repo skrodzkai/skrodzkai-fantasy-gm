@@ -11,8 +11,8 @@ const ROSTER_VALIDATOR = globalThis.SKRODZKaiYahooMockRunner._test.validateCompl
 const TEST_OVERALL_PICK = globalThis.SKRODZKaiYahooMockRunner._test.overallPick;
 const TEST_SAME_SLOTS = globalThis.SKRODZKaiYahooMockRunner._test.sameSlots;
 const TEST_OBSERVED_ROSTER_VALIDATOR = globalThis.SKRODZKaiYahooMockRunner._test.validateObservedTestRoster;
-const EXTENSION_VERSION = "0.16.1";
-const PANEL_BUDGET_MS = 250;
+const EXTENSION_VERSION = "0.16.2";
+const PANEL_BUDGET_MS = globalThis.SKRODZKaiYahooMockRunner.decision.panelBudgetMs;
 const TURN_TO_CLICK_BUDGET_MS = 2000;
 
 const CONTRACTS = Object.freeze({
@@ -345,14 +345,26 @@ function evaluateDraftExport(payload, options = {}) {
     errors.push("unexpected_public_mock_final_roster_readback");
   }
 
+  const onClockChoices = runReceipts.filter((entry) => entry.kind === "runner_on_clock_choice_applied");
+  if (onClockChoices.some((entry) => !picks.some((pick) => pick.turn === entry.turn))) errors.push("on_clock_choice_unknown_turn");
   const replays = picks.map((pick, index) => {
     const replay = replayDecision(pick.decision);
     if (replay.fallbackUsed) errors.push(`round_${index + 1}_decision_fallback_forbidden`);
     if (!replay.consistent) errors.push(`round_${index + 1}_decision_replay_mismatch`);
     const targets = asArray(pick.decision?.targetYahooIds).map(String);
     const targetIndex = targets.indexOf(pick.yahooId);
-    if (targetIndex < 0) errors.push(`round_${index + 1}_confirmed_pick_absent_from_target_ladder`);
-    return { ...replay, targetIndex };
+    const choices = onClockChoices.filter((entry) => entry.turn === pick.turn);
+    if (choices.length && pick.decision?.manualOverride?.status === "applied") errors.push(`round_${index + 1}_conflicting_override_receipts`);
+    const choice = choices[0];
+    const decisionAt = timestamp(decisionsByTurn.get(pick.turn)?.at);
+    const choiceAt = timestamp(choice?.at);
+    const onClockOverride = choices.length === 1 && String(choice.chosenYahooId) === pick.yahooId &&
+      String(choice.source ?? "").length > 0 && decisionAt !== null && choiceAt !== null && choiceAt >= decisionAt &&
+      JSON.stringify(asArray(choice.baselineFallbacks).map(String)) === JSON.stringify(targets);
+    if (choices.length && !onClockOverride) errors.push(`round_${index + 1}_on_clock_choice_invalid`);
+    if (targetIndex < 0 && !onClockOverride) errors.push(`round_${index + 1}_confirmed_pick_absent_from_target_ladder`);
+    if (pick.yahooId !== replay.chosenYahooId && !onClockOverride) errors.push(`round_${index + 1}_unintended_selection`);
+    return { ...replay, targetIndex, onClockOverride, choiceAt, replayMode:onClockOverride ? "ON_CLOCK_OVERRIDE" : replay.replayMode };
   });
 
   const startTime = timestamp(started[0]?.at);
@@ -375,7 +387,7 @@ function evaluateDraftExport(payload, options = {}) {
     if (appliedPins.length !== overrideClaims.length) errors.push("manual_override_applied_receipt_contract_failed");
     for (const pick of overrideClaims) {
       const round = Number(pick.round);
-      const yahooId = pick.yahooId;
+      const yahooId = String(pick.decision.manualOverride.chosenYahooId ?? "");
       const staged = stagedPins.filter((entry) =>
         Number(entry.expectedRound) === round && String(entry.targetYahooIds?.[0] ?? "") === yahooId
       );
@@ -421,6 +433,9 @@ function evaluateDraftExport(payload, options = {}) {
     }
     const click = pair.clicks[0];
     const confirmation = pair.confirmations[0];
+    if (replays[index]?.onClockOverride && (timestamp(click.at) === null || replays[index].choiceAt > timestamp(click.at))) {
+      errors.push(`round_${index + 1}_on_clock_choice_after_click`);
+    }
     if (String(click.roomId) !== expectedRoomId || String(confirmation.roomId) !== expectedRoomId) errors.push(`round_${index + 1}_controller_room_mismatch`);
     if (Number(click.seat) !== expectedUrlSeat || Number(confirmation.seat) !== expectedUrlSeat) errors.push(`round_${index + 1}_controller_url_team_mismatch`);
     if (String(click.yahooId) !== pick.yahooId || String(confirmation.yahooId) !== pick.yahooId) errors.push(`round_${index + 1}_controller_player_mismatch`);

@@ -35,7 +35,7 @@ test("offline runner-loop replay completes 19 turns and separately proves the ki
   assert.equal(replay.completion.poolSize, 120);
   assert.equal(replay.completion.turns.length, 19);
   assert.equal(replay.acceptance.onClockOverrideApplied, true);
-  assert.equal(replay.acceptance.everyPanelReadyUnder250ms, true);
+  assert.equal(replay.acceptance.everyPanelReadyWithinBudget, true);
   assert.equal(replay.acceptance.firstTurnPressureNeutral, true);
   assert.equal(replay.acceptance.laterTurnPressureObserved, true);
   assert.equal(Object.keys(replay.completion.turns[0].runPressureByPosition).length, 0);
