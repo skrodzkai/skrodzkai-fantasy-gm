@@ -1416,7 +1416,11 @@
     const room = controllerApi.runtime.parseRoom(environment.location.pathname);
     if (!room) throw new Error("draft_room_missing");
     const armRecord = readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
-    if (!armRecord && room.roomId === TEST_LEAGUE_ID && Number(room.seat) === TEST_TEAM_ID) {
+    if (room.roomId === TEST_LEAGUE_ID && Number(room.seat) === TEST_TEAM_ID && validateDraftPreflight(armRecord, room)) {
+      if (armRecord) {
+        environment.sessionStorage.removeItem(PREFLIGHT_KEY);
+        writeReceipt(environment.localStorage, { kind:"test_stale_arm_disarmed", roomId:room.roomId, urlSeat:room.seat, failure:validateDraftPreflight(armRecord, room) });
+      }
       rail.setMode("TEST");
       rail.setExpanded(true);
       rail.setRoster(TEST_ROSTER_SLOTS.map((slot) => ({ slot })));
@@ -1424,7 +1428,9 @@
       rail.setContext({ roomId: TEST_LEAGUE_ID, league: "League Two", armed: false, autodraft: controllerApi.runtime.isAutodraftActive(environment.document), kill: false });
       const readPreflight = () => parseTestDraftClient(environment.document, environment.location,
         readJson(environment.localStorage, TEST_SETTINGS_KEY, null));
+      let pendingTimer = null;
       const update = () => {
+        if (rail.isLocked()) { environment.clearInterval(pendingTimer); return; }
         const snapshot = readPreflight();
         rail.controls.arm.textContent = "ARM TEST";
         rail.controls.arm.disabled = !snapshot.ready;
@@ -1432,18 +1438,19 @@
           snapshot.ready ? `League Two · ${snapshot.teamCount} teams · snake slot ${snapshot.seat} · Yahoo team ${TEST_TEAM_ID}` : snapshot.errors.join(" · "));
       };
       update();
-      const pendingTimer = environment.setInterval(update, 250);
+      pendingTimer = environment.setInterval(update, 250);
       rail.controls.arm.addEventListener("click", async () => {
         environment.clearInterval(pendingTimer);
         rail.controls.arm.disabled = true;
         try {
           await requireCurrentExtensionVersion(environment);
           const snapshot = readPreflight();
-          const token = makeTestPreflight(snapshot, Date.now(), boardData);
-          environment.sessionStorage.setItem(PREFLIGHT_KEY, JSON.stringify(token));
+          const nextArmRecord = makeTestPreflight(snapshot, Date.now(), boardData);
+          environment.sessionStorage.setItem(PREFLIGHT_KEY, JSON.stringify(nextArmRecord));
           writeReceipt(environment.localStorage, { kind:"test_armed_from_draftclient", roomId:TEST_LEAGUE_ID, seat:snapshot.seat, urlSeat:TEST_TEAM_ID, observedTeamCount:snapshot.teamCount });
           await bootDraft(environment, rail, bridge);
         } catch (error) {
+          environment[GLOBAL_KEY]?.runner?.halt("test_room_arm_failure");
           environment.sessionStorage.removeItem(PREFLIGHT_KEY);
           rail.setContext({ armed:false });
           rail.render("bad", "TEST ARM REFUSED", String(error?.message ?? error));
