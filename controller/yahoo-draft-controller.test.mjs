@@ -183,7 +183,7 @@ test("production readers, runner and click controller produce 19 gradeable TEST 
     getComputedStyle:() => ({ display:"block", visibility:"visible" }),
     SKRODZKaiYahooDraftController:controllerApi,
   };
-  const runtimeAttestation = { ok:true, version:"0.16.2", digest:"a".repeat(64), bootId:"synthetic-boot-1234", bootedAt:1 };
+  const runtimeAttestation = { ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"synthetic-boot-1234", bootedAt:1 };
   const runner = runnerApi.create({
     configName:"test_league_19_idp", executionMode:"TEST", expectedRoomId:"542830", expectedSeat:1, expectedUrlSeat:3,
     observedTeamCount:12, observedRosterSlots:config.rosterSlots, board, selectionHoldMs:100, minimumFallbacks:5,
@@ -215,10 +215,10 @@ test("production readers, runner and click controller produce 19 gradeable TEST 
       slot:entry.slot, yahooId:entry.player?.yahooId ?? null, name:entry.player?.name ?? null, empty:!entry.player,
     }));
     const payload = {
-      extensionVersion:"0.16.2", runtimeAttestation, roomId:status.roomId, seat:status.seat, urlSeat:status.urlSeat, status,
+      extensionVersion:"0.16.3", runtimeAttestation, roomId:status.roomId, seat:status.seat, urlSeat:status.urlSeat, status,
       operatorAttestation:{ status:"none", source:"operator_attested", attestedAt:new Date().toISOString(), interventions:[] },
       runnerReceipts:runner.exportReceipts(), controllerReceipts:controllers,
-      extensionReceipts:[{ at:new Date().toISOString(), version:"0.16.2", roomId:status.roomId, seat:status.seat,
+      extensionReceipts:[{ at:new Date().toISOString(), version:"0.16.3", roomId:status.roomId, seat:status.seat,
         urlSeat:status.urlSeat, runId:status.runId, kind:"final_roster_readback", valid:true, finalRosterSlots }],
     };
     const result = evaluateTestDraftExport(payload);

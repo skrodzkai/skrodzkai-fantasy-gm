@@ -139,7 +139,7 @@ test("keeps one visible position pool while containing autonomous specialists to
   assert.deepEqual(Array.from(helpers.allowedPositions(14, [], testConfig, 1)), ["QB", "RB", "WR", "TE", "K", "DEF", "D", "LB", "CB", "S"]);
   assert.equal(helpers.filterLabelForRound(1, [], testConfig, 1), "All Positions");
   assert.equal(helpers.filterLabelForRound(19, [], testConfig, 12), "All Positions");
-  assert.deepEqual(Array.from(helpers.requiredTestFilterLabels()), ["All Positions", "Kickers", "Team Defenses", "Defensive Players", "Linebackers", "Defensive Backs"]);
+  assert.deepEqual(Array.from(helpers.requiredTestFilterLabels()), ["All Positions", "Kickers", "Team Defenses", "Defensive Players"]);
   assert.equal(helpers.automaticCandidateAllowed({ player:player("K", 1, 1), round:14, picks:[], config:testConfig }), false);
   assert.equal(helpers.automaticCandidateAllowed({ player:player("K", 1, 1), round:15, picks:[], config:testConfig }), true);
   assert.equal(helpers.automaticCandidateAllowed({ player:player("LB", 1, 1), round:16, picks:[], config:testConfig }), false);
@@ -629,7 +629,7 @@ function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE",
     observedTeamCount:12, observedRosterSlots:mockConfig.rosterSlots, minimumFallbacks:5, pollMs:25,
     filterDeadlineMs:500, selectionHoldMs, replacementBySlot, board,
     assertRunnerLease:() => leaseState.current === true,
-    runtimeAttestation:{ ok:true, version:"0.16.2", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
+    runtimeAttestation:{ ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
   }, environment);
   return { runner, board, getControllerTargets:() => controllerTargets, getControllerOptions:() => controllerOptions, getClearedTimeouts:() => clearedTimeouts, getRowReads:() => rowReads };
 }
