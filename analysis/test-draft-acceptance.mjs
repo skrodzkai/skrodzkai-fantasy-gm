@@ -11,7 +11,7 @@ const ROSTER_VALIDATOR = globalThis.SKRODZKaiYahooMockRunner._test.validateCompl
 const TEST_OVERALL_PICK = globalThis.SKRODZKaiYahooMockRunner._test.overallPick;
 const TEST_SAME_SLOTS = globalThis.SKRODZKaiYahooMockRunner._test.sameSlots;
 const TEST_OBSERVED_ROSTER_VALIDATOR = globalThis.SKRODZKaiYahooMockRunner._test.validateObservedTestRoster;
-const EXTENSION_VERSION = "0.16.0";
+const EXTENSION_VERSION = "0.16.1";
 const PANEL_BUDGET_MS = 250;
 const TURN_TO_CLICK_BUDGET_MS = 2000;
 
