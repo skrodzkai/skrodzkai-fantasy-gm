@@ -1,7 +1,7 @@
 (function installYahooMockExtension(root) {
   "use strict";
 
-  const VERSION = "0.16.1";
+  const VERSION = "0.16.2";
   const GLOBAL_KEY = "__skrodzkaiYahooMockExtensionV1";
   const PREFLIGHT_KEY = "skrodzkai-yahoo-mock-extension-preflight-v1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-extension-receipts-v1";
@@ -976,7 +976,7 @@
         const pending = runtime.sendMessage(message);
         void Promise.resolve(pending).then((response) => {
           if (message?.type === "state" && response?.ok === false) invalidate(new Error("runner_lease_conflict"));
-          if (message?.type === "state" && role === "runner" && response?.ok === true) runnerLeaseAcceptedAt = Date.now();
+          if (message?.type === "state" && role === "runner" && response?.ok === true) runnerLeaseAcceptedAt = Math.max(runnerLeaseAcceptedAt, message.at);
         }).catch(invalidate);
         return pending;
       } catch (error) {
@@ -1002,10 +1002,13 @@
       if (role !== "runner") return true;
       const response = await publish();
       if (response?.ok !== true) throw new Error("runner_lease_not_acquired");
-      runnerLeaseAcceptedAt = Date.now();
+      if (!hasFreshRunnerLease()) throw new Error("runner_lease_expired_before_ack");
       return true;
     };
-    const hasFreshRunnerLease = () => role === "runner" && !stopped && Date.now() - runnerLeaseAcceptedAt <= 1000;
+    // Use the SENT heartbeat time and retain 500 ms before the background's
+    // 3-second expiry. A delayed ACK must never extend ownership.
+    const hasFreshRunnerLease = () => role === "runner" && !stopped && runnerLeaseAcceptedAt > 0 &&
+      Date.now() >= runnerLeaseAcceptedAt && Date.now() - runnerLeaseAcceptedAt <= 2500;
     rail.setOpenHandler(() => send({ type:"open_command_center" }));
     const onMessage = (message, _sender, sendResponse) => {
       if (message?.type !== "command") return;
@@ -1060,7 +1063,14 @@
       const linkedName = String(link?.textContent ?? link?.innerText ?? "").trim();
       const matches = linkedId
         ? [byId.get(linkedId)].filter(Boolean)
-        : Array.from(picks).filter((pick) => normalize(pick.name) === normalize(linkedName));
+        : Array.from(picks).filter((pick) => {
+          const draftName = normalize(pick.name);
+          const rosterName = normalize(linkedName);
+          if (!draftName || !rosterName) return false;
+          if (draftName === rosterName) return true;
+          return slot === "DEF" && pick.position === "DEF" && /\/nfl\/teams\//.test(href) &&
+            (rosterName.endsWith(` ${draftName}`) || draftName.endsWith(` ${rosterName}`));
+        });
       if (matches.length !== 1) throw new Error(`final_roster_player_unmatched:${slot}:${linkedName || linkedId || "missing"}`);
       rows.push({ slot, yahooId:String(matches[0].yahooId), name:String(matches[0].name), empty:false });
     }
@@ -1326,7 +1336,10 @@
       try {
         finalRosterSlots = parseFinalRosterDocument(environment.document, run.picks);
       } catch (error) {
-        if (String(error?.message ?? error) !== "final_roster_rows_missing") throw error;
+        if (String(error?.message ?? error) !== "final_roster_rows_missing") {
+          rail.lock(String(error?.message ?? error), "FINAL ROSTER LOCKED");
+          return false;
+        }
         rail.render("", "WAITING FOR FINAL ROSTER", "Yahoo has not rendered the roster rows yet.");
         return false;
       }

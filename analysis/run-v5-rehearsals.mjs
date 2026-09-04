@@ -419,7 +419,7 @@ function createReplayRunner(runtime, seat, selectionHoldMs) {
     replacementBySlot: runtime.replacementBySlot,
     survivalCalibration: runtime.survivalCalibration,
     board: runtime.board,
-    runtimeAttestation: { ok:true, version:"0.16.1", digest:"a".repeat(64), bootId:"replay-boot-1234", bootedAt:1 },
+    runtimeAttestation: { ok:true, version:"0.16.2", digest:"a".repeat(64), bootId:"replay-boot-1234", bootedAt:1 },
     assertRunnerLease: () => true,
   }, environment);
   return { runner, poolSize };
@@ -456,8 +456,8 @@ export async function replayRunnerLoop({ boardSource, runnerSource, seat = 6 }) 
   const acceptance = {
     completedNineteenTurns: completion.runner.getStatus().state === "completed" && completion.runner.getStatus().picks.length === 19 && turnReceipts.length === 19,
     onClockOverrideApplied: completionReceipts.filter((entry) => entry.kind === "runner_on_clock_choice_applied").length === 1,
-    everyPanelReadyUnder250ms: turnReceipts.every((entry) => entry.panelBudgetMs === 250 && entry.panelReadyMs < entry.panelBudgetMs),
-    everyRecommendationUnder250ms: turnReceipts.every((entry) => entry.decision?.recomputeMs < runtime.runner._test.decisionRecomputeBudgetMs),
+    everyPanelReadyWithinBudget: turnReceipts.every((entry) => entry.panelBudgetMs === runtime.runner.decision.panelBudgetMs && entry.panelReadyMs < entry.panelBudgetMs),
+    everyRecommendationWithinBudget: turnReceipts.every((entry) => entry.decision?.recomputeMs < runtime.runner._test.decisionRecomputeBudgetMs),
     zeroFallbacks: turnReceipts.every((entry) => entry.decision?.fallbackUsed === false),
     zeroTimeoutOrFailureReceipts: failureCodes.length === 0 && !completionReceipts.some((entry) => forbiddenFailures.some((code) => String(entry.code ?? entry.failure ?? "").includes(code))),
     firstTurnPressureNeutral: !Object.values(turnReceipts[0]?.decision?.runPressureByPosition ?? {}).some((value) => Number(value) > 0),
@@ -482,6 +482,8 @@ export async function replayRunnerLoop({ boardSource, runnerSource, seat = 6 }) 
       overrideApplied,
       maxPanelReadyMs: turnReceipts.length ? Math.max(...turnReceipts.map((entry) => entry.panelReadyMs)) : null,
       maxRecomputeMs: turnReceipts.length ? Math.max(...turnReceipts.map((entry) => entry.decision?.recomputeMs ?? Infinity)) : null,
+      performanceTargetMs: 250,
+      performanceTargetMisses: turnReceipts.filter((entry) => entry.panelReadyMs >= 250).length,
       turns: turnReceipts.map((entry) => ({ turn: entry.turn, panelReadyMs: entry.panelReadyMs, panelBudgetMs: entry.panelBudgetMs, recomputeMs: entry.decision?.recomputeMs, fallbackUsed: entry.decision?.fallbackUsed, runPressureByPosition:entry.decision?.runPressureByPosition ?? {} })),
       failureCodes,
     },

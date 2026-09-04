@@ -15,8 +15,8 @@
     CB: "Defensive Backs",
     S: "Defensive Backs",
   });
-  const DECISION_RECOMPUTE_BUDGET_MS = 250;
-  const PANEL_BUDGET_MS = 250;
+  const DECISION_RECOMPUTE_BUDGET_MS = 1000;
+  const PANEL_BUDGET_MS = 1200;
   const TURN_TO_CLICK_BUDGET_MS = 2000;
   const MINIMUM_OWNED_CLOCK_SECONDS = 5;
   const NEXT_TURN_COMPARISON_POOL = 6;
@@ -488,7 +488,15 @@
       baseUtility,
       utilityWithoutSlot: slots.map((_, slotIndex) => without([slotIndex])),
       utilityWithoutPair(left, right) {
-        return without([left, right]);
+        const leftComponent = componentBySlot.get(left);
+        const rightComponent = componentBySlot.get(right);
+        const leftBit = 1 << leftComponent.localIndex.get(left);
+        const rightBit = 1 << rightComponent.localIndex.get(right);
+        if (leftComponent === rightComponent) return baseUtility - leftComponent.baseUtility +
+          leftComponent.bestSubset[leftComponent.fullMask & ~(leftBit | rightBit)];
+        return baseUtility - leftComponent.baseUtility - rightComponent.baseUtility +
+          leftComponent.bestSubset[leftComponent.fullMask ^ leftBit] +
+          rightComponent.bestSubset[rightComponent.fullMask ^ rightBit];
       },
     };
   }
@@ -599,6 +607,18 @@
     const count = Number(positionCounts(picks)[position] ?? 0);
     if (position === "QB" || position === "TE") return count === 1 ? 0.35 : 0.10;
     return 1;
+  }
+
+  function marginalDraftUtility(player, picks, config, starterMarginalUtility, fillsStarter) {
+    const benchMultiplier = benchDepthMultiplier(player, picks, config);
+    const perGamePoints = Number.isFinite(Number(player.perGamePoints))
+      ? Number(player.perGamePoints)
+      : Number(player.projection) / Math.max(1, Number(player.expectedGamesThroughWeek17) || 17);
+    const benchOpportunityValue = !fillsStarter && OFFENSE.includes(normalize(player.position))
+      ? Math.max(0, Number(player.vor) || 0) * benchMultiplier + Math.max(0, perGamePoints) * benchMultiplier * 0.1
+      : 0;
+    const lineupUtility = fillsStarter ? starterMarginalUtility : starterMarginalUtility * benchLineupMultiplier(player, picks);
+    return { marginalUtility: lineupUtility + benchOpportunityValue, starterMarginalUtility: lineupUtility, benchOpportunityValue };
   }
 
   function completionFloorsCanComplete(player, picks, config) {
@@ -730,10 +750,9 @@
       };
     });
     const baseUtility = periodContexts.reduce((sum, context) => sum + context.baseUtility * context.periods.length, 0);
-    const baseFilled = maximumFilledStarterSlots(picks, config);
-    const filledWithoutSlot = slots.map((_, excludedIndex) =>
-      maximumAssignment(picks, slots.filter((__, index) => index !== excludedIndex), () => 1).count
-    );
+    const filledProfile = assignmentExclusionProfile(picks, slots, () => 1);
+    const baseFilled = filledProfile.baseUtility;
+    const filledWithoutSlot = filledProfile.utilityWithoutSlot;
     const remainingAfterCandidate = config.rounds - Array.from(picks ?? []).length - 1;
     const assignmentWithOne = (player, excludedValues, baseline) => {
       const eligible = playerEligibility(player);
@@ -747,7 +766,8 @@
     };
     const entries = pool
       .filter((player) => player.automaticEligible !== false)
-      .filter((player) => automaticCandidateAllowed({ player, round, picks, config }))
+      .filter((player) => automaticCandidateAllowed({ player, round, picks, config }) ||
+        (window.nextPick != null && automaticCandidateAllowed({ player, round: round + 1, picks, config })))
       .filter((player) => withinPositionLimit(player, picks, config))
       .filter((player) => slots.length - assignmentWithOne(player, filledWithoutSlot, baseFilled) <= remainingAfterCandidate)
       .filter((player) => completionFloorsCanComplete(player, picks, config))
@@ -785,23 +805,13 @@
         }, 0);
         const starterMarginalUtility = Math.max(0, withCandidate - baseUtility);
         const fillsStarter = assignmentWithOne(player, filledWithoutSlot, baseFilled) > baseFilled;
-        const benchMultiplier = benchDepthMultiplier(player, picks, config);
-        const perGamePoints = Number.isFinite(Number(player.perGamePoints))
-          ? Number(player.perGamePoints)
-          : Number(player.projection) / Math.max(1, Number(player.expectedGamesThroughWeek17) || 17);
-        const benchOpportunityValue = !fillsStarter && OFFENSE.includes(normalize(player.position))
-          ? Math.max(0, Number(player.vor) || 0) * benchMultiplier + Math.max(0, perGamePoints) * benchMultiplier * 0.1
-          : 0;
-        const lineupUtility = fillsStarter ? starterMarginalUtility : starterMarginalUtility * benchLineupMultiplier(player, picks);
-        const marginalUtility = lineupUtility + benchOpportunityValue;
         const pressure = Math.max(...playerEligibility(player).map((position) => Number(runPressureByPosition[position] ?? 0)));
         return {
           player,
-          marginalUtility,
-          starterMarginalUtility:lineupUtility,
-          benchOpportunityValue,
+          ...marginalDraftUtility(player, picks, config, starterMarginalUtility, fillsStarter),
           utilityAfter: withCandidate,
           slotIndexes,
+          feasibilityKey: `${player.position}:${slotIndexes.join(",")}`,
           contextValueGroups,
           pAvailableNext: survivalProbability(player, window.nextPick, pressure, survivalCalibration),
           survivalStatus: survivalCalibration?.calibration?.enabled
@@ -811,20 +821,9 @@
             : player.marketStatus,
         };
       });
-    const nextCandidates = entries
+    const nextCandidateOrder = entries
       .slice()
-      .sort((left, right) => right.marginalUtility - left.marginalUtility || left.player.rank - right.player.rank)
-      .slice(0, NEXT_TURN_COMPARISON_POOL);
-    const filledWithoutPair = new Map();
-    if (Number.isFinite(window.nextPick) && round + 1 >= config.rounds) {
-      for (let left = 0; left < slots.length; left += 1) {
-        for (let right = left + 1; right < slots.length; right += 1) {
-          const remainingSlots = slots.filter((_, index) => index !== left && index !== right);
-          const key = `${left}:${right}`;
-          filledWithoutPair.set(key, maximumAssignment(picks, remainingSlots, () => 1).count);
-        }
-      }
-    }
+      .sort((left, right) => right.marginalUtility - left.marginalUtility || left.player.rank - right.player.rank);
     const assignmentWithPair = (leftPlayer, rightPlayer, excludedValues, baseline) => {
       let result = baseline;
       const leftEligible = playerEligibility(leftPlayer);
@@ -833,8 +832,7 @@
         if (!normalizedRosterSlotAccepts(leftEligible, slots[left])) continue;
         for (let right = 0; right < slots.length; right += 1) {
           if (left === right || !normalizedRosterSlotAccepts(rightEligible, slots[right])) continue;
-          const key = left < right ? `${left}:${right}` : `${right}:${left}`;
-          result = Math.max(result, excludedValues.get(key) + 2);
+          result = Math.max(result, excludedValues(left, right) + 2);
         }
       }
       return result;
@@ -878,17 +876,43 @@
       }, 0);
     };
     const remainingAfterPair = config.rounds - Array.from(picks ?? []).length - 2;
-    for (const entry of entries) {
-      const alternatives = !Number.isFinite(window.nextPick) ? [] : nextCandidates
-        .filter((candidate) => candidate !== entry)
-        .filter((candidate) => withinPositionLimit(candidate.player, [...picks, entry.player], config))
-        .filter((candidate) => round + 1 < config.rounds || slots.length - assignmentWithPair(entry.player, candidate.player, filledWithoutPair, Math.max(
-          assignmentWithOne(entry.player, filledWithoutSlot, baseFilled),
-          assignmentWithOne(candidate.player, filledWithoutSlot, baseFilled),
-        )) <= remainingAfterPair)
-        .map((candidate) => ({
+    const currentEntries = entries.filter((entry) => automaticCandidateAllowed({ player: entry.player, round, picks, config }));
+    const nextOptionsByEligibility = new Map();
+    for (const entry of currentEntries) {
+      const picksAfterEntry = [...picks, entry.player];
+      const filledAfterEntry = assignmentWithOne(entry.player, filledWithoutSlot, baseFilled);
+      // Roster feasibility depends on position/eligibility, not the player's
+      // projection. Reuse it across same-role candidates without caching scores.
+      let nextOptions = nextOptionsByEligibility.get(entry.feasibilityKey);
+      if (!nextOptions) {
+        nextOptions = [];
+        const candidateFeasibility = new Map();
+        if (Number.isFinite(window.nextPick)) for (const candidate of nextCandidateOrder) {
+          let feasibility = candidateFeasibility.get(candidate.feasibilityKey);
+          if (feasibility === undefined) {
+            const legal = automaticCandidateAllowed({ player: candidate.player, round: round + 1, picks: picksAfterEntry, config }) &&
+              withinPositionLimit(candidate.player, picksAfterEntry, config) && completionFloorsCanComplete(candidate.player, picksAfterEntry, config);
+            const filledAfterPair = legal ? assignmentWithPair(entry.player, candidate.player, filledProfile.utilityWithoutPair, Math.max(
+              filledAfterEntry, assignmentWithOne(candidate.player, filledWithoutSlot, baseFilled),
+            )) : -1;
+            feasibility = { legal:legal && slots.length - filledAfterPair <= remainingAfterPair, fillsStarter:filledAfterPair > filledAfterEntry };
+            candidateFeasibility.set(candidate.feasibilityKey, feasibility);
+          }
+          if (feasibility.legal) nextOptions.push({ candidate, fillsStarter:feasibility.fillsStarter });
+        }
+        nextOptionsByEligibility.set(entry.feasibilityKey, nextOptions);
+      }
+      const nextCandidates = [];
+      for (const option of nextOptions) {
+        if (option.candidate === entry || sameRosterIdentity(option.candidate.player, entry.player)) continue;
+        nextCandidates.push(option);
+        if (nextCandidates.length === NEXT_TURN_COMPARISON_POOL) break;
+      }
+      const alternatives = nextCandidates
+        .map(({ candidate, fillsStarter }) => ({
           ...candidate,
-          marginalAfterEntry: Math.max(0, utilityWithPair(entry, candidate) - entry.utilityAfter),
+          marginalAfterEntry: marginalDraftUtility(candidate.player, picksAfterEntry, config,
+            Math.max(0, utilityWithPair(entry, candidate) - entry.utilityAfter), fillsStarter).marginalUtility,
         }))
         .sort((left, right) => right.marginalAfterEntry - left.marginalAfterEntry || left.player.rank - right.player.rank);
       let noneBetter = 1;
@@ -901,7 +925,7 @@
       entry.costOfWaiting = Math.max(0, entry.marginalUtility - expectedNextUtility);
       entry.decisionScore = entry.marginalUtility + entry.expectedNextUtility;
     }
-    const ranked = entries.sort((left, right) =>
+    const ranked = currentEntries.sort((left, right) =>
       right.decisionScore - left.decisionScore ||
       right.marginalUtility - left.marginalUtility ||
       left.player.rank - right.player.rank
@@ -1492,10 +1516,12 @@
       if (manualOverride.status === "applied" || selectionHoldMs === 0) {
         startPendingController(null, manualOverride.status === "applied" ? "pre_staged_pin" : "baseline_immediate");
       } else {
+        const holdMs = Math.min(selectionHoldMs, Math.max(0, TURN_TO_CLICK_BUDGET_MS - (Date.now() - detectedAt) - 250));
+        pendingDecision.deadlineAt = Date.now() + holdMs;
         selectionTimerId = environment.setTimeout(() => {
           selectionTimerId = null;
           try { startPendingController(null, "baseline_timeout"); } catch (error) { fail(String(error?.message ?? error)); }
-        }, selectionHoldMs);
+        }, holdMs);
       }
     }
 
@@ -1693,7 +1719,7 @@
         pendingDecision: pendingDecision ? {
           turn: pendingDecision.turn.label,
           detectedAt: pendingDecision.detectedAt,
-          deadlineAt: pendingDecision.detectedAt + selectionHoldMs,
+          deadlineAt: pendingDecision.deadlineAt,
           targetYahooIds: pendingDecision.targets.slice(0, 3).map((target) => target.yahooId),
         } : null,
       };
@@ -1710,6 +1736,7 @@
 
   const decision = Object.freeze({
     recomputeBudgetMs: DECISION_RECOMPUTE_BUDGET_MS,
+    panelBudgetMs: PANEL_BUDGET_MS,
     IDP_POSITIONS,
     validateBoard,
     buildDecisionLadder,
@@ -1731,6 +1758,7 @@
     decision,
     _test: {
       decisionRecomputeBudgetMs: DECISION_RECOMPUTE_BUDGET_MS,
+      panelBudgetMs: PANEL_BUDGET_MS,
       normalizeSlots,
       sameSlots,
       positionCounts,

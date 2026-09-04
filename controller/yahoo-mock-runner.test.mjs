@@ -9,12 +9,12 @@ const replacementBySlot = Object.freeze({
   K: 80, DEF: 75, D: 70, DB: 65, LB: 68, CB: 65, S: 65,
 });
 
-function loadRunner(controllerApi = {}) {
+function loadRunner(controllerApi = {}, clock = Date) {
   const context = {
     clearInterval,
     console,
     crypto,
-    Date,
+    Date: clock,
     Event: class Event { constructor(type) { this.type = type; } },
     Math,
     setInterval,
@@ -316,13 +316,23 @@ test("grouped weekly scoring matches the ungrouped exact lineup reference", () =
   const nextCandidates = reference.slice().sort((left, right) =>
     right.marginalUtility - left.marginalUtility || left.player.rank - right.player.rank
   ).slice(0, 6);
+  const referenceMarginal = (candidate, roster) => {
+    const raw = helpers.optimalRosterUtility([...roster, candidate], config, replacementBySlot) -
+      helpers.optimalRosterUtility(roster, config, replacementBySlot);
+    if (helpers.maximumFilledStarterSlots([...roster, candidate], config) > helpers.maximumFilledStarterSlots(roster, config)) return raw;
+    const count = roster.filter((pick) => pick.position === candidate.position).length;
+    const depth = candidate.position === "RB" ? (count < 4 ? 0.30 : 0.12)
+      : candidate.position === "WR" ? (count < config.offenseStarters.WR + 2 ? 0.24 : 0.12)
+        : candidate.position === "QB" ? (count === 1 ? 0.06 : 0.01) : (count === 1 ? 0.05 : 0.01);
+    const lineup = ["QB", "TE"].includes(candidate.position) ? (count === 1 ? 0.35 : 0.10) : 1;
+    return raw * lineup + Math.max(0, candidate.vor) * depth + Number(candidate.perGamePoints) * depth * 0.1;
+  };
   for (const entry of reference) {
     const alternatives = nextCandidates
       .filter((candidate) => candidate !== entry)
       .map((candidate) => ({
         ...candidate,
-        marginalAfterEntry: helpers.optimalRosterUtility([...picks, entry.player, candidate.player], config, replacementBySlot) -
-          helpers.optimalRosterUtility([...picks, entry.player], config, replacementBySlot),
+        marginalAfterEntry: referenceMarginal(candidate.player, [...picks, entry.player]),
       }))
       .sort((left, right) => right.marginalAfterEntry - left.marginalAfterEntry || left.player.rank - right.player.rank);
     let noneBetter = 1;
@@ -336,6 +346,45 @@ test("grouped weekly scoring matches the ungrouped exact lineup reference", () =
     assert.ok(Math.abs(actual.expectedNextUtility - expectedNextUtility) < 1e-9);
     assert.ok(Math.abs(actual.decisionScore - (entry.marginalUtility + expectedNextUtility)) < 1e-9);
   }
+});
+
+test("next-turn bench value matches the same decision made on that next turn", () => {
+  const config = { ...testConfig, teams:12, rounds:3, rosterSlots:["QB", "BN", "BN"], positionLimits:{ QB:3 } };
+  const qb = (id, ppg, bye) => player("QB", id, 100, {
+    projection:ppg * 16, perGamePoints:ppg, vor:ppg * 16 - 160, marketMean:200,
+    weeklyPoints:Array.from({ length:17 }, (_, week) => week === bye ? 0 : ppg),
+  });
+  const picks = [qb(1, 30, 4)];
+  const pool = [qb(2, 20, 5), qb(3, 19, 5)];
+  const baselines = { QB:160 };
+  const scored = helpers.scoreCandidates({ round:2, seat:6, picks, pool, config, replacementBySlot:baselines });
+  for (const entry of scored.ranked) {
+    const remaining = pool.filter((candidate) => candidate !== entry.player);
+    const next = helpers.scoreCandidates({ round:3, seat:6, picks:[...picks, entry.player], pool:remaining, config, replacementBySlot:baselines });
+    const expected = next.ranked[0].marginalUtility * helpers.survivalProbability(remaining[0], scored.window.nextPick);
+    assert.ok(Math.abs(entry.expectedNextUtility - expected) < 1e-9);
+    assert.ok(entry.expectedNextUtility > 0, "even the weaker backup retains the existing bounded depth value");
+  }
+});
+
+test("lookahead respects next-round specialist policy, including newly unlocked candidates", () => {
+  const config = { ...testConfig, teams:12 };
+  const picks = [player("QB", 1, 1),
+    ...Array.from({ length:4 }, (_, i) => player("RB", i + 1, i + 2)),
+    ...Array.from({ length:6 }, (_, i) => player("WR", i + 1, i + 6)),
+    player("TE", 1, 12), player("TE", 2, 13)];
+  const rb = player("RB", 5, 100);
+  const wr = player("WR", 7, 101);
+  const k = player("K", 1, 120, { projection:100, marketMean:200 });
+  const def = player("DEF", 1, 121, { projection:90, marketMean:200 });
+  const withoutSpecialists = helpers.scoreCandidates({ round:14, seat:6, picks, pool:[rb, wr], config, replacementBySlot });
+  assert.ok(withoutSpecialists.ranked.every((entry) => entry.expectedNextUtility === 0), "round-15 offense cannot be promised when both K and DEF remain");
+  const withSpecialists = helpers.scoreCandidates({ round:14, seat:6, picks, pool:[rb, wr, k, def], config, replacementBySlot });
+  assert.ok(withSpecialists.ranked.every((entry) => ["RB", "WR"].includes(entry.player.position)), "no early specialist pick");
+  const kSurvival = helpers.survivalProbability(k, withSpecialists.window.nextPick);
+  const defSurvival = helpers.survivalProbability(def, withSpecialists.window.nextPick);
+  const expected = kSurvival * 20 + (1 - kSurvival) * defSurvival * 15;
+  assert.ok(withSpecialists.ranked.every((entry) => Math.abs(entry.expectedNextUtility - expected) < 1e-9));
 });
 
 test("uses the held-out survival packet when its gate is enabled", () => {
@@ -517,17 +566,20 @@ test("observed TEST roster validation rejects a specialist displaced to the benc
   assert.equal(helpers.validateObservedTestRoster(bad, picks), false);
 });
 
-function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE", queueState = "EMPTY", unstableRows = false, ownedSignalState = "OWNED", draftClockSeconds = 59, leaseState = { current:true } } = {}) {
+function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE", queueState = "EMPTY", unstableRows = false, ownedSignalState = "OWNED", draftClockSeconds = 59, leaseState = { current:true }, readStallMs = 0 } = {}) {
   const board = boardForConfig(mockConfig);
   const rows = board.slice(0, 20).map((entry) => ({ player:entry }));
   const staleRows = board.slice(60, 80).map((entry) => ({ player:entry }));
   let rowReads = 0;
+  let clockOffset = 0;
+  class FixtureDate extends Date { static now() { return Date.now() + clockOffset; } }
   const select = { value:"all", options:[{ value:"all", textContent:"All Positions" }], dispatchEvent() {} };
   const document = {
     body:{ innerText:"0 / 15" },
     querySelectorAll(selector) { if (selector === "select") return [select]; if (selector === "tr") { rowReads += 1; return unstableRows && rowReads === 1 ? staleRows : rows; } return []; },
   };
   let controllerTargets = null;
+  let controllerOptions = null;
   const controllerApi = {
     runtime:{
       parseRoom:() => ({ roomId:"99", seat:6 }),
@@ -542,11 +594,13 @@ function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE",
       readPlayerRow:(row) => row.player,
       readAvailablePlayerRows:() => {
         rowReads += 1;
+        if (rowReads === 2) clockOffset += readStallMs;
         return unstableRows && rowReads === 1 ? staleRows.map((row) => row.player) : rows.map((row) => row.player);
       },
     },
     create(options) {
       controllerTargets = options.targets;
+      controllerOptions = options;
       let state = "created";
       return {
         start() { state = "running"; return this; },
@@ -556,7 +610,7 @@ function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE",
       };
     },
   };
-  const runnerApi = loadRunner(controllerApi);
+  const runnerApi = loadRunner(controllerApi, FixtureDate);
   let clearedTimeouts = 0;
   const environment = {
     Event: class Event { constructor(type) { this.type=type; } },
@@ -575,10 +629,28 @@ function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE",
     observedTeamCount:12, observedRosterSlots:mockConfig.rosterSlots, minimumFallbacks:5, pollMs:25,
     filterDeadlineMs:500, selectionHoldMs, replacementBySlot, board,
     assertRunnerLease:() => leaseState.current === true,
-    runtimeAttestation:{ ok:true, version:"0.16.1", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
+    runtimeAttestation:{ ok:true, version:"0.16.2", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
   }, environment);
-  return { runner, board, getControllerTargets:() => controllerTargets, getClearedTimeouts:() => clearedTimeouts, getRowReads:() => rowReads };
+  return { runner, board, getControllerTargets:() => controllerTargets, getControllerOptions:() => controllerOptions, getClearedTimeouts:() => clearedTimeouts, getRowReads:() => rowReads };
 }
+
+test("a slow panel shortens the optional hold without relaxing the two-second click deadline", async () => {
+  const fixture = integrationFixture({ selectionHoldMs:1200, readStallMs:900 });
+  fixture.runner.start();
+  try {
+    await waitFor(() => fixture.runner.getStatus().pendingDecision);
+    const pending = fixture.runner.getStatus().pendingDecision;
+    const resolved = fixture.runner.exportReceipts().find((row) => row.kind === "runner_turn_resolved");
+    assert.ok(resolved.panelReadyMs >= 900 && resolved.panelReadyMs < 1200);
+    assert.equal(resolved.panelBudgetMs, 1200);
+    assert.ok(pending.deadlineAt - pending.detectedAt <= 1752);
+    assert.ok(pending.deadlineAt - pending.detectedAt - resolved.panelReadyMs < 900);
+    assert.equal(fixture.runner.chooseOnClock(pending.targetYahooIds[0]), true);
+    assert.ok(fixture.getControllerOptions().selectionDeadlineMs < 1100);
+    assert.ok(fixture.getControllerOptions().selectionDeadlineMs > 0);
+    assert.equal(fixture.getControllerOptions().minimumClockSeconds, 2);
+  } finally { fixture.runner.halt(); }
+});
 
 test("runner creation refuses unknown Autodraft state or a nonempty Yahoo queue", () => {
   assert.throws(() => integrationFixture({ autodraftState:"UNKNOWN" }), /autodraft_state_unknown_at_create/);

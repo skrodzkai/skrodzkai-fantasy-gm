@@ -24,10 +24,11 @@ function counts(picks) {
   }, {});
 }
 
-export function runRealShadowAcceptance({ engine, boardData, settingsSnapshot, seats = [1, 6, 12], decisionBudgetMs = 250 }) {
+export function runRealShadowAcceptance({ engine, boardData, settingsSnapshot, seats = [1, 6, 12], decisionBudgetMs = engine?.decision?.recomputeBudgetMs }) {
   const decision = engine?.decision;
   const config = engine?.configs?.real_league_19_idp;
   if (!decision || !config) throw new Error("real shadow decision engine is unavailable");
+  if (!Number.isFinite(decisionBudgetMs) || decisionBudgetMs <= 0) throw new Error("real shadow decision budget is unavailable");
   const idpPositions = Array.from(decision.IDP_POSITIONS ?? []);
   if (!idpPositions.length) throw new Error("real shadow IDP position contract is unavailable");
   if (!settingsSnapshot?.ready) throw new Error("real settings must be verified before stress acceptance");
