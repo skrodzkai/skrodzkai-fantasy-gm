@@ -47,6 +47,8 @@ test("exports only executable offense while retaining explicitly labeled special
     leagueId:"420010",
     generatedAt: "2026-08-22T00:00:00Z",
     scoringModel: "test",
+    replacementRoster:{teamCount:12,rosterSlots:["QB"]},
+    sourceExpirations:[{sourceId:"yahoo",observedAt:"2026-08-22T00:00:00Z",maxAgeHours:6}],
     injuryFreshnessPolicy: { default: 36, yahoo: 6 },
     replacementBySlot: { QB: 200, RB: 100, WR: 100, TE: 80, K: 70, DEF: 60, D: 50, DB: 45, LB: 48 },
     boards: { offense, specialists: {
@@ -78,6 +80,8 @@ test("exports only executable offense while retaining explicitly labeled special
   const exported = vm.createContext({});
   vm.runInContext(renderExtensionBoard(board), exported);
   assert.equal(exported.SKRODZKaiYahooMockBoard.leagueId, "420010");
+  assert.equal(exported.SKRODZKaiYahooMockBoard.replacementRoster.teamCount,12);
+  assert.equal(exported.SKRODZKaiYahooMockBoard.sourceExpirations[0].maxAgeHours,6);
   assert.equal(board.offense.some((entry) => entry.yahooId === "RB-1"), false);
   assert.equal(board.offense.some((entry) => entry.yahooId === "RB-2"), true);
   assert.equal(board.offense.find((entry) => entry.yahooId === "RB-2").adpLow, null);

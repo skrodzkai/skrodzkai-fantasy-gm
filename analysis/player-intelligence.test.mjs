@@ -11,6 +11,22 @@ import {
   scoreKickerStatLine,
 } from "./player-intelligence.mjs";
 
+test("cached offense-table kicker rows cannot halve Yahoo kicker projections", () => {
+  const board = buildPlayerBoard({
+    asOf:"2026-09-05T18:18:06Z", minimumFreshSources:1, replacementRanks:{K:2},
+    players:[{playerId:"40819",name:"Brandon Aubrey",position:"K"},{playerId:"29792",name:"Ka'imi Fairbairn",position:"K"}],
+    sources:[
+      {sourceId:"yahoo",updatedAt:"2026-09-05T16:58:19Z",rows:[{playerId:"40819",perGamePoints:8.904375},{playerId:"29792",perGamePoints:8.638125}]},
+      {sourceId:"razzball",updatedAt:"2026-09-05T16:00:00Z",rows:[{playerId:"40819",position:"K",scoringKind:"offense",projectionGames:17,stats:{passingYards:0,rushingYards:0,receptions:0}}]},
+    ],
+  });
+  const aubrey = board.players.find(p=>p.playerId==="40819");
+  assert.equal(aubrey.perGamePoints, 8.904375);
+  assert.equal(aubrey.sourceFamilyCount, 1);
+  assert.deepEqual(aubrey.sourceFamilyPerGamePoints, {yahoo:8.904375});
+  assert.ok(aubrey.perGamePoints > board.players.find(p=>p.playerId==="29792").perGamePoints);
+});
+
 test("scores the league's QB premium and yardage bonuses exactly", () => {
   assert.equal(
     scoreOffenseStatLine({

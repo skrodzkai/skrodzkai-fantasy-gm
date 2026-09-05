@@ -235,6 +235,8 @@ for (const { seat, onClock = false, skipDiscovery = false, sparseDiscovery = fal
   const now = new Date().toISOString();
   const boardData = { ...config.expectedScoring, generatedAt:now, players:board,
     marketAdpReceipt:{ observedAt:now, rows:218 },
+    sourceExpirations:[{sourceId:"yahoo",observedAt:now,maxAgeHours:6}],
+    replacementRoster:{teamCount:12,rosterSlots:config.rosterSlots.filter(s=>s!=="BN")},
     injuryCoverage:{ complete:true, checkedPlayers:board.length, expectedPlayers:board.length },
     byeCoverage:{ complete:true, playersWithBye:board.length, playersTotal:board.length },
     replacementBySlot:{ QB:300, RB:180, WR:170, TE:140, "W/R/T":175, K:80, DEF:75, D:70 },

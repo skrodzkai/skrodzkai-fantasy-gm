@@ -201,6 +201,7 @@
       generatedAt:boardData?.generatedAt ?? null,
       ageMs,
       maximumAgeMs,
+      sourceExpirations:boardData?.sourceExpirations ?? null,
       marketAdpObservedAt:boardData?.marketAdpReceipt?.observedAt ?? null,
       marketAdpSourceAsOf:boardData?.marketAdpReceipt?.sourceAsOf ?? null,
       marketAdpRows:Number(boardData?.marketAdpReceipt?.rows ?? 0),
@@ -221,6 +222,12 @@
     if (health.ageMs > maximumAgeMs) return "draft_board_stale_over_24h";
     const adpAgeMs = now - Date.parse(health.marketAdpObservedAt);
     if (!Number.isFinite(adpAgeMs) || adpAgeMs < -futureToleranceMs || adpAgeMs > maximumAgeMs || health.marketAdpRows < 150) return "draft_board_adp_stale_or_missing";
+    if (!Array.isArray(health.sourceExpirations) || health.sourceExpirations.length === 0) return "draft_board_source_expirations_missing";
+    for (const source of health.sourceExpirations) {
+      const age = now - Date.parse(source.observedAt);
+      const limit = Number(source.maxAgeHours) * 3_600_000;
+      if (!source.sourceId || !Number.isFinite(age) || age < -futureToleranceMs || !Number.isFinite(limit) || limit <= 0 || age > limit) return "draft_board_required_source_expired_or_invalid";
+    }
     if (!health.injuryCoverageComplete || health.injuryPlayersTotal <= 0 || health.injuryPlayersChecked !== health.injuryPlayersTotal || health.injuryPlayersTotal !== health.byePlayersTotal) return "draft_board_injury_coverage_incomplete";
     if (!health.byeCoverageComplete || health.byePlayersTotal <= 0 || health.byePlayersWithBye !== health.byePlayersTotal) return "draft_board_bye_coverage_incomplete";
     return null;

@@ -334,7 +334,11 @@
     const expectedRoster = token.mode === "test_league_19_idp" ? TEST_ROSTER_SLOTS : PUBLIC_ROSTER_SLOTS;
     if (!sameSlots(token.observedRosterSlots, expectedRoster)) return "draft_roster_shape_mismatch";
     if (token.mode === "test_league_19_idp" && (String(token.roomId) !== TEST_LEAGUE_ID || Number(token.urlSeat) !== TEST_TEAM_ID)) return "test_identity_mismatch";
-    if (token.mode === "test_league_19_idp") return root.SKRODZKaiYahooMockRunner.decision.scoringFailure(root.SKRODZKaiYahooMockRunner.configs.test_league_19_idp, boardData);
+    if (token.mode === "test_league_19_idp") {
+      const config = { ...root.SKRODZKaiYahooMockRunner.configs.test_league_19_idp, teams:observedTeamCount };
+      return root.SKRODZKaiYahooMockRunner.decision.scoringFailure(config, boardData) ??
+        root.SKRODZKaiYahooMockRunner.decision.replacementFailure(config, boardData.replacementRoster);
+    }
     return null;
   }
 
@@ -1569,6 +1573,7 @@
       filterDeadlineMs: 1200,
       selectionHoldMs: 1200,
       replacementBySlot: boardData.replacementBySlot,
+      replacementRoster: boardData.replacementRoster,
       survivalCalibration: boardData.survivalCalibration,
       scoringIdentity: { leagueId:boardData.leagueId, scoringModel:boardData.scoringModel, scoringSchemaHash:boardData.scoringSchemaHash },
       runtimeAttestation,

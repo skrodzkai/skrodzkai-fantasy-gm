@@ -367,6 +367,16 @@ export function buildPlayerBoard({
     for (const row of rows) {
       const playerId = String(row.playerId ?? "");
       if (!playerById.has(playerId)) continue;
+      // Explicit raw-stat kinds must fit the observed player, including cached
+      // offense-table rows for kickers. Yahoo league-scored totals have no kind.
+      if (row.scoringKind != null || row.stats != null || row.weeklyStats != null) {
+        const position = String(playerById.get(playerId).position).toUpperCase();
+        const kind = String(row.scoringKind ?? "offense").toLowerCase();
+        const compatible = kind === "offense" ? ["QB", "RB", "WR", "TE"].includes(position)
+          : kind === "kicker" ? position === "K"
+            : kind === "idp" && ["D", "DL", "DE", "DT", "LB", "ILB", "OLB", "DB", "CB", "S", "FS", "SS"].includes(position);
+        if (!compatible) continue;
+      }
       const perGamePoints = projectionPerGame(row, source, scoring);
       if (!Number.isFinite(perGamePoints)) continue;
       const evidence = evidenceByPlayer.get(playerId) ?? [];
