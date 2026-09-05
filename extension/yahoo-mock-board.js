@@ -2,6 +2,7 @@
   "use strict";
 
   root.SKRODZKaiYahooMockBoard = Object.freeze({
+  "leagueId": "420010",
   "generatedAt": "2026-09-04T20:58:27.727Z",
   "source": "free-source board: raw projections scored under exact league rules and equal-weighted per independent source family; IDP projection fields use the consensus-anchored decision score only when the global historical gate passes (DIAGNOSTIC_ONLY_CALIBRATION_UNAVAILABLE); rawProjection preserves consensus; market/history are timing context only; injuries use source-specific freshness",
   "scoringModel": "2-minute-drillers-2026",

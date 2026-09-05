@@ -242,6 +242,8 @@ function evaluateDraftExport(payload, options = {}) {
   const completed = runReceipts.filter((entry) => entry.kind === "runner_completed");
   const failures = runReceipts.filter((entry) => ["runner_failed", "runner_halted", "runner_stopped"].includes(entry.kind));
   if (started.length !== 1) errors.push("runner_started_receipt_contract_failed");
+  const scoringError = globalThis.SKRODZKaiYahooMockRunner.decision.scoringFailure(config, started[0]?.scoringIdentity);
+  if (scoringError) errors.push(scoringError);
   if (completed.length !== 1 || Number(completed[0]?.picks) !== config.rounds) errors.push("runner_completed_receipt_contract_failed");
   if (runReceipts.some((entry) =>
     String(entry.roomId) !== expectedRoomId ||
@@ -282,6 +284,16 @@ function evaluateDraftExport(payload, options = {}) {
     const turn = String(entry.turn ?? "");
     if (decisionsByTurn.has(turn)) errors.push(`duplicate_runner_decision:${turn}`);
     decisionsByTurn.set(turn, entry);
+    const allowedViews = publicMock ? ["All Positions"] : globalThis.SKRODZKaiYahooMockRunner._test.requiredTestFilterLabels();
+    const coverage = entry.coverage;
+    if (!allowedViews.includes(entry.filterLabel) || coverage?.filterLabel !== entry.filterLabel || coverage?.turn !== turn ||
+        coverage?.scope !== "fresh_clickable_rendered_rows" || !Number.isFinite(coverage?.observedAt) ||
+        coverage.observedAt > timestamp(entry.at) || timestamp(entry.at) - coverage.observedAt > PANEL_BUDGET_MS ||
+        JSON.stringify(coverage?.targetYahooIds) !== JSON.stringify(entry.decision?.targetYahooIds) ||
+        !asArray(entry.decision?.targetYahooIds).length || !asArray(entry.decision?.targetYahooIds).every((id) => asArray(coverage?.yahooIds).includes(id))) {
+      errors.push(`turn_${turn || "unknown"}_view_coverage_invalid`);
+    }
+    if (entry.viewFallback || runReceipts.some((receipt) => receipt.kind === "view_fallback_all_positions" && receipt.turn === turn)) errors.push(`turn_${turn || "unknown"}_view_fallback_used`);
     if (!Number.isFinite(Number(entry.panelReadyMs)) || Number(entry.panelReadyMs) < 0 || Number(entry.panelReadyMs) >= PANEL_BUDGET_MS) {
       errors.push(`turn_${turn || "unknown"}_panel_ready_budget_missed`);
     }

@@ -208,12 +208,9 @@ test("binds League Two team 3 while keeping its live field size and snake slot s
   assert.equal(helpers.parseTestDraftHome({ body: { innerText: document.body.innerText.replace("SKRODZKai", "Chef Joe") } }, location, settingsReceipt, 1_001).ready, false);
   assert.deepEqual([...snapshot.rosterSlots], [...helpers.testRosterSlots]);
   const board = healthyBoard();
-  const preflight = helpers.makeTestPreflight(snapshot, 1_000, board);
-  assert.equal(preflight.seat, 4);
-  assert.equal(preflight.urlSeat, 3);
-  assert.equal(preflight.observedTeamCount, 10);
-  assert.equal(preflight.expiresAt, 14_401_000);
-  assert.equal(helpers.validateDraftPreflight(preflight, { roomId: "542830", seat: 3 }, 1_001, board), null);
+  assert.throws(() => helpers.makeTestPreflight(snapshot, 1_000, board), /test_scoring_schema_unverified/);
+  const preflight = { version:context.SKRODZKaiYahooMockExtension.version, mode:"test_league_19_idp", roomId:"542830", urlSeat:3, seat:4, observedTeamCount:10, observedRosterSlots:snapshot.rosterSlots, expiresAt:14_401_000 };
+  assert.equal(helpers.validateDraftPreflight(preflight, { roomId: "542830", seat: 3 }, 1_001, board), "test_scoring_schema_unverified");
   assert.equal(helpers.validateDraftPreflight(preflight, { roomId: "542830", seat: 4 }, 1_001, board), "draft_room_or_url_team_changed");
   assert.equal(
     helpers.parseTestDraftHome({ body: { innerText: document.body.innerText.replace("Your Draft Position: 4th", "Draft position pending") } }, location, settingsReceipt, 1_001).ready,
@@ -245,7 +242,7 @@ test("qualifies the actual TEST prestart snake strip, not Yahoo team number as d
   assert.equal(parse().seat, 8);
   assert.equal(parse().urlSeat, 3);
   assert.equal(parse().teamCount, 12);
-  assert.equal(helpers.makeTestPreflight(parse(), 1_001, healthyBoard()).seat, 8);
+  assert.throws(() => helpers.makeTestPreflight(parse(), 1_001, healthyBoard()), /test_scoring_schema_unverified/);
   assert.equal(parse(document, { pathname:"/draftclient/f1/420010/3" }).ready, false);
   assert.equal(parse(document, { pathname:"/draftclient/f1/542830/8" }).ready, false);
   assert.equal(parse(document, location, null).ready, false);
@@ -531,6 +528,7 @@ test("bridge locks every action when Chrome invalidates the extension context", 
   };
   const rail = {
     getSnapshot:() => ({ label:"READY", board:[] }),
+    controls:{ export:{} },
     setOpenHandler() {},
     command() { return true; },
     lock(reason) { locked = reason; },
@@ -639,7 +637,7 @@ test("reload marker requires a new extension-session boot identity and remains f
   assert.equal(helpers.reloadRefusal({ context:{ ownedTurn:true } }), "reload_refused_during_owned_turn");
   assert.equal(helpers.reloadRefusal({ context:{ autodraft:true } }), "reload_refused_while_autodraft_active");
   assert.equal(helpers.reloadRefusal({ context:{} }), null);
-  assert.match(source, /name !== "reload"/);
+  assert.match(source, /\["reload", "export"\]\.includes\(name\)/);
   assert.match(backgroundSource, /if \(message\?\.type === "version_handshake"\)[\s\S]*?return true;/);
 });
 

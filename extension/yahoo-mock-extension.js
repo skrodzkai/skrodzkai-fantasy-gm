@@ -309,6 +309,7 @@
     const expectedRoster = token.mode === "test_league_19_idp" ? TEST_ROSTER_SLOTS : PUBLIC_ROSTER_SLOTS;
     if (!sameSlots(token.observedRosterSlots, expectedRoster)) return "draft_roster_shape_mismatch";
     if (token.mode === "test_league_19_idp" && (String(token.roomId) !== TEST_LEAGUE_ID || Number(token.urlSeat) !== TEST_TEAM_ID)) return "test_identity_mismatch";
+    if (token.mode === "test_league_19_idp") return root.SKRODZKaiYahooMockRunner.decision.scoringFailure(root.SKRODZKaiYahooMockRunner.configs.test_league_19_idp, boardData);
     return null;
   }
 
@@ -500,19 +501,20 @@
   }
 
   function buildExportPayload({ roomId, seat, urlSeat = seat, storage, runner, runtimeAttestation = null, operatorAttestation = null }) {
-    const belongsToDraftSeat = (entry) => String(entry.roomId) === String(roomId) && Number(entry.seat) === Number(seat);
+    const belongsToDraftSeat = (entry) => seat != null && entry.seat != null && String(entry.roomId) === String(roomId) && Number(entry.seat) === Number(seat);
     const belongsToUrlSeat = (entry) => String(entry.roomId) === String(roomId) && Number(entry.seat) === Number(urlSeat);
     const runnerReceipts = readJson(storage, RUNNER_RECEIPT_KEY, []).filter(belongsToDraftSeat);
     return {
       exportedAt: new Date().toISOString(),
       extensionVersion: VERSION,
       roomId: String(roomId),
-      seat: Number(seat),
-      urlSeat: Number(urlSeat),
+      seat: seat == null ? null : Number(seat),
+      urlSeat: urlSeat == null ? null : Number(urlSeat),
       runtimeAttestation: validRuntimeAttestation(runtimeAttestation) ? { ...runtimeAttestation } : null,
       operatorAttestation: operatorAttestation ?? makeOperatorAttestation(null),
       status: runner?.getStatus?.() ?? statusFromRunnerReceipts(runnerReceipts),
-      extensionReceipts: readJson(storage, RECEIPT_KEY, []).filter(belongsToDraftSeat),
+      extensionReceipts: readJson(storage, RECEIPT_KEY, []).filter((entry) => belongsToDraftSeat(entry) ||
+        (entry.seat == null && urlSeat != null && String(entry.roomId) === String(roomId) && Number(entry.urlSeat) === Number(urlSeat))),
       runnerReceipts,
       controllerReceipts: readJson(storage, CONTROLLER_RECEIPT_KEY, []).filter(belongsToUrlSeat),
     };
@@ -537,8 +539,9 @@
         rail.addEvent?.("export rejected", "runner is active; export unlocks after a terminal receipt");
         return;
       }
-      const runtimeAttestation = await verifyCurrentExtensionVersion(environment, rail);
-      if (!runtimeAttestation) return;
+      // Terminal failures remain exportable even when the bridge itself failed.
+      // Missing attestation stays null and cannot pass acceptance.
+      const runtimeAttestation = rail.isLocked() ? null : await verifyCurrentExtensionVersion(environment, rail);
       const attestation = makeOperatorAttestation(environment.prompt?.(
         "Owner attestation required. Type NONE if Yahoo never required a rescue, or INTERVENTION: followed by a brief description if you prevented or replaced an automatic Yahoo selection.",
       ));
@@ -570,9 +573,6 @@
         .rail { position: fixed; right: 16px; bottom: 16px; z-index: 2147483647; width: min(380px, calc(100vw - 32px)); overflow: hidden; color: #fff; background: radial-gradient(circle at 12% 0, rgba(10,132,255,.18), transparent 34%), linear-gradient(180deg,#070b11,#05070b); border: 1px solid rgba(10,132,255,.62); border-radius: 10px; box-shadow: 0 18px 54px rgba(0,0,0,.58), inset 0 1px rgba(255,255,255,.05); font: 600 12px/1.35 "Avenir Next", "SF Pro Text", "Helvetica Neue", sans-serif; letter-spacing: .01em; }
         :host([data-draftclient]) .rail { top:72px; bottom:auto; }
         .rail.expanded,.rail.collapsed { width:min(380px,calc(100vw - 32px)); }
-        .rail.collapsed .body, .rail.collapsed .mode-strip, .rail.collapsed .cap-meta, .rail.collapsed .brand-lockup { display: none; }
-        .compact-status { display: none; color: var(--blue-accent); font: 900 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace; writing-mode: vertical-rl; letter-spacing: .08em; }
-        .rail.collapsed .compact-status { display: block; }
         .cap { min-height: 68px; display: grid; grid-template-columns: 48px minmax(0,1fr) auto; align-items: center; gap: 10px; padding: 9px; border-bottom: 1px solid var(--line); background: rgba(5,8,13,.94); }
         .brand-lockup { display: flex; align-items: center; min-width: 0; }
         .brand-image { width:46px; height:46px; object-fit:cover; object-position:center; border-radius:8px; }
@@ -671,7 +671,7 @@
       <section class="rail">
         <header class="cap">
           <div class="brand-lockup"><img class="brand-image" src="${root.chrome?.runtime?.getURL?.("extension/assets/skrodzkai-globe-mark.png") ?? ""}" alt="SKRODZKai" /></div>
-          <div class="dock-readout"><strong data-dock-primary>SAFE · --:--</strong><span data-compact-status>MOCK · ROOM — · SEAT —</span><span data-dock-target>Waiting for Yahoo availability</span><span class="runtime-attestation" data-runtime-attestation>v${VERSION} · SHA PENDING · LOAD PENDING</span></div>
+          <div class="dock-readout"><strong data-dock-primary>LOCKED</strong><span data-compact-status>UNKNOWN · ROOM — · SEAT —</span><span data-dock-target>Waiting for verified preflight</span><span class="runtime-attestation" data-runtime-attestation>v${VERSION} · SHA PENDING · LOAD PENDING</span></div>
           <div class="dock-actions"><button class="reload" type="button" disabled>Reload & Verify</button><button class="expand" type="button">Open Center</button><button class="dock-kill danger" type="button" disabled>Kill</button></div>
         </header>
         <div class="mode-strip"><span class="mode-chip active">MOCK</span><span class="mode-chip">TEST</span><span class="mode-chip blocked">REAL ⛔</span></div>
@@ -710,8 +710,9 @@
       stageCount: shadow.querySelector("[data-stage-count]"), pinState: shadow.querySelector("[data-pin-state]"), search: shadow.querySelector("[data-search]"), manualList: shadow.querySelector("[data-manual-list]"), clearPin: shadow.querySelector("[data-clear-pin]"), confirm: shadow.querySelector("[data-confirm]"), compact: shadow.querySelector("[data-compact-status]"), dockPrimary: shadow.querySelector("[data-dock-primary]"), dockTarget: shadow.querySelector("[data-dock-target]"), runtimeAttestation: shadow.querySelector("[data-runtime-attestation]"), modeLabel: shadow.querySelector(".mode"), modeChips: [...shadow.querySelectorAll(".mode-chip")],
     };
     const controls = { arm: shadow.querySelector(".arm"), halt: shadow.querySelector(".halt"), export: shadow.querySelector(".export"), dock: shadow.querySelector(".dock-kill"), expand: shadow.querySelector(".expand"), reload:shadow.querySelector(".reload") };
-    if (String(root.location?.pathname ?? "") === `/draftclient/f1/${TEST_LEAGUE_ID}/${TEST_TEAM_ID}`) shadow.querySelector(".dock-actions").prepend(controls.arm);
-    const ui = { mode:"MOCK", kind:"", label:"LOCKED", detail:"Waiting for a verified draft room.", context:{}, roster:[], recommendations:[], board:[], between:{}, warnings:[], staged:[], pinned:null, pinOutcome:null, pinText:"No pin staged. Five verified fallbacks remain active.", pinLabel:"BASELINE", ladderState:"BASELINE READY", latestText:"No confirmed selection yet.", events:[], latestPickId:"", attestation:null, onManualConfirm:null, onManualClear:null, onOpen:null, onReload:null, locked:false, observers:[] };
+    shadow.querySelector(".dock-actions").prepend(controls.export);
+    if (commandCenterRole(String(root.location?.pathname ?? "")) === "arm-owner" || String(root.location?.pathname ?? "") === `/draftclient/f1/${TEST_LEAGUE_ID}/${TEST_TEAM_ID}`) shadow.querySelector(".dock-actions").prepend(controls.arm);
+    const ui = { mode:"UNKNOWN", kind:"", label:"LOCKED", detail:"Waiting for a verified draft room.", context:{}, roster:[], recommendations:[], board:[], between:{}, warnings:[], staged:[], pinned:null, pinOutcome:null, pinText:"No pin staged. Five verified fallbacks remain active.", pinLabel:"BASELINE", ladderState:"BASELINE READY", latestText:"No confirmed selection yet.", events:[], latestPickId:"", attestation:null, onManualConfirm:null, onManualClear:null, onOpen:null, onReload:null, locked:false, observers:[] };
     const commandIntent = () => {
       const round = ui.context.ownedTurn === true && Number.isInteger(Number(ui.context.round))
         ? Number(ui.context.round)
@@ -771,7 +772,7 @@
     const setStatus = (key, value, kind = "") => { if (!data.status[key]) return; data.status[key].textContent = value; data.status[key].className = `value ${kind}`.trim(); };
     const api = {
       controls,
-      setMode(mode) { ui.mode = String(mode ?? "MOCK").toUpperCase(); if (data.modeLabel) data.modeLabel.textContent = `${ui.mode} / LOCAL`; for (const chip of data.modeChips) { const chipMode = String(chip.textContent ?? "").replace("⛔", "").trim(); chip.classList.toggle("active", chipMode === ui.mode); } },
+      setMode(mode) { ui.mode = String(mode ?? "UNKNOWN").toUpperCase(); if (data.modeLabel) data.modeLabel.textContent = `${ui.mode} / LOCAL`; for (const chip of data.modeChips) { const chipMode = String(chip.textContent ?? "").replace("⛔", "").trim(); chip.classList.toggle("active", chipMode === ui.mode); } api.setContext(); },
       setAttestation(attestation = null) {
         ui.attestation = validRuntimeAttestation(attestation) ? { ...attestation } : null;
         data.runtimeAttestation.textContent = ui.attestation
@@ -781,17 +782,17 @@
       },
       setReloadHandler(handler) { ui.onReload = typeof handler === "function" ? handler : null; controls.reload.disabled = !ui.attestation || !ui.onReload; },
       setReloadPending(pending) { controls.reload.disabled = Boolean(pending) || !ui.attestation || !ui.onReload; controls.reload.textContent = pending ? "Reloading…" : "Reload & Verify"; },
-      render(kind, label, message) { ui.kind=kind; ui.label=label; ui.detail=message; rail.classList.remove("ok", "bad", "complete"); if (kind) rail.classList.add(kind); state.textContent = label; detail.textContent = message; },
+      render(kind, label, message) { ui.kind=kind; ui.label=label; ui.detail=message; rail.classList.remove("ok", "bad", "complete"); if (kind) rail.classList.add(kind); state.textContent = label; detail.textContent = message; data.dockPrimary.textContent = label; data.dockTarget.textContent = message; data.dockTarget.title = message; },
       setExpanded(expanded = true) { if (expanded) ui.onOpen?.(); },
       setOpenHandler(handler) { ui.onOpen = typeof handler === "function" ? handler : null; },
       setContext(context = {}) {
+        context = { ...ui.context, ...context };
         const roomId = String(context.roomId ?? "—");
         const autodraftState = context.autodraftState ?? (context.autodraft ? "ACTIVE" : "UNKNOWN");
         const autodraftLabel = autodraftState === "ACTIVE" ? "ON / BLOCKED" : autodraftState === "INACTIVE" ? "OFF / VERIFIED" : "UNKNOWN / BLOCKED";
         setStatus("league", context.league ?? (roomId === DISABLED_LEAGUE_ID ? "420010 BLOCKED" : "PUBLIC"), roomId === DISABLED_LEAGUE_ID ? "danger" : ""); setStatus("room", roomId); setStatus("seat", context.seat == null ? "—" : String(context.seat)); setStatus("turn", context.round == null ? "— / —" : `R${context.round} / P${context.pick ?? "—"}`); setStatus("clock", context.clock ?? "--:--"); setStatus("armed", context.armed ? "YES" : "NO", context.armed ? "accent" : "warn"); setStatus("autodraft", autodraftLabel, autodraftState === "INACTIVE" ? "" : "danger"); setStatus("kill", context.kill ? "ENGAGED" : "READY", context.kill ? "danger" : "");
         ui.context = { ...context, roomId };
-        data.dockPrimary.textContent = `${context.kill ? "KILL" : context.armed ? "ARMED" : "SAFE"} · ${context.clock ?? "--:--"}`;
-        data.compact.textContent = `${ui.mode} · ${roomId} · S${context.seat ?? "—"} · ${context.round == null ? "—" : `R${context.round}P${context.pick ?? "—"}`}`;
+        data.compact.textContent = `${ui.mode} · ${roomId} · S${context.seat ?? "—"} · ${context.clockVerified ? context.clock : "CLOCK UNVERIFIED"} · ${context.armed ? "ARMED" : "DISARMED"}`;
       },
       setRoster(roster = [], latest = null) {
         ui.roster = Array.isArray(roster) ? roster : []; data.roster.innerHTML = ui.roster.map((slot) => `<div class="slot ${slot.player ? "filled" : "open"}"><span>${escapeHtml(slot.slot)}</span><b>${escapeHtml(slot.player?.name ?? "OPEN")}</b></div>`).join("") || `<div class="event">Roster readback unavailable.</div>`; data.rosterCount.textContent = `${ui.roster.filter((slot) => slot.player).length} / ${ui.roster.length || 15}`;
@@ -805,7 +806,7 @@
           const player = rows.find((candidate) => String(candidate.yahooId) === String(button.dataset.liveChoice));
           if (player && typeof ui.onManualConfirm === "function") ui.onManualConfirm([player], commandIntent());
         });
-        const manual = rows[0]?.manual; ui.ladderState = meta.disagreement ? "MODEL DISAGREEMENT" : manual ? "MANUAL PIN APPLIED" : "BASELINE READY"; data.disagreement.textContent = ui.ladderState; data.disagreement.className = meta.disagreement ? "danger" : ""; data.dockTarget.textContent = rows[0] ? `${rows[0].name ?? `Y!${rows[0].yahooId}`} · ${rows[0].position ?? "—"}` : "Waiting for Yahoo availability"; redrawManual();
+        const manual = rows[0]?.manual; ui.ladderState = meta.disagreement ? "MODEL DISAGREEMENT" : manual ? "MANUAL PIN APPLIED" : "BASELINE READY"; data.disagreement.textContent = ui.ladderState; data.disagreement.className = meta.disagreement ? "danger" : ""; redrawManual();
       },
       setBetweenTurns(info = {}) {
         ui.between = info;
@@ -825,7 +826,7 @@
         ui.locked = true;
         for (const observer of ui.observers) observer.disconnect();
         ui.observers = [];
-        for (const [name, control] of Object.entries(controls)) if (name !== "reload") control.disabled = true;
+        for (const [name, control] of Object.entries(controls)) if (!["reload", "export"].includes(name)) control.disabled = true;
         controls.reload.disabled = !ui.attestation || !ui.onReload;
         data.confirm.disabled = true;
         data.clearPin.disabled = true;
@@ -838,7 +839,7 @@
         api.render("bad", label, reason);
       },
       command(name, payload = null) {
-        if (ui.locked) return false;
+        if (ui.locked && name !== "export") return false;
         if (name === "arm") { if (controls.arm.disabled) return false; controls.arm.click(); return true; }
         if (name === "kill") { if (controls.halt.disabled) return false; controls.halt.click(); return true; }
         if (name === "export") { if (controls.export.disabled) return false; controls.export.click(); return true; }
@@ -867,21 +868,35 @@
     return "Extension context changed. Use Reload & Verify on this Yahoo page before arming.";
   }
 
+  function receiptIdentity(environment) {
+    const path = String(environment.location?.pathname ?? "");
+    const draft = path.match(/^\/draftclient\/f1\/(\d+)\/(\d+)\/?$/);
+    const home = path.match(/^\/f1\/(\d+)\/(settings|draft|\d+)\/?$/);
+    const roomId = draft?.[1] ?? home?.[1] ?? null;
+    const urlSeat = draft ? Number(draft[2]) : home && /^\d+$/.test(home[2]) ? Number(home[2]) : roomId === TEST_LEAGUE_ID ? TEST_TEAM_ID : null;
+    const activeToken = environment[GLOBAL_KEY]?.token;
+    const activeMatches = activeToken && String(activeToken.roomId) === roomId && Number(activeToken.urlSeat ?? activeToken.seat) === urlSeat;
+    const token = activeMatches ? activeToken : readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
+    const tokenMatches = token && String(token.roomId) === roomId && Number(token.urlSeat ?? token.seat) === urlSeat;
+    return { roomId, urlSeat, seat: tokenMatches ? Number(token.seat) : roomId === TEST_LEAGUE_ID ? null : draft ? urlSeat : null };
+  }
+
   function lockExtensionContext(environment, rail, error = null) {
     const active = environment[GLOBAL_KEY];
     if (active?.statusTimer != null) environment.clearInterval(active.statusTimer);
     if (active) active.statusTimer = null;
     try { active?.runner?.halt?.("extension_context_invalidated"); } catch { /* Visible lock remains authoritative. */ }
     const detail = extensionContextFailureMessage();
+    const identity = receiptIdentity(environment);
     rail.lock?.(detail);
     try {
       writeReceipt(environment.localStorage, {
         kind:"extension_context_invalidated",
-        roomId:active?.room?.roomId ?? null,
-        seat:active?.token?.seat ?? null,
+        ...identity,
         failure:error ? String(error?.message ?? error) : "extension_bridge_unavailable",
       });
     } catch { /* Visible lock remains authoritative when receipt storage is unavailable. */ }
+    if (identity.roomId) enableExport(environment, rail, identity, active?.runner);
     return detail;
   }
 
@@ -1205,6 +1220,7 @@
       const snapshot = parseWaitingRoom(environment.document, environment.location);
       const armed = readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
       const active = armed && !validateDraftPreflight(armed, { roomId: snapshot.roomId, seat: snapshot.seat });
+      rail.setMode(snapshot.ready ? "MOCK" : "UNKNOWN");
       rail.setContext({ roomId: snapshot.roomId || "—", seat: snapshot.seat, league: snapshot.roomId === DISABLED_LEAGUE_ID ? "420010 BLOCKED" : "PUBLIC", armed: Boolean(active), autodraft: false, kill: false });
       rail.setWarnings(snapshot.errors.includes("league_420010_hard_disabled") ? [{ severity: "danger", text: "League 420010 is hard-disabled; no arm or draft action is permitted." }] : []);
       if (!snapshot.ready) {
@@ -1265,6 +1281,15 @@
       const armed = readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
       const active = armed?.mode === "test_league_19_idp" && !validateDraftPreflight(armed, { roomId: TEST_LEAGUE_ID, seat: TEST_TEAM_ID });
       rail.setContext({ roomId: TEST_LEAGUE_ID, seat: snapshot.seat, league: "League Two", armed: Boolean(active), autodraft: false, kill: false });
+      const boardFailure = boardHealthGate(environment.SKRODZKaiYahooMockBoard) ??
+        environment.SKRODZKaiYahooMockRunner.decision.scoringFailure(environment.SKRODZKaiYahooMockRunner.configs.test_league_19_idp, environment.SKRODZKaiYahooMockBoard);
+      if (boardFailure) {
+        rail.setWarnings([{ severity:"danger", text:boardFailure }]);
+        rail.render("bad", "TEST PREFLIGHT LOCKED", boardFailure);
+        rail.controls.arm.disabled = true;
+        rail.controls.arm.textContent = "ARM TEST";
+        return false;
+      }
       rail.setWarnings(snapshot.errors.map((reason) => ({
         severity: reason === "test_draft_slot_pending" ? "" : "danger",
         text: reason === "test_draft_slot_pending" ? "Draft slot publishes 30 minutes before start; execution remains locked." : reason,
@@ -1416,6 +1441,7 @@
     const room = controllerApi.runtime.parseRoom(environment.location.pathname);
     if (!room) throw new Error("draft_room_missing");
     const armRecord = readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
+    if (room.roomId === TEST_LEAGUE_ID && Number(room.seat) !== TEST_TEAM_ID) throw new Error("test_identity_mismatch");
     if (room.roomId === TEST_LEAGUE_ID && Number(room.seat) === TEST_TEAM_ID && validateDraftPreflight(armRecord, room)) {
       if (armRecord) {
         environment.sessionStorage.removeItem(PREFLIGHT_KEY);
@@ -1429,13 +1455,24 @@
       const readPreflight = () => parseTestDraftClient(environment.document, environment.location,
         readJson(environment.localStorage, TEST_SETTINGS_KEY, null));
       let pendingTimer = null;
+      let lastBlocker = null;
       const update = () => {
         if (rail.isLocked()) { environment.clearInterval(pendingTimer); return; }
         const snapshot = readPreflight();
+        const roster = controllerApi.runtime.readRosterCount(environment.document);
+        const blocker = !roster ? "test_roster_readback_unavailable" : roster.filled > 0 ? "RECOVERY REQUIRED: roster is not empty; automatic resume is disabled"
+          : boardHealthGate(boardData) ?? runnerApi.decision.scoringFailure(runnerApi.configs.test_league_19_idp, boardData);
+        const ready = snapshot.ready && !blocker;
         rail.controls.arm.textContent = "ARM TEST";
-        rail.controls.arm.disabled = !snapshot.ready;
-        rail.render(snapshot.ready ? "ok" : "bad", snapshot.ready ? "TEST READY TO ARM" : "TEST PREFLIGHT LOCKED",
-          snapshot.ready ? `League Two · ${snapshot.teamCount} teams · snake slot ${snapshot.seat} · Yahoo team ${TEST_TEAM_ID}` : snapshot.errors.join(" · "));
+        rail.controls.arm.disabled = !ready;
+        rail.setContext({ seat:snapshot.seat > 0 ? snapshot.seat : null, observedRosterCount:roster?.filled ?? null });
+        const failure = [blocker, ...snapshot.errors].filter(Boolean).join(" · ");
+        if (failure && failure !== lastBlocker) {
+          writeReceipt(environment.localStorage, { kind:"test_preflight_locked", roomId:TEST_LEAGUE_ID, urlSeat:TEST_TEAM_ID, seat:null, failure, observedRosterCount:roster?.filled ?? null });
+          lastBlocker = failure;
+        }
+        rail.render(ready ? "ok" : "bad", ready ? "TEST READY TO ARM" : "TEST PREFLIGHT LOCKED",
+          ready ? `League Two · ${snapshot.teamCount} teams · snake slot ${snapshot.seat} · Yahoo team ${TEST_TEAM_ID}` : failure);
       };
       update();
       pendingTimer = environment.setInterval(update, 250);
@@ -1453,13 +1490,13 @@
           environment[GLOBAL_KEY]?.runner?.halt("test_room_arm_failure");
           environment.sessionStorage.removeItem(PREFLIGHT_KEY);
           rail.setContext({ armed:false });
-          rail.render("bad", "TEST ARM REFUSED", String(error?.message ?? error));
-          writeReceipt(environment.localStorage, { kind:"test_room_arm_refused", roomId:TEST_LEAGUE_ID, urlSeat:TEST_TEAM_ID, failure:String(error?.message ?? error) });
+          rail.render("bad", "TEST ARM REFUSED", `${String(error?.message ?? error)} · terminal refusal; leave the room, correct preflight, then enter through Yahoo's draft link. No automatic retry.`);
+          writeReceipt(environment.localStorage, { kind:"test_room_arm_refused", roomId:TEST_LEAGUE_ID, seat:null, urlSeat:TEST_TEAM_ID, failure:String(error?.message ?? error) });
         }
       }, { once:true });
       return;
     }
-    const executionMode = armRecord?.mode === "test_league_19_idp" ? "TEST" : "MOCK";
+    const executionMode = armRecord?.mode === "test_league_19_idp" ? "TEST" : armRecord?.mode === "public_mock_15" ? "MOCK" : "UNKNOWN";
     const mode = modeAllowlist({ mode: executionMode, leagueId: room.roomId });
     const draftSeat = executionMode === "TEST" ? Number(armRecord?.seat) : room.seat;
     const configName = executionMode === "TEST" ? "test_league_19_idp" : "public_mock_15";
@@ -1474,13 +1511,13 @@
     if (!mode.allowed) {
       rail.setWarnings([{ severity: "danger", text: mode.reason }]);
       rail.render("bad", "LOCKED", mode.reason);
-      writeReceipt(environment.localStorage, { kind: "extension_locked", roomId: room.roomId, seat: room.seat, failure: mode.reason });
+      writeReceipt(environment.localStorage, { kind: "extension_locked", ...receiptIdentity(environment), failure: mode.reason });
       return;
     }
     enableExport(environment, rail, receiptRoom);
     const preflightError = validateDraftPreflight(armRecord, room);
     if (preflightError) {
-      writeReceipt(environment.localStorage, { kind: "extension_locked", roomId: room.roomId, seat: room.seat, failure: preflightError });
+      writeReceipt(environment.localStorage, { kind: "extension_locked", ...receiptIdentity(environment), failure: preflightError });
       rail.setWarnings(buildUiWarnings({ room, armRecord: null, autodraft: controllerApi.runtime.isAutodraftActive(environment.document), roster: null, board: boardData.players, boardData, expectedRosterTotal }));
       rail.render("bad", "LOCKED", `${preflightError} · arm from the approved ${executionMode.toLowerCase()} preflight`);
       return;
@@ -1504,10 +1541,11 @@
       observedRosterSlots: armRecord.observedRosterSlots,
       minimumFallbacks: 5,
       pollMs: 25,
-      filterDeadlineMs: 5000,
+      filterDeadlineMs: 1200,
       selectionHoldMs: 1200,
       replacementBySlot: boardData.replacementBySlot,
       survivalCalibration: boardData.survivalCalibration,
+      scoringIdentity: { leagueId:boardData.leagueId, scoringModel:boardData.scoringModel, scoringSchemaHash:boardData.scoringSchemaHash },
       runtimeAttestation,
       assertRunnerLease: () => bridge?.hasFreshRunnerLease?.() === true,
       board,
@@ -1521,6 +1559,7 @@
         rail.addEvent(`manual pin ${outcome.status}`, outcome.chosenYahooId ? `Y!${outcome.chosenYahooId} · R${outcome.expectedRound}${injuryWarning}` : `${outcome.reason ?? "not applied"} · ${stage?.targets?.length ?? 0} staged`);
       },
       onAlert: ({ state, failure, reason }) => rail.render("bad", state, failure?.code ?? reason ?? "runner stopped"),
+      onEvent: (entry) => rail.addEvent(entry.kind, entry.reason ?? ""),
     }, environment);
     environment[GLOBAL_KEY] = { runner, room, token: armRecord, statusTimer:null };
     rail.setManualHandler((targets, intent = null) => {
@@ -1611,7 +1650,7 @@
       rail.setRecommendations(buildUiRecommendations(board, decision), { fullBoard: board, disagreement: status.failure?.code?.includes("mismatch") });
       rail.setBetweenTurns(buildUiOpponentWindow(decision, executionMode));
       rail.setWarnings(buildUiWarnings({ room, armRecord, autodraft:autodraftState === "ACTIVE", roster, board, boardData, decision, expectedRosterTotal }));
-      rail.render(kind, status.state, `${status.picks.length}/${expectedRosterTotal} confirmed${status.failure ? ` · ${status.failure.code ?? status.failure}` : ""}`);
+      rail.render(kind, status.state, `${status.picks.length}/${expectedRosterTotal} confirmed${status.viewFallback ? " · ALL POSITIONS FALLBACK USED — NOT CLEAN" : ""}${status.failure ? ` · ${status.failure.code ?? status.failure}` : ""}`);
       if (["completed", "failed", "halted", "stopped"].includes(status.state)) {
         environment.clearInterval(statusTimer);
         environment.sessionStorage.removeItem(PREFLIGHT_KEY);
@@ -1628,12 +1667,17 @@
   async function boot(environment = root) {
     if (!environment.document || !environment.location) return null;
     const rail = createRail(environment.document);
+    const identity = receiptIdentity(environment);
+    rail.setMode(identity.roomId === TEST_LEAGUE_ID ? "TEST" : identity.roomId === DISABLED_LEAGUE_ID ? "REAL" : "UNKNOWN");
+    rail.setContext({ ...identity, armed:false });
+    if (identity.roomId) enableExport(environment, rail, identity);
     installReloadAndVerify(environment, rail);
-    const bridge = attachCommandCenterBridge(environment, rail);
     try {
+      const bridge = attachCommandCenterBridge(environment, rail);
       const markerRaw = environment.sessionStorage.getItem(RELOAD_MARKER_KEY);
       const marker = markerRaw == null ? null : readJson(environment.sessionStorage, RELOAD_MARKER_KEY, { invalid:true });
       if (!await verifyCurrentExtensionVersion(environment, rail, { retry:Boolean(markerRaw) })) return rail;
+      if (rail.isLocked()) return rail;
       const reloadOutcome = evaluateReloadMarker(marker, rail.getSnapshot().attestation);
       if (reloadOutcome.status === "failed") {
         rail.lock(reloadOutcome.reason, "RELOAD VERIFY FAILED");
@@ -1659,12 +1703,10 @@
     } catch (error) {
       rail.render("bad", "FAILED CLOSED", String(error?.message ?? error));
       try {
-        const match = String(environment.location.pathname ?? "").match(/^\/draftclient\/f1\/(\d+)\/(\d+)\/?$/);
-        const room = match ? { roomId: match[1], seat: Number(match[2]) } : null;
+        const room = receiptIdentity(environment);
         writeReceipt(environment.localStorage, {
           kind: "extension_failed",
-          roomId: room?.roomId,
-          seat: room?.seat,
+          ...room,
           failure: String(error?.message ?? error),
         });
         enableExport(environment, rail, room);
@@ -1712,6 +1754,7 @@
       reloadRefusal,
       installReloadAndVerify,
       buildExportPayload,
+      receiptIdentity,
       buildUiRoster,
       buildUiRecommendations,
       buildUiOpponentWindow,

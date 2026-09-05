@@ -24,6 +24,20 @@ vm.runInContext(runnerSource, context);
 const helpers = context.SKRODZKaiYahooDraftController._test;
 const controllerApi = context.SKRODZKaiYahooDraftController;
 
+test("observed Proj Pts column preserves missing values and verifies descending numeric order", () => {
+  const header = { innerText:"Proj Pts" };
+  header.parentElement = { querySelectorAll:() => [header] };
+  const document = { querySelector:() => header };
+  const rows = (values) => values.map((value) => ({ row:{ querySelectorAll:() => [{ textContent:value }] } }));
+  const read = context.SKRODZKaiYahooPageReaders.readProjectedOrder;
+  const descending = read(document, rows(["230.5", "200", "190", "140", "0", "-"]));
+  assert.deepEqual(Array.from(descending.values), [230.5, 200, 190, 140, 0, null]);
+  assert.equal(descending.descending, true);
+  assert.equal(read(document, rows(["0", "1", "2", "3", "4"])).descending, false);
+  assert.equal(read(document, rows(["230", "-", "200", "190", "140", "0"])).descending, false);
+  assert.equal(read({ querySelector:() => null }, rows(["1"])), null);
+});
+
 function button(text, icon = null, disabled = false) {
   return {
     disabled,
@@ -124,8 +138,12 @@ async function waitFor(predicate, timeoutMs = 500) {
   assert.fail("condition was not reached before timeout");
 }
 
-test("production readers, runner and click controller produce 19 gradeable TEST picks including an on-clock override", async () => {
-  const runnerApi = context.SKRODZKaiYahooMockRunner;
+test("production readers and controller execute 19 synthetic-scoring picks; shipped TEST acceptance remains blocked", async () => {
+  // Isolated test-only configured schema, not a production bypass or live proof.
+  const fixtureContext = vm.createContext({ ...context });
+  fixtureContext.globalThis = fixtureContext;
+  vm.runInContext(runnerSource.replace('scoringSchemaHash: null', `scoringSchemaHash: "${"b".repeat(64)}"`), fixtureContext);
+  const runnerApi = fixtureContext.SKRODZKaiYahooMockRunner;
   const config = runnerApi.configs.test_league_19_idp;
   const board = ["QB", "RB", "WR", "TE", "K", "DEF", "LB", "CB"].flatMap((position, positionIndex) =>
     Array.from({ length:20 }, (_, index) => ({
@@ -139,7 +157,11 @@ test("production readers, runner and click controller produce 19 gradeable TEST 
   const rosterIds = [];
   const clickedIds = [];
   const document = documentFixture();
+  let pendingRound = null;
+  let projectionDescending = true;
+  let ownedSortClicks = 0;
   const setTurn = (round) => {
+    if (round >= 17) projectionDescending = false; // Yahoo re-render resets the D sort at turn entry.
     const pick = runnerApi._test.overallPick(round, 1, 12);
     document.title = round <= 19 ? "YOUR TURN, DRAFT NOW | Live NFL Draft" : "Draft complete";
     document.body.innerText = `00:30\n${round <= 19 ? `YOUR TURN • ROUND ${round}, PICK ${pick}` : "Draft complete"}\nYOUR TEAM (${rosterIds.length}/19)\nYour queue is empty.`;
@@ -155,10 +177,15 @@ test("production readers, runner and click controller produce 19 gradeable TEST 
       assert.ok(!clickedIds.includes(entry.yahooId), "no repeated click");
       clickedIds.push(entry.yahooId);
       rosterIds.push(entry.yahooId);
-      // Adjacent snake turns can open immediately, with no off-turn frame.
-      setTurn(rosterIds.length + 1);
+      const nextRound = rosterIds.length + 1;
+      if (nextRound === 2 || nextRound > 19) setTurn(nextRound);
+      else {
+        pendingRound = nextRound;
+        document.title = "Waiting";
+        document.body.innerText = `YOUR TEAM (${rosterIds.length}/19)\nYour queue is empty.`;
+      }
     };
-    return { entry, draftButton, querySelector:(selector) => selector === ".ys-player[data-id]" ? playerNode : null, querySelectorAll:(selector) => selector === "button" ? [draftButton] : [] };
+    return { entry, draftButton, querySelector:(selector) => selector === ".ys-player[data-id]" ? playerNode : null, querySelectorAll:(selector) => selector === "button" ? [draftButton] : selector === "td" ? [{ textContent:String(entry.projection) }] : [] };
   });
   const rosterPanel = {
     get innerText() { return `YOUR TEAM (${rosterIds.length}/19)`; },
@@ -168,20 +195,29 @@ test("production readers, runner and click controller produce 19 gradeable TEST 
   const heading = { get innerText() { return rosterPanel.innerText; }, querySelectorAll:() => [], parentElement:rosterPanel };
   const labels = runnerApi._test.requiredTestFilterLabels();
   const select = { value:"All Positions", options:Array.from(labels, (label) => ({ value:label, textContent:label })), dispatchEvent() {} };
+  const header = { innerText:"Proj Pts", click() { projectionDescending = true; if (document.title.startsWith("YOUR TURN")) ownedSortClicks++; } };
+  header.parentElement = { querySelectorAll:() => [header] };
+  document.querySelector = (selector) => selector === 'th[data-id="values:projected:points"]' ? header : null;
   document.querySelectorAll = (selector) => {
     if (selector === "button") return [button("Autodraft")];
-    if (selector === "tr") return rows.filter((row) => !rosterIds.includes(row.entry.yahooId));
+    if (selector === "tr") {
+      const visible = rows.filter((row) => !rosterIds.includes(row.entry.yahooId) &&
+      (select.value === "All Positions" || (select.value === "Kickers" ? row.entry.position === "K" : select.value === "Team Defenses" ? row.entry.position === "DEF" : ["LB", "CB"].includes(row.entry.position)))).slice(0, 100);
+      return select.value === "Defensive Players" && !projectionDescending ? visible.reverse() : visible;
+    }
     if (selector === "select") return [select];
     if (selector === "h1,h2,h3,h4,h5,h6,div,span") return [heading];
     return [];
   };
-  setTurn(1);
+  document.title = "Waiting";
+  document.body.innerText = "YOUR TEAM (0/19)\nYour queue is empty.";
   const storage = storageFixture();
   const environment = { document, location:{ pathname:"/draftclient/f1/542830/3" }, localStorage:storage,
     crypto, clearInterval, clearTimeout, setInterval, setTimeout,
     Event:class Event { constructor(type) { this.type=type; } },
     getComputedStyle:() => ({ display:"block", visibility:"visible" }),
     SKRODZKaiYahooDraftController:controllerApi,
+    SKRODZKaiYahooPageReaders:context.SKRODZKaiYahooPageReaders,
   };
   const runtimeAttestation = { ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"synthetic-boot-1234", bootedAt:1 };
   const runner = runnerApi.create({
@@ -190,15 +226,27 @@ test("production readers, runner and click controller produce 19 gradeable TEST 
     replacementBySlot:{ QB:300, RB:180, WR:170, TE:140, "W/R/T":175, K:80, DEF:75, D:70 },
     assertRunnerLease:() => true,
     runtimeAttestation,
+    scoringIdentity:config.expectedScoring,
   }, environment);
   runner.start();
+  const opponentTimer = setInterval(() => {
+    if (pendingRound && runner.exportReceipts().some((entry) => entry.kind === "view_discovered" && entry.round === pendingRound && entry.filterLabel === "Defensive Players") && !runner.getStatus().busy) {
+      const round = pendingRound; pendingRound = null; setTurn(round);
+    }
+  }, 10);
   try {
+    await waitFor(() => runner.exportReceipts().filter((row) => row.kind === "view_discovered").length === 4, 1000);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const views = runner.exportReceipts().filter((row) => row.kind === "view_discovered");
+    assert.equal(views[0].yahooIds.length, 100);
+    assert.ok(views[3].yahooIds.some((id) => !views[0].yahooIds.includes(id)), "specialists beyond All Positions' first 100 must be discovered");
+    setTurn(1);
     await waitFor(() => runner.getStatus().pendingDecision !== null);
     const baseline = runner.exportReceipts().find((row) => row.kind === "runner_turn_resolved").decision.targetYahooIds;
     const override = board.find((player) => player.position === "RB" && !baseline.includes(player.yahooId));
     assert.ok(override, "the override must be outside all five baseline targets");
     assert.equal(runner.chooseOnClock(override.yahooId, "test_operator"), true);
-    await waitFor(() => ["completed", "failed"].includes(runner.getStatus().state), 10_000);
+    await waitFor(() => ["completed", "failed"].includes(runner.getStatus().state), 15_000);
     const status = runner.getStatus();
     assert.equal(status.state, "completed", JSON.stringify(status.failure));
     assert.equal(clickedIds.length, 19);
@@ -208,6 +256,9 @@ test("production readers, runner and click controller produce 19 gradeable TEST 
     assert.equal(controllers.filter((row) => row.kind === "pick_confirmed").length, 19);
     assert.ok(status.picks.every((pick) => pick.turnDetectionToClickMs < 2000));
     assert.ok(!runner.exportReceipts().some((row) => row.kind === "runner_failed"));
+    assert.ok(ownedSortClicks > 0, "owned-turn sort reset must be repaired before D selection");
+    const viewFallbacks = runner.exportReceipts().filter((row) => row.kind === "view_fallback_all_positions");
+    assert.deepEqual(Array.from(viewFallbacks, (row) => row.turn), ["R2P24"], "adjacent turn cannot silently reuse round-1 discovery");
     assert.equal(clickedIds[0], override.yahooId);
     // Only the final Yahoo roster/attestation envelope is synthetic. Runner and
     // click-controller receipts are consumed untouched, as the extension exports them.
@@ -222,7 +273,8 @@ test("production readers, runner and click controller produce 19 gradeable TEST 
         urlSeat:status.urlSeat, runId:status.runId, kind:"final_roster_readback", valid:true, finalRosterSlots }],
     };
     const result = evaluateTestDraftExport(payload);
-    assert.equal(result.status, "PASS", JSON.stringify(result.errors));
+    assert.equal(result.status, "LOCKED");
+    assert.deepEqual(result.errors, ["test_scoring_schema_unverified", "turn_R2P24_view_fallback_used"]);
     assert.equal(result.picks[0].replayMode, "ON_CLOCK_OVERRIDE");
     assert.equal(result.picks[0].targetIndex, -1);
     const choice = payload.runnerReceipts.find((entry) => entry.kind === "runner_on_clock_choice_applied");
@@ -232,7 +284,7 @@ test("production readers, runner and click controller produce 19 gradeable TEST 
     assert.ok(evaluateTestDraftExport(wrongTurn).errors.includes("on_clock_choice_unknown_turn"));
     const missingChoice = { ...payload, runnerReceipts:payload.runnerReceipts.filter((entry) => entry !== choice) };
     assert.ok(evaluateTestDraftExport(missingChoice).errors.includes("round_1_unintended_selection"));
-  } finally { runner.stop("test_cleanup"); }
+  } finally { clearInterval(opponentTimer); runner.stop("test_cleanup"); }
 });
 
 test("requires both the live title and exact owned-turn banner", () => {

@@ -45,6 +45,7 @@
       name: "test_league_19_idp",
       leagueId: "542830",
       urlTeamId: 3,
+      expectedScoring: Object.freeze({ leagueId: "542830", scoringModel: "league-two-2026", scoringSchemaHash: null }),
       minimumTeams: 10,
       maximumTeams: 12,
       rounds: 19,
@@ -294,10 +295,10 @@
     return confirmed.position;
   }
 
-  function readAvailablePlayers(documentRef, controllerApi) {
+  function readAvailablePlayers(documentRef, controllerApi, environment = root) {
     const runtime = controllerApi?.runtime;
     if (!runtime) throw new Error("Yahoo draft controller runtime helpers are unavailable");
-    return runtime.readAvailablePlayerRows(documentRef, root);
+    return runtime.readAvailablePlayerRows(documentRef, environment);
   }
 
   function overallPick(round, seat, teams = 12) {
@@ -667,21 +668,12 @@
     return Math.max(0.01, Math.min(0.99, 1 / (1 + Math.exp((nextPick - adjustedMean) / spread))));
   }
 
-  function runPressureFromAvailability(previousPlayers, currentPlayers, ownPicks = []) {
-    const currentIds = new Set(Array.from(currentPlayers ?? [], (player) => String(player?.yahooId ?? "")));
-    const ownIds = new Set(Array.from(ownPicks ?? [], (player) => String(player?.yahooId ?? "")));
-    const counts = {};
-    for (const player of previousPlayers ?? []) {
-      const yahooId = String(player?.yahooId ?? "");
-      if (!yahooId || currentIds.has(yahooId) || ownIds.has(yahooId)) continue;
-      const position = normalize(player.position);
-      if (!position) continue;
-      counts[position] = (counts[position] ?? 0) + 1;
-    }
-    return Object.fromEntries(Object.entries(counts).map(([position, count]) => [
-      position,
-      Math.min(2, Math.max(0, (count - 1) / 2)),
-    ]));
+  function scoringFailure(config, boardData) {
+    if (config.qualification !== "verified-test-room") return null;
+    const expected = config.expectedScoring;
+    if (!/^[a-f0-9]{64}$/.test(String(expected?.scoringSchemaHash ?? ""))) return "test_scoring_schema_unverified";
+    return ["leagueId", "scoringModel", "scoringSchemaHash"].every((key) =>
+      String(boardData?.[key] ?? "") === String(expected[key])) ? null : "test_board_scoring_identity_mismatch";
   }
 
   function compactPlayer(player) {
@@ -1196,6 +1188,8 @@
     if (!Number.isInteger(expectedUrlSeat) || expectedUrlSeat < 1) throw new Error("expected URL seat is required");
     if (config.leagueId && expectedRoomId !== config.leagueId) throw new Error("test league ID does not match verified configuration");
     if (config.urlTeamId && expectedUrlSeat !== config.urlTeamId) throw new Error("test team ID does not match verified configuration");
+    const scoringError = scoringFailure(config, options.scoringIdentity);
+    if (scoringError) throw new Error(scoringError);
     if (!sameSlots(observedRosterSlots, config.rosterSlots)) throw new Error(`draft roster shape does not match ${config.name}`);
     if (!Number.isInteger(minimumFallbacks) || minimumFallbacks < 5) throw new Error("minimumFallbacks must be at least 5");
     if (pollMs < 25 || filterDeadlineMs <= 0 || selectionHoldMs < 0 || selectionHoldMs > 1500) {
@@ -1260,12 +1254,72 @@
     let pendingDecision = null;
     let selectionTimerId = null;
     let activeTurnMetrics = null;
-    let previousAvailablePlayers = null;
+    let discovery = null;
+    let discoveryRound = 0;
+    let viewFallback = null;
 
-    function liveRunPressure(availablePlayers) {
-      const observed = runPressureFromAvailability(previousAvailablePlayers, availablePlayers, picks);
-      return Object.fromEntries([...new Set([...Object.keys(configuredRunPressure), ...Object.keys(observed)])]
-        .map((position) => [position, Math.max(Number(configuredRunPressure[position] ?? 0), Number(observed[position] ?? 0))]));
+    function assertEmptyOrConfirmedRoster(stage) {
+      const roster = controllerApi.runtime.readRosterCount(documentRef);
+      if (!roster || roster.total !== config.rosterTotal || roster.filled !== picks.length) throw new Error(`roster_drift_${stage}`);
+    }
+
+    function viewContains(label, players) {
+      if (label === "All Positions") return players.length > 0;
+      const allowed = label === "Kickers" ? ["K"] : label === "Team Defenses" ? ["DEF"] : ["D", "DL", "DE", "DT", "LB", "DB", "CB", "S"];
+      return players.length > 0 && players.every((player) => allowed.includes(normalize(player.position)));
+    }
+
+    function playerView(player) {
+      return player?.position === "K" ? "Kickers" : player?.position === "DEF" ? "Team Defenses"
+        : IDP_POSITIONS.includes(player?.position) ? "Defensive Players" : "All Positions";
+    }
+
+    // The runner alone owns filters once prepareBoard has completed. Discovery
+    // records a view hint, never a click-ready cross-view target cache.
+    async function discoverViews() {
+      const readers = environment.SKRODZKaiYahooPageReaders;
+      if (executionMode !== "TEST" || !readers?.readDiscoveryRows) return;
+      const next = { players:[], failure:null, round:picks.length + 1 };
+      const offTurn = () => state === "running" && controllerApi.runtime.readOwnedTurnState(documentRef)?.state === "OFF_TURN";
+      const check = () => { assertDraftSafety("discovery"); assertEmptyOrConfirmedRoster("discovery"); return offTurn(); };
+      for (const label of requiredTestFilterLabels()) {
+        if (!check()) return;
+        try {
+          const filter = setFilter(documentRef, environment, label);
+          let signature = null;
+          let sortClicked = false;
+          let ready = null;
+          const deadline = Date.now() + PANEL_BUDGET_MS;
+          while (Date.now() < deadline) {
+            await delay(25);
+            if (!check()) return;
+            const players = readers.readDiscoveryRows(documentRef, environment);
+            if (String(filter.select.value) !== filter.value || !viewContains(label, players)) continue;
+            if (label === "Defensive Players") {
+              const order = readers.readProjectedOrder(documentRef, players);
+              if (!order) throw new Error("view_discovery_projection_header_missing");
+              if (!order.descending) {
+                if (!sortClicked) { if (!check()) return; order.header.click(); sortClicked = true; }
+                continue;
+              }
+            }
+            const current = players.map((player) => player.yahooId).join(",");
+            if (signature !== current) { signature = current; continue; }
+            ready = players.map(({ yahooId, name, position, team }) => ({ yahooId, name, position, team }));
+            break;
+          }
+          if (!ready) throw new Error(`view_discovery_timeout:${label}`);
+          next.players.push(...ready);
+          receipt("view_discovered", { filterLabel:label, round:next.round, yahooIds:ready.map((player) => player.yahooId), coverage:"rendered_rows_only" });
+        } catch (error) {
+          if (!/^(position_filter_missing|view_discovery_)/.test(String(error.message))) throw error;
+          next.failure = String(error.message);
+          break;
+        }
+      }
+      if (!check()) return;
+      discovery = next;
+      discoveryRound = next.round;
     }
 
     function readReceipts() {
@@ -1325,14 +1379,24 @@
       return new Promise((resolve) => environment.setTimeout(resolve, milliseconds));
     }
 
-    async function targetsAfterFilter(turn, label) {
+    async function targetsAfterFilter(turn, label, detectedAt) {
       const startedAt = Date.now();
+      const deadline = Math.min(detectedAt + PANEL_BUDGET_MS, startedAt + filterDeadlineMs,
+        label === "All Positions" ? Infinity : detectedAt + PANEL_BUDGET_MS / 2);
       let lastEligibilityError = null;
+      const previousFilter = findFilter(documentRef, label);
+      const needsChange = previousFilter && String(previousFilter.select.value) !== String(previousFilter.option.value);
+      const previousSignature = needsChange ? readAvailablePlayers(documentRef, controllerApi, environment).map((player) => player.yahooId).sort().join(",") : null;
+      assertDraftSafety("view_read");
+      assertEmptyOrConfirmedRoster("view_read");
+      assertOwnedClock("view_read");
       const filter = setFilter(documentRef, environment, label);
       let lastAvailableSignature = null;
       let stableAvailableReads = 0;
-      while (Date.now() - startedAt < filterDeadlineMs) {
+      let sortClicked = false;
+      while (Date.now() < deadline) {
         if (state !== "running") throw new Error("runner_not_running");
+        if (controllerApi.runtime.readOwnedTurnState(documentRef)?.turn?.label !== turn.label) throw new Error("owned_turn_changed_during_view_read");
         try {
           if (String(filter.select.value ?? "") !== filter.value) {
             lastAvailableSignature = null;
@@ -1340,8 +1404,21 @@
             await delay(25);
             continue;
           }
-          const availablePlayers = readAvailablePlayers(documentRef, controllerApi);
+          const availablePlayers = readAvailablePlayers(documentRef, controllerApi, environment);
+          if (!viewContains(label, availablePlayers)) { await delay(25); continue; }
+          if (label === "Defensive Players") {
+            const order = environment.SKRODZKaiYahooPageReaders?.readProjectedOrder(documentRef, availablePlayers);
+            if (!order) throw new Error("view_discovery_projection_header_missing");
+            if (!order.descending) {
+              if (!sortClicked) {
+                assertDraftSafety("projection_sort"); assertEmptyOrConfirmedRoster("projection_sort"); assertOwnedClock("projection_sort");
+                order.header.click(); sortClicked = true;
+              }
+              await delay(25); continue;
+            }
+          }
           const availableSignature = availablePlayers.map((player) => String(player.yahooId)).sort().join(",");
+          if (filter.changed && availableSignature === previousSignature) { await delay(25); continue; }
           if (availableSignature !== lastAvailableSignature) {
             lastAvailableSignature = availableSignature;
             stableAvailableReads = 1;
@@ -1353,7 +1430,7 @@
             await delay(25);
             continue;
           }
-          const runPressureByPosition = liveRunPressure(availablePlayers);
+          const runPressureByPosition = configuredRunPressure;
           const baseline = buildDecisionLadder({
             round: turn.round,
             seat: expectedSeat,
@@ -1392,19 +1469,23 @@
               injury: manualOverride.injury ?? null,
             },
           };
-          return { targets, decision, manualOverride, availablePlayers, filterReadyMs: Date.now() - startedAt };
+          return { targets, decision, manualOverride, availablePlayers, filterReadyMs: Date.now() - startedAt,
+            coverage: { turn:turn.label, filterLabel:label, observedAt:Date.now(), yahooIds:availablePlayers.map((player) => player.yahooId), targetYahooIds:targets.map((target) => target.yahooId), scope:"fresh_clickable_rendered_rows" } };
         } catch (error) {
           if (!/^(fewer_than_|no_legal_bpa_candidates)/.test(String(error?.message ?? error))) throw error;
           lastEligibilityError = String(error.message);
         }
         await delay(25);
       }
-      throw new Error(lastEligibilityError ?? `position_filter_timeout:${label}`);
+      throw new Error(`view_discovery_timeout:${label}:${lastEligibilityError ?? "rows_not_verified"}`);
     }
 
     function startPendingController(chosenYahooId = null, source = "baseline_timeout") {
       if (!pendingDecision || state !== "running") return false;
       const pending = pendingDecision;
+      assertDraftSafety("before_controller");
+      assertEmptyOrConfirmedRoster("before_controller");
+      assertOwnedClock("before_controller", 2);
       let targets = pending.targets;
       if (chosenYahooId) {
         const chosenId = String(chosenYahooId);
@@ -1487,9 +1568,36 @@
       if (turn.round !== expectedRound || turn.pick !== expectedPick) {
         throw new Error(`owned_turn_mismatch:expected_R${expectedRound}P${expectedPick}:observed_${turn.label}`);
       }
-      const filterLabel = filterLabelForRound(turn.round, picks, config, expectedSeat);
+      assertEmptyOrConfirmedRoster("owned_turn");
+      let filterLabel = filterLabelForRound(turn.round, picks, config, expectedSeat);
       const clockAtDecision = assertOwnedClock("at_detection");
-      const { targets, decision, manualOverride, availablePlayers, filterReadyMs } = await targetsAfterFilter(turn, filterLabel);
+      let fallbackReason = null;
+      if (executionMode === "TEST") {
+        if (discoveryRound !== turn.round || !discovery || discovery.failure) fallbackReason = discovery?.failure ?? "view_discovery_incomplete_for_current_round";
+        else {
+          const unique = [...new Map(discovery.players.map((player) => [player.yahooId, player])).values()];
+          const hint = buildDecisionLadder({ round:turn.round, seat:expectedSeat, picks, board, availablePlayers:unique,
+            minimum:minimumFallbacks, config, replacementBySlot, runPressureByPosition:configuredRunPressure, survivalCalibration });
+          filterLabel = playerView(hint.targets[0]);
+        }
+      }
+      let resolved;
+      try { if (!fallbackReason) resolved = await targetsAfterFilter(turn, filterLabel, detectedAt); }
+      catch (error) {
+        if (filterLabel === "All Positions" || !/^(position_filter_missing|view_discovery_)/.test(String(error.message))) throw error;
+        fallbackReason = String(error.message);
+      }
+      if (fallbackReason) {
+        // Exactly one pre-click fallback. Neither the panel nor click clock restarts.
+        assertDraftSafety("fallback"); assertEmptyOrConfirmedRoster("fallback"); assertOwnedClock("fallback");
+        if (Date.now() - detectedAt >= PANEL_BUDGET_MS) throw new Error("panel_ready_budget_exhausted");
+        filterLabel = "All Positions";
+        viewFallback = receipt("view_fallback_all_positions", { turn:turn.label, reason:fallbackReason, beforeClick:true });
+        options.onEvent?.(viewFallback);
+        resolved = await targetsAfterFilter(turn, filterLabel, detectedAt);
+        if (resolved.targets.length < minimumFallbacks) throw new Error("fallback_requires_five_fresh_targets");
+      }
+      const { targets, decision, manualOverride, availablePlayers, filterReadyMs, coverage } = resolved;
       if (state !== "running") return;
       assertOwnedClock("after_decision");
       const panelReadyMs = Date.now() - detectedAt;
@@ -1502,6 +1610,8 @@
         panelReadyMs,
         panelBudgetMs: PANEL_BUDGET_MS,
         clockAtDecision,
+        coverage,
+        viewFallback: Boolean(fallbackReason),
         decision,
       });
       if (panelReadyMs >= PANEL_BUDGET_MS) throw new Error("panel_ready_budget_exhausted");
@@ -1532,7 +1642,16 @@
         const turnSignal = controllerApi.runtime.readOwnedTurnState(documentRef);
         if (turnSignal?.state === "INCONSISTENT") return fail("owned_turn_signal_inconsistent", { turnSignal });
         const turn = turnSignal?.state === "OWNED" ? turnSignal.turn : null;
-        if (!turn) return;
+        if (!turn) {
+          try {
+            if (executionMode === "TEST" && discoveryRound !== picks.length + 1) {
+              busy = true;
+              await discoverViews();
+            }
+          } catch (error) { fail(String(error?.message ?? error)); }
+          finally { busy = false; }
+          return;
+        }
         busy = true;
         try {
           await resolveOwnedTurn(turn);
@@ -1588,7 +1707,6 @@
         ) {
           throw new Error("roster_drift");
         }
-        previousAvailablePlayers = activeTurnMetrics.availablePlayers.slice();
         receipt("runner_pick_confirmed", { round: picks.length, pick });
         currentController.stop("round_complete");
         currentController = null;
@@ -1628,6 +1746,7 @@
       state = "running";
       receipt("runner_started", {
         configName: config.name,
+        scoringIdentity: options.scoringIdentity ?? null,
         expectedRoomId,
         expectedSeat,
         expectedUrlSeat,
@@ -1708,6 +1827,7 @@
         state,
         busy,
         failure,
+        viewFallback,
         picks: picks.slice(),
         currentController: currentController?.getStatus?.() ?? null,
         pendingDecision: pendingDecision ? {
@@ -1742,6 +1862,7 @@
     allocateRosterSlots,
     overallPick,
     turnWindow,
+    scoringFailure,
   });
 
   root.SKRODZKaiYahooMockRunner = {
@@ -1765,7 +1886,7 @@
       overallPick,
       turnWindow,
       survivalProbability,
-      runPressureFromAvailability,
+      scoringFailure,
       optimalRosterUtility,
       maximumFilledStarterSlots,
       canCompleteRoster,
