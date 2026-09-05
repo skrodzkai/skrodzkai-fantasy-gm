@@ -141,7 +141,7 @@ async function waitFor(predicate, timeoutMs = 500) {
   assert.fail("condition was not reached before timeout");
 }
 
-for (const { seat, onClock = false, skipDiscovery = false } of [{ seat:1 }, { seat:6 }, { seat:12 }, { seat:6, onClock:true }, { seat:6, skipDiscovery:true }]) test(`production ${skipDiscovery ? "non-adjacent stale discovery refuses clean acceptance" : "19-round zero-fallback acceptance"}, slot ${seat}, on-clock choice ${onClock}, 30-second clock (synthetic DOM, not live proof)`, async (t) => {
+for (const { seat, onClock = false, skipDiscovery = false, sparseDiscovery = false } of [{ seat:1 }, { seat:6 }, { seat:12 }, { seat:6, onClock:true }, { seat:6, skipDiscovery:true }, { seat:6, sparseDiscovery:true }, { seat:12, sparseDiscovery:true }]) test(`production ${sparseDiscovery ? "sparse hint uses one receipted fresh fallback" : skipDiscovery ? "non-adjacent stale discovery refuses clean acceptance" : "19-round zero-fallback acceptance"}, slot ${seat}, on-clock choice ${onClock}, 30-second clock (synthetic DOM, not live proof)`, async (t) => {
   const fixtureContext = vm.createContext({ ...context });
   fixtureContext.globalThis = fixtureContext;
   vm.runInContext(runnerSource, fixtureContext);
@@ -212,8 +212,11 @@ for (const { seat, onClock = false, skipDiscovery = false } of [{ seat:1 }, { se
     }
     if (selector === "button") return [button("Autodraft")];
     if (selector === "tr") {
-      const visible = rows.filter((row) => !rosterIds.includes(row.entry.yahooId) &&
+      let visible = rows.filter((row) => !rosterIds.includes(row.entry.yahooId) &&
       (select.value === "All Positions" || (select.value === "Kickers" ? row.entry.position === "K" : select.value === "Team Defenses" ? row.entry.position === "DEF" : ["LB", "CB"].includes(row.entry.position)))).slice(0, 100);
+      if (sparseDiscovery && environment.__skrodzkaiYahooMockExtensionV1?.runner && !document.title.startsWith("YOUR TURN")) {
+        visible = visible.filter((row) => ["K", "DEF", "LB", "CB"].includes(row.entry.position) || (row.entry.position === "QB" && row.entry.rank <= 4));
+      }
       return select.value === "Defensive Players" && !projectionDescending ? visible.reverse() : visible;
     }
     if (selector === "select") return [select];
@@ -269,11 +272,22 @@ for (const { seat, onClock = false, skipDiscovery = false } of [{ seat:1 }, { se
     await waitFor(() => runner.exportReceipts().filter((row) => row.kind === "view_discovered").length === 4, 1000);
     await new Promise((resolve) => setTimeout(resolve, 30));
     const views = runner.exportReceipts().filter((row) => row.kind === "view_discovered");
-    assert.equal(views[0].yahooIds.length, 100);
+    assert.equal(views[0].yahooIds.length, sparseDiscovery ? 24 : 100);
     assert.ok(views[3].yahooIds.some((id) => !views[0].yahooIds.includes(id)), "specialists beyond All Positions' first 100 must be discovered");
     const override = board.find((player) => player.position === "RB" && player.rank === 40);
     if (!onClock) assert.equal(rail.manual([override], { mode:"NEXT_PICK", round:1, turnLabel:"R1" }), true);
     setTurn(1);
+    if (sparseDiscovery) {
+      const expectedPicks = seat === 12 ? 2 : 1;
+      await waitFor(() => runner.getStatus().picks.length >= expectedPicks || runner.getStatus().state === "failed", 5000);
+      assert.equal(runner.getStatus().picks.length, expectedPicks, JSON.stringify(runner.getStatus().failure));
+      const fallbacks = runner.exportReceipts().filter((row) => row.kind === "view_fallback_all_positions");
+      assert.equal(fallbacks.length, expectedPicks);
+      assert.ok(fallbacks.every((row) => row.reason === "fewer_than_5_legal_bpa_targets" && row.beforeClick));
+      assert.ok(runner.exportReceipts().filter((row) => row.kind === "runner_turn_resolved").every((row) => row.viewFallback && row.targetCount >= 5));
+      assert.ok(runner.getStatus().picks.every((pick) => pick.turnDetectionToClickMs < 2000));
+      return;
+    }
     if (onClock) {
       await waitFor(() => runner.getStatus().pendingDecision !== null);
       assert.ok(!runner.getStatus().pendingDecision.targetYahooIds.includes(override.yahooId));

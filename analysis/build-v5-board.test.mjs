@@ -10,6 +10,10 @@ const testContract = globalThis.SKRODZKaiYahooMockRunner.configs.test_league_19_
 test("observed TEST scoring is fingerprinted and never inherits REAL QB, IDP, or kicker rules", () => {
   const rules = testContract.scoringRules;
   assert.equal(createHash("sha256").update(JSON.stringify(rules)).digest("hex"), testContract.expectedScoring.scoringSchemaHash);
+  for (const [label, display, , points] of Object.values(testContract.scoringSettingsRows).flat()) {
+    const yards = display.match(/^(\d+) yards per point$/);
+    assert.equal(points, yards ? 1 / Number(yards[1]) : Number(display), `${label}: displayed Yahoo value must equal scoring coefficient`);
+  }
   const qb = { passingCompletions:300, passingYards:4000, passingTouchdowns:30, interceptions:10 };
   assert.equal(scoreOffenseStatLine(qb, rules.offense), 270);
   assert.equal(scoreOffenseStatLine(qb), 350);

@@ -1624,10 +1624,16 @@
         else {
           const drafted = new Set(picks.map((player) => String(player.yahooId)));
           const unique = [...new Map(discovery.players.filter((player) => !drafted.has(String(player.yahooId))).map((player) => [player.yahooId, player])).values()];
-          const hint = buildDecisionLadder({ round:turn.round, seat:expectedSeat, picks, board, availablePlayers:unique,
-            minimum:minimumFallbacks, config, replacementBySlot, runPressureByPosition:configuredRunPressure, survivalCalibration });
-          filterLabel = playerView(hint.targets[0]);
-          if (adjacent) receipt("adjacent_turn_view_hint", { turn:turn.label, fromRound:discoveryRound, previousTurn:previous.turn, filterLabel, freshTargetsRequired:true });
+          try {
+            const hint = buildDecisionLadder({ round:turn.round, seat:expectedSeat, picks, board, availablePlayers:unique,
+              minimum:minimumFallbacks, config, replacementBySlot, runPressureByPosition:configuredRunPressure, survivalCalibration });
+            filterLabel = playerView(hint.targets[0]);
+            if (adjacent) receipt("adjacent_turn_view_hint", { turn:turn.label, fromRound:discoveryRound, previousTurn:previous.turn, filterLabel, freshTargetsRequired:true });
+          } catch (error) {
+            const reason = String(error?.message ?? error);
+            if (!/^(fewer_than_\d+_(eligible|legal_bpa)_targets|no_legal_bpa_candidates)$/.test(reason)) throw error;
+            fallbackReason = reason;
+          }
         }
       }
       let resolved;
