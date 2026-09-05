@@ -44,6 +44,7 @@ test("exports only executable offense while retaining explicitly labeled special
   offense[1].marketAdpLow = null;
   offense.push(player("WR", 102));
   const board = extensionBoardFromV5({
+    leagueId:"420010",
     generatedAt: "2026-08-22T00:00:00Z",
     scoringModel: "test",
     injuryFreshnessPolicy: { default: 36, yahoo: 6 },
@@ -73,6 +74,10 @@ test("exports only executable offense while retaining explicitly labeled special
     } },
   });
   assert.equal(board.offense.length, 101);
+  assert.equal(board.leagueId, "420010");
+  const exported = vm.createContext({});
+  vm.runInContext(renderExtensionBoard(board), exported);
+  assert.equal(exported.SKRODZKaiYahooMockBoard.leagueId, "420010");
   assert.equal(board.offense.some((entry) => entry.yahooId === "RB-1"), false);
   assert.equal(board.offense.some((entry) => entry.yahooId === "RB-2"), true);
   assert.equal(board.offense.find((entry) => entry.yahooId === "RB-2").adpLow, null);

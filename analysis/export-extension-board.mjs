@@ -189,6 +189,7 @@ export function extensionBoardFromV5(board) {
   return {
     generatedAt: board.generatedAt,
     source: `free-source board: raw projections scored under exact league rules and equal-weighted per independent source family; IDP projection fields use the consensus-anchored decision score only when the global historical gate passes (${board?.projectionModel?.idpRanking?.status ?? "calibration unavailable"}); rawProjection preserves consensus; market/history are timing context only; injuries use source-specific freshness`,
+    leagueId: board.leagueId ?? null,
     scoringModel: board.scoringModel,
     scoringSchemaHash: board.scoringSchemaHash ?? null,
     marketAdpReceipt:board.marketAdpReceipt ?? null,
@@ -210,6 +211,7 @@ export function extensionBoardFromV5(board) {
 
 export function renderExtensionBoard(board) {
   const runtimeBoard = {
+    leagueId: board.leagueId ?? null,
     generatedAt: board.generatedAt,
     source: board.source,
     scoringModel: board.scoringModel,

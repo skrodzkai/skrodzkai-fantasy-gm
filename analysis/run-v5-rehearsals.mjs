@@ -24,6 +24,7 @@ export function loadRuntime(boardSource, runnerSource) {
     replacementBySlot: boardData.replacementBySlot,
     survivalCalibration: boardData.survivalCalibration ?? null,
     scoringSchemaHash: boardData.scoringSchemaHash ?? null,
+    scoringIdentity: { leagueId:boardData.leagueId, scoringModel:boardData.scoringModel, scoringSchemaHash:boardData.scoringSchemaHash },
     runnerSourceSha256: createHash("sha256").update(runnerSource).digest("hex"),
     coldStartMs: performance.now() - startedAt,
     forbiddenVmGlobals: forbiddenGlobals,
@@ -293,203 +294,15 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
   };
 }
 
-function memoryStorage() {
-  const values = new Map();
-  return {
-    getItem: (key) => values.get(key) ?? null,
-    setItem: (key, value) => values.set(key, String(value)),
-    removeItem: (key) => values.delete(key),
-  };
-}
-
-async function waitFor(predicate, timeoutMs = 15_000) {
-  const startedAt = performance.now();
-  while (performance.now() - startedAt < timeoutMs) {
-    const value = predicate();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 2));
-  }
-  throw new Error("runner_loop_replay_timeout");
-}
-
-function runnerLoopEnvironment(runtime, seat) {
-  const config = runtime.runner.configs.test_league_19_idp;
-  const teamCount = 10;
-  const validated = runtime.runner._test.validateBoard(runtime.board);
-  const state = { filled: 0, unavailable:new Set(), opponentRunApplied:false };
-  const select = { value: "all", options: [{ value: "all", textContent: "All Positions" }], dispatchEvent() {} };
-  const rows = ["QB", "RB", "WR", "TE", "K", "DEF", "D", "LB", "CB", "S"]
-    .flatMap((position) => validated.filter((player) => player.position === position && player.automaticEligible !== false).slice(0, 12))
-    .map((player) => ({ player }));
-  const body = {};
-  Object.defineProperty(body, "innerText", { get: () => `${state.filled} / ${config.rosterTotal}` });
-  const document = {
-    body,
-    querySelectorAll(selector) {
-      if (selector === "select") return [select];
-      if (selector === "tr") return rows.filter((row) => !state.unavailable.has(row.player.yahooId));
-      return [];
-    },
-  };
-  const runtimeHooks = {
-    parseRoom: () => ({ roomId: "542830", seat: 3 }),
-    parseRosterCount: () => ({ filled: state.filled, total: config.rosterTotal }),
-    readRosterCount: () => ({ filled: state.filled, total: config.rosterTotal }),
-    readAutodraftState: () => "INACTIVE",
-    readQueueState: () => "EMPTY",
-    readDraftClock: () => ({ label: "00:59", seconds: 59 }),
-    isAutodraftActive: () => false,
-    readOwnedTurn: () => {
-      if (state.filled >= config.rounds) return null;
-      const round = state.filled + 1;
-      const pick = runtime.runner._test.overallPick(round, seat, teamCount);
-      return { label: `R${round}P${pick}`, round, pick };
-    },
-    readOwnedTurnState: () => {
-      const turn = runtimeHooks.readOwnedTurn();
-      return turn ? { state:"OWNED", turn } : { state:"OFF_TURN", turn:null };
-    },
-    readPlayerRow: (row) => row.player,
-    readAvailablePlayerRows: () => rows.filter((row) => !state.unavailable.has(row.player.yahooId)).map((row) => row.player),
-  };
-  const controllerApi = {
-    runtime: runtimeHooks,
-    create(options) {
-      const receipts = [];
-      let controllerState = "created";
-      let confirmedPicks = 0;
-      return {
-        start() {
-          const target = options.targets[0];
-          const turn = runtimeHooks.readOwnedTurn();
-          controllerState = "running";
-          state.filled += 1;
-          state.unavailable.add(target.yahooId);
-          if (!state.opponentRunApplied) {
-            for (const row of rows.filter((entry) => entry.player.position === "WR" && entry.player.yahooId !== target.yahooId).slice(0, 3)) state.unavailable.add(row.player.yahooId);
-            state.opponentRunApplied = true;
-          }
-          confirmedPicks = 1;
-          receipts.push({ kind: "draft_click", yahooId: target.yahooId, detectionToClickMs: 1 });
-          receipts.push({
-            kind: "pick_confirmed",
-            yahooId: target.yahooId,
-            name: target.name,
-            team: target.team,
-            turn: turn.label,
-            clickToConfirmationMs: 1,
-            rosterAfter: { filled: state.filled, total: config.rosterTotal },
-          });
-          return this;
-        },
-        stop() { controllerState = "stopped"; },
-        getStatus() { return { state: controllerState, confirmedPicks }; },
-        exportReceipts() { return receipts.slice(); },
-      };
-    },
-  };
-  const environment = {
-    Event: class Event { constructor(type) { this.type = type; } },
-    clearInterval,
-    crypto,
-    document,
-    location: { pathname: "/draftclient/f1/542830/3" },
-    localStorage: memoryStorage(),
-    setInterval,
-    setTimeout,
-    SKRODZKaiYahooDraftController: controllerApi,
-  };
-  return { config, environment, poolSize: rows.length, teamCount };
-}
-
-function createReplayRunner(runtime, seat, selectionHoldMs) {
-  const { config, environment, poolSize, teamCount } = runnerLoopEnvironment(runtime, seat);
-  const runner = runtime.runner.create({
-    configName: "test_league_19_idp",
-    executionMode: "TEST",
-    expectedRoomId: "542830",
-    expectedSeat: seat,
-    expectedUrlSeat: 3,
-    observedTeamCount: teamCount,
-    observedRosterSlots: config.rosterSlots,
-    minimumFallbacks: 5,
-    pollMs: 25,
-    filterDeadlineMs: 500,
-    selectionHoldMs,
-    replacementBySlot: runtime.replacementBySlot,
-    survivalCalibration: runtime.survivalCalibration,
-    board: runtime.board,
-    runtimeAttestation: { ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"replay-boot-1234", bootedAt:1 },
-    assertRunnerLease: () => true,
-  }, environment);
-  return { runner, poolSize };
-}
-
-export async function replayRunnerLoop({ boardSource, runnerSource, seat = 6 }) {
+// The old replay used a fake click controller and treated disappearing rows as
+// opponent picks. Production runner/controller and kill-switch tests now own
+// that proof; this CLI must not turn an unverified TEST schema into readiness.
+export async function replayRunnerLoop({ boardSource, runnerSource }) {
   const runtime = loadRuntime(boardSource, runnerSource);
-  const completion = createReplayRunner(runtime, seat, 100);
-  completion.runner.start();
-  let overrideApplied = false;
-  await waitFor(() => {
-    const status = completion.runner.getStatus();
-    if (!overrideApplied && status.pendingDecision?.targetYahooIds?.length > 1) {
-      overrideApplied = completion.runner.chooseOnClock(status.pendingDecision.targetYahooIds[1], "replay_operator_override");
-    }
-    if (["failed", "halted", "stopped"].includes(status.state)) throw new Error(`runner_loop_completion_${status.state}:${status.failure?.code ?? "unknown"}`);
-    return status.state === "completed" ? status : null;
-  });
-  const completionReceipts = completion.runner.exportReceipts();
-  const turnReceipts = completionReceipts.filter((entry) => entry.kind === "runner_turn_resolved");
-  const failureCodes = completionReceipts
-    .filter((entry) => entry.kind === "runner_failed")
-    .map((entry) => entry.code ?? entry.failure ?? "runner_failed");
-  const forbiddenFailures = ["panel_ready_budget_exhausted", "turn_to_click_budget_exhausted", "position_filter_timeout"];
-
-  const kill = createReplayRunner(runtime, seat, 100);
-  kill.runner.start();
-  await waitFor(() => kill.runner.getStatus().pendingDecision);
-  kill.runner.halt("replay_kill_switch");
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  const killReceipts = kill.runner.exportReceipts();
-  const killReceipt = killReceipts.find((entry) => entry.kind === "runner_halted") ?? null;
-
-  const acceptance = {
-    completedNineteenTurns: completion.runner.getStatus().state === "completed" && completion.runner.getStatus().picks.length === 19 && turnReceipts.length === 19,
-    onClockOverrideApplied: completionReceipts.filter((entry) => entry.kind === "runner_on_clock_choice_applied").length === 1,
-    everyPanelReadyWithinBudget: turnReceipts.every((entry) => entry.panelBudgetMs === runtime.runner.decision.panelBudgetMs && entry.panelReadyMs < entry.panelBudgetMs),
-    everyRecommendationWithinBudget: turnReceipts.every((entry) => entry.decision?.recomputeMs < runtime.runner._test.decisionRecomputeBudgetMs),
-    zeroFallbacks: turnReceipts.every((entry) => entry.decision?.fallbackUsed === false),
-    zeroTimeoutOrFailureReceipts: failureCodes.length === 0 && !completionReceipts.some((entry) => forbiddenFailures.some((code) => String(entry.code ?? entry.failure ?? "").includes(code))),
-    firstTurnPressureNeutral: !Object.values(turnReceipts[0]?.decision?.runPressureByPosition ?? {}).some((value) => Number(value) > 0),
-    laterTurnPressureObserved: turnReceipts.slice(1).some((entry) => Object.values(entry.decision?.runPressureByPosition ?? {}).some((value) => Number(value) > 0)),
-    killDuringDecisionWindow: killReceipt?.reason === "replay_kill_switch" && killReceipt?.picks === 0,
-    killProducedNoClick: killReceipt?.draftClicks === 0 && killReceipt?.pickConfirmations === 0,
-    realLeagueExecutionDisabled: runtime.runner.configs.real_league_19_idp.qualification === "unverified-real-room",
-  };
-  return {
-    schemaVersion: 1,
-    evidenceClass: "OFFLINE_RUNNER_LOOP_REPLAY",
-    clockBasis: "real-league 30s assumption stressed through the TEST 19-round runner contract",
-    yahooLiveDraft: false,
-    yahooTestLeagueCleanAutomationPass: false,
-    roomIdentityUsedByHarness: { leagueId: "542830", yahooTeamId: 3, observedTeamCount: 10, draftSeat: seat },
-    accepted: Object.values(acceptance).every(Boolean),
-    acceptance,
-    completion: {
-      state: completion.runner.getStatus().state,
-      picks: completion.runner.getStatus().picks.length,
-      poolSize: completion.poolSize,
-      overrideApplied,
-      maxPanelReadyMs: turnReceipts.length ? Math.max(...turnReceipts.map((entry) => entry.panelReadyMs)) : null,
-      maxRecomputeMs: turnReceipts.length ? Math.max(...turnReceipts.map((entry) => entry.decision?.recomputeMs ?? Infinity)) : null,
-      performanceTargetMs: 250,
-      performanceTargetMisses: turnReceipts.filter((entry) => entry.panelReadyMs >= 250).length,
-      turns: turnReceipts.map((entry) => ({ turn: entry.turn, panelReadyMs: entry.panelReadyMs, panelBudgetMs: entry.panelBudgetMs, recomputeMs: entry.decision?.recomputeMs, fallbackUsed: entry.decision?.fallbackUsed, runPressureByPosition:entry.decision?.runPressureByPosition ?? {} })),
-      failureCodes,
-    },
-    kill: killReceipt,
-    receipts: { completion: completionReceipts, kill: killReceipts },
-  };
+  const failure = runtime.runner.decision.scoringFailure(runtime.runner.configs.test_league_19_idp, runtime.scoringIdentity);
+  return { evidenceClass:"OFFLINE_RUNNER_LOOP_REPLAY", yahooLiveDraft:false, yahooTestLeagueCleanAutomationPass:false,
+    accepted:false, status:failure ? "LOCKED" : "NOT_RUN",
+    failure:failure ?? "runner_loop_retired_use_production_controller_tests", completion:null };
 }
 
 async function main() {

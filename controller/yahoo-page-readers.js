@@ -131,6 +131,26 @@
         .filter((button) => buttonText(button) === "Draft" && !button.disabled && isVisible(button, rootRef)).length === 1);
   }
 
+  function readDiscoveryRows(documentRef, rootRef) {
+    return [...documentRef.querySelectorAll("tr")].map(readPlayerRow).filter(Boolean)
+      .filter((player) => isVisible(player.row, rootRef) && isVisible(player.player, rootRef));
+  }
+
+  function readProjectedOrder(documentRef, players) {
+    const header = documentRef.querySelector('th[data-id="values:projected:points"]');
+    if (!header || normalize(header.innerText ?? header.textContent) !== "PROJ PTS") return null;
+    const headers = [...(header.parentElement?.querySelectorAll("th") ?? [])];
+    const column = headers.indexOf(header);
+    if (column < 0) return null;
+    const values = players.map((player) => {
+      const text = String(player.row.querySelectorAll("td")[column]?.textContent ?? "").trim().replace(/,/g, "");
+      return /^-?\d+(\.\d+)?$/.test(text) ? Number(text) : null;
+    });
+    const numeric = values.filter((value) => value != null);
+    const trailingMissing = values.every((value, index) => value == null || !values.slice(0, index).includes(null));
+    return { header, values, descending:numeric.length >= 5 && trailingMissing && numeric.every((value, index) => index === 0 || value <= numeric[index - 1]) };
+  }
+
   function readPlayerRow(row) {
     const player = row.querySelector(".ys-player[data-id]");
     if (!player) return null;
@@ -209,6 +229,6 @@
   root.SKRODZKaiYahooPageReaders = Object.freeze({
     normalize, textLines, draftSurfaceText, parseRoom, parseRosterCount, readRosterCount, parseRosterSlots, readOwnedTurn, readOwnedTurnState,
     buttonText, readAutodraftState, isAutodraftActive, readQueueState, readDraftClock,
-    isVisible, blockers, readPlayerRow, readAvailablePlayerRows, readTeamRosterPlayerIds, boardHealthReceipt, boardHealthGate,
+    isVisible, blockers, readPlayerRow, readAvailablePlayerRows, readDiscoveryRows, readProjectedOrder, readTeamRosterPlayerIds, boardHealthReceipt, boardHealthGate,
   });
 })(globalThis);

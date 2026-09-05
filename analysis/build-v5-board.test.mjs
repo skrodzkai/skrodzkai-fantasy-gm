@@ -1,7 +1,57 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { scoreOffenseStatLine, scoreIdpStatLine, scoreKickerStatLine } from "./player-intelligence.mjs";
 
 import { assembleV5Board } from "./build-v5-board.mjs";
+
+const testContract = globalThis.SKRODZKaiYahooMockRunner.configs.test_league_19_idp;
+
+test("observed TEST scoring is fingerprinted and never inherits REAL QB, IDP, or kicker rules", () => {
+  const rules = testContract.scoringRules;
+  assert.equal(createHash("sha256").update(JSON.stringify(rules)).digest("hex"), testContract.expectedScoring.scoringSchemaHash);
+  for (const [label, display, , points] of Object.values(testContract.scoringSettingsRows).flat()) {
+    const yards = display.match(/^(\d+) yards per point$/);
+    assert.equal(points, yards ? 1 / Number(yards[1]) : Number(display), `${label}: displayed Yahoo value must equal scoring coefficient`);
+  }
+  const qb = { passingCompletions:300, passingYards:4000, passingTouchdowns:30, interceptions:10 };
+  assert.equal(scoreOffenseStatLine(qb, rules.offense), 270);
+  assert.equal(scoreOffenseStatLine(qb), 350);
+  const receiver = { receptions:100, receivingYards:1200, receivingTouchdowns:8, receivingHundredYardGames:5 };
+  assert.equal(scoreOffenseStatLine(receiver, rules.offense), 218);
+  assert.equal(scoreOffenseStatLine(receiver), 203);
+  const defender = { soloTackles:100, assistedTackles:40, passesDefended:12, tacklesForLoss:8, turnoverReturnYards:50 };
+  assert.equal(scoreIdpStatLine(defender, rules.idp), 67);
+  assert.equal(scoreIdpStatLine(defender), 85);
+  assert.ok(Number.isNaN(scoreKickerStatLine({ fieldGoalsMade:30, extraPointsMade:40 }, rules.kicker)), "aggregate FG counts cannot invent distance buckets");
+  assert.equal(scoreKickerStatLine({ fieldGoals0To19:0, fieldGoals20To29:10, fieldGoals30To39:10, fieldGoals40To49:5, fieldGoals50Plus:5, extraPointsMade:40 }, rules.kicker), 145);
+});
+
+test("TEST builder rejects REAL snapshots and rescores independent raw statistics under TEST rules", () => {
+  assert.throws(() => fixture({ leagueId:"542830" }), /projection scoring identity mismatch/);
+  const identity = testContract.expectedScoring;
+  const inputs = {
+    leagueId:"542830",
+    offenseSnapshot:{ ...identity, observedAt:"2026-08-22T10:00:00Z", players:[{ yahooId:"1", name:"Quarterback", team:"BUF", position:"QB", yahooProjectedPoints:250, yahooPreseasonRank:4, injuryStatus:null, bye:7 }] },
+    specialistSnapshot:{ ...identity, observedAt:"2026-08-22T10:01:00Z", positions:{} },
+    projectionSnapshots:[{
+      manifest:{ snapshotId:"test-espn", sourceId:"espn-mike-clay", sourceFamily:"espn-clay", sourceAsOf:"2026-08-22T11:00:00Z", retrievedAt:"2026-08-22T11:10:00Z", contentSha256:"a".repeat(64), gamesBasis:"17", projectionPeriod:"2026", licenseUseNote:"synthetic regression" },
+      rows:[{ playerId:"1", name:"Quarterback", position:"QB", team:"BUF", projectionGames:17, scoringKind:"offense", leaguePoints:9999, perGamePoints:9999, stats:{ passingCompletions:300, passingYards:4000, passingTouchdowns:30, interceptions:10 } }],
+    }],
+  };
+  const board = fixture(inputs);
+  assert.equal(board.leagueId, "542830");
+  assert.equal(board.scoringSchemaHash, identity.scoringSchemaHash);
+  assert.equal(board.players[0].consensusPoints, 260);
+  assert.equal(board.players[0].automaticEligible, true);
+  assert.equal(board.survivalCalibration, null);
+  assert.equal(board.projectionModel.idpRanking.globalGate.pass, false);
+  for (const key of Object.keys(identity)) {
+    assert.throws(() => fixture({ ...inputs, specialistSnapshot:{ ...inputs.specialistSnapshot, [key]:"wrong" } }), /projection scoring identity mismatch/);
+  }
+  assert.equal(fixture({ ...inputs, asOf:"2026-08-23T12:00:00Z" }).players[0].automaticEligible, false, "stale TEST data is not executable");
+});
 
 function fixture(overrides = {}) {
   return assembleV5Board({
@@ -42,6 +92,22 @@ function fixture(overrides = {}) {
     ...overrides,
   });
 }
+
+test("CLI cannot backdate ADP and health freshness with a historical as-of", () => {
+  const args = ["baseline", "offense", "specialists", "sleeper", "output", "sleeper-observed-at", "adp", "adp-observed-at", "team-count"].map((key) => `--${key}=unused`);
+  const result = spawnSync(process.execPath, [new URL("./build-v5-board.mjs", import.meta.url).pathname, ...args, "--as-of=2000-01-01T00:00:00Z"], { encoding:"utf8" });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /as-of must match the build wall clock/);
+});
+
+test("Yahoo reserve PUP flag cannot be treated as an unknown health badge", () => {
+  const board = fixture({ sleeperPlayers:{}, offenseSnapshot:{ observedAt:"2026-08-22T10:00:00Z", players:[{ yahooId:"1", name:"Quarterback", team:"BUF", position:"QB", yahooProjectedPoints:250, games:10, injuryStatus:"PUP-R", bye:7 }] } });
+  assert.equal(board.players[0].injury.status, "PUP");
+  assert.equal(board.players[0].injury.draftAction, "EXCLUDE");
+  assert.equal(board.players[0].validationStatus, "INJURY_EXCLUDED");
+  assert.equal(board.players[0].automaticEligible, false);
+  assert.equal(board.players[0].manualEligible, false);
+});
 
 test("keeps history and market data out of projection evidence", () => {
   const board = fixture();
@@ -175,7 +241,7 @@ test("filter membership preserves dual-role Yahoo eligibility evidence", () => {
   assert.equal(board.eligibilityEvidence.travisHunterInDbFilter, true);
 });
 
-test("an exact name-team baseline match preserves Travis Hunter as the verified CB exception", () => {
+test("an old Hunter baseline cannot restore defensive eligibility absent current Yahoo tokens", () => {
   const board = fixture({
     baselineRows: [{
       yahoo_id: "",
@@ -203,11 +269,55 @@ test("an exact name-team baseline match preserves Travis Hunter as the verified 
   assert.equal(board.players[0].position, "WR");
   assert.equal(board.players[0].yahooPosition, "WR");
   assert.equal(board.players[0].sourceCount, 1);
-  assert.deepEqual(board.players[0].eligible, ["WR", "W/R/T", "CB", "DB", "D"]);
+  assert.deepEqual(board.players[0].eligible, ["WR"]);
   assert.equal(board.players[0].automaticEligible, false);
   assert.equal(board.players[0].manualEligible, true);
   assert.equal(board.players[0].validationStatus, "DUAL_ROLE_SCORING_UNVERIFIED");
-  assert.equal(board.boards.specialists.DB[0].yahooId, "41787");
+  assert.equal(board.boards.specialists.DB.length, 0);
+});
+
+test("current Yahoo eligibility excludes every baseline slot channel and uses current team", () => {
+  const board = fixture({
+    baselineRows:[{ yahoo_id:"1", name:"Quarterback", team:"OLD", position:"QB", payload_json:JSON.stringify({ eligible:["QB", "DB"], specialist_qualified:true, specialist:{ draft_position:"DB" } }) }],
+    offenseSnapshot:{ observedAt:"2026-08-22T10:00:00Z", players:[{ yahooId:"1", name:"Quarterback", team:"BUF", yahooProjectedPoints:160, injuryStatus:null, bye:7 }] },
+    eligibilitySnapshot:{ observedAt:"2026-08-22T10:00:00Z", players:[{ yahooId:"1", eligible:["WR"] }] },
+  });
+  assert.deepEqual(board.players[0].eligible, ["WR"]);
+  assert.equal(board.players[0].position, "WR");
+  assert.equal(board.players[0].team, "BUF");
+  assert.equal(board.players[0].specialistPosition, null);
+});
+
+test("Yahoo projected games normalize rates without granting reduced-game players a full season", () => {
+  for (const games of [16, 6]) {
+    const board = fixture({ offenseSnapshot:{ observedAt:"2026-08-22T10:00:00Z", players:[{ yahooId:"1", name:"Quarterback", team:"BUF", position:"QB", games, yahooProjectedPoints:games * 20, injuryStatus:null, bye:7 }] } });
+    const player = board.players[0];
+    assert.equal(player.sourceFamilyPerGamePoints.yahoo, 20);
+    assert.equal(player.expectedGamesThroughWeek17, games);
+    if (games === 6) {
+      assert.equal(player.automaticEligible, false);
+      assert.equal(player.validationStatus, "PROJECTED_GAMES_REVIEW");
+    }
+  }
+});
+
+test("invalid Yahoo games are diagnosed per row; only an explicit snapshot basis resolves null games", () => {
+  for (const games of [0, null, 18]) {
+    const snapshot = { observedAt:"2026-08-22T10:00:00Z", players:[{ yahooId:"1", name:"Quarterback", team:"BUF", position:"QB", games, yahooProjectedPoints:160, bye:7 }] };
+    const board = fixture({ offenseSnapshot:snapshot });
+    assert.equal(board.players[0].automaticEligible, false);
+    assert.ok(board.projectionDiagnostics.excludedRows.some((row) => row.playerId === "1"));
+    if (games === null) assert.equal(fixture({ offenseSnapshot:{ ...snapshot, projectionGames:17 } }).players[0].sourceFamilyPerGamePoints.yahoo, 160 / 17);
+  }
+});
+
+test("an external 18-game row is diagnosed and excluded without crashing the board", () => {
+  const board = fixture({ projectionSnapshots:[{
+    manifest:{ snapshotId:"bad-games", sourceId:"espn-mike-clay", sourceFamily:"espn-clay", sourceAsOf:"2026-08-22T11:00:00Z", retrievedAt:"2026-08-22T11:10:00Z", contentSha256:"a".repeat(64), gamesBasis:"18", projectionPeriod:"2026", licenseUseNote:"test" },
+    rows:[{ playerId:"1", position:"QB", projectionGames:18, stats:{ passingYards:4000 } }],
+  }] });
+  assert.equal(board.players[0].sourceFamilyCount, 1);
+  assert.equal(board.projectionDiagnostics.excludedRows[0].games, 18);
 });
 
 test("split Yahoo Travis Hunter identities remain manual-only", () => {

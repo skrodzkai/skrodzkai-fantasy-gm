@@ -20,6 +20,35 @@ function overallPick(round, seat, teams = 12) {
   return round % 2 === 1 ? (round - 1) * teams + seat : round * teams - seat + 1;
 }
 
+function addCoverage(receipts) {
+  for (const entry of receipts.filter((row) => row.kind === "runner_turn_resolved")) {
+    entry.filterLabel = "All Positions";
+    entry.coverage = { turn:entry.turn, filterLabel:entry.filterLabel, observedAt:Date.parse(entry.at),
+      scope:"fresh_clickable_rendered_rows", yahooIds:entry.decision.targetYahooIds.slice(), targetYahooIds:entry.decision.targetYahooIds.slice() };
+  }
+}
+
+function assertCleanSynthetic(result) {
+  assert.equal(result.status, "PASS");
+  assert.deepEqual(result.errors, []);
+}
+
+test("same-turn view coverage and the visible view-fallback receipt are acceptance gates", () => {
+  for (const mutate of [
+    (row) => { row.filterLabel = "Invented filter"; },
+    (row) => { row.coverage.turn = "R2P15"; },
+    (row) => { row.coverage.yahooIds = []; },
+    (row) => { row.coverage.observedAt -= 1201; },
+  ]) {
+    const payload = validPublicPayload();
+    mutate(payload.runnerReceipts.find((row) => row.kind === "runner_turn_resolved"));
+    assert.ok(evaluatePublicMockExport(payload).errors.includes("turn_R1P4_view_coverage_invalid"));
+  }
+  const payload = validPayload();
+  payload.runnerReceipts.push({ ...payload.runnerReceipts[1], kind:"view_fallback_all_positions", beforeClick:true });
+  assert.ok(evaluateTestDraftExport(payload).errors.includes("turn_R1P6_view_fallback_used"));
+});
+
 function validPayload() {
   const roomId = "542830";
   const draftSlot = 6;
@@ -31,6 +60,7 @@ function validPayload() {
     at: iso(0), runId: runnerRunId, roomId, seat: draftSlot, urlSeat, kind: "runner_started",
     configName: "test_league_19_idp", expectedRoomId: roomId, expectedSeat: draftSlot, expectedUrlSeat: urlSeat,
     observedTeamCount: teamCount, observedRosterSlots: rosterSlots, runtimeAttestation:RUNTIME_ATTESTATION,
+    scoringIdentity:TEST_CONFIG.expectedScoring,
     autodraftState:"INACTIVE", queueState:"EMPTY",
   }];
   const controllerReceipts = [];
@@ -62,6 +92,7 @@ function validPayload() {
     });
   }
   const counts = POSITIONS.reduce((result, position) => ({ ...result, [position]: (result[position] ?? 0) + 1 }), {});
+  addCoverage(runnerReceipts);
   runnerReceipts.push({ at: iso(20_000), runId: runnerRunId, roomId, seat: draftSlot, urlSeat, kind: "runner_completed", picks: 19, counts });
   const finalRosterSlots = TEST_ALLOCATOR(picks, rosterSlots).map((entry) => ({
     slot:entry.slot,
@@ -124,6 +155,7 @@ function validPublicPayload() {
     });
   }
   const counts = PUBLIC_POSITIONS.reduce((result, position) => ({ ...result, [position]:(result[position] ?? 0) + 1 }), {});
+  addCoverage(runnerReceipts);
   runnerReceipts.push({ at:iso(16_000), runId, roomId, seat, urlSeat:seat, kind:"runner_completed", picks:15, counts });
   return {
     extensionVersion:"0.16.3",
@@ -155,8 +187,9 @@ test("intentional on-clock choice outside the baseline is joined to its click", 
     kind:"runner_on_clock_choice_applied", turn:decisionReceipt.turn,
     chosenYahooId:chosen, source:"operator", baselineFallbacks:[...decision.targetYahooIds] };
   payload.runnerReceipts.push(choice);
+  addCoverage(payload.runnerReceipts);
   const result = evaluateTestDraftExport(payload);
-  assert.equal(result.status, "PASS", JSON.stringify(result.errors));
+  assertCleanSynthetic(result);
   assert.equal(result.picks[0].replayMode, "ON_CLOCK_OVERRIDE");
   assert.equal(result.picks[0].targetIndex, -1);
   choice.at = iso(950);
@@ -216,9 +249,9 @@ function runtimeFallbackDecision() {
   }).decision;
 }
 
-test("accepts one exact completed TEST draft without inventing counterfactuals", () => {
+test("otherwise exact completed TEST remains locked until its scoring schema is verified", () => {
   const result = evaluateTestDraftExport(validPayload());
-  assert.equal(result.status, "PASS", JSON.stringify(result.errors));
+  assertCleanSynthetic(result);
   assert.equal(result.confirmedPicks, 19);
   assert.equal(result.maxObservedLatencyMs, 200);
   assert.equal(result.counterfactualScoring, "not_available_from_compact_receipts");
@@ -340,12 +373,13 @@ test("acceptance replays an applied manual pin against its receipted Yahoo ID", 
   const rosterEntry = payload.extensionReceipts[0].finalRosterSlots.find((entry) => entry.yahooId === oldId);
   rosterEntry.yahooId = pinnedId;
   rosterEntry.name = "Pinned Player";
+  addCoverage(payload.runnerReceipts);
   payload.extensionReceipts.push(
     { at:iso(100), version:"0.16.3", roomId:payload.roomId, seat:payload.seat, kind:"manual_pin_staged", expectedRound:1, targetYahooIds:[pinnedId] },
     { at:iso(200), version:"0.16.3", roomId:payload.roomId, seat:payload.seat, kind:"manual_pin_applied", expectedRound:1, chosenYahooId:pinnedId, failure:null },
   );
   const result = evaluateTestDraftExport(payload);
-  assert.equal(result.status, "PASS", JSON.stringify(result.errors));
+  assertCleanSynthetic(result);
   assert.equal(result.picks[0].decisionReplay, "MATCH");
 });
 
@@ -357,7 +391,7 @@ test("TEST acceptance requires one rejected pre-staged player to retain the base
     { at:iso(1_800), version:"0.16.3", roomId:payload.roomId, seat:payload.seat, kind:"manual_pin_rejected", expectedRound:2, chosenYahooId:null, failure:"manual_pin_unavailable_or_ineligible", baselineRetained:true },
   );
   const accepted = evaluateTestDraftExport(payload, { requireRejectedOverride:true });
-  assert.equal(accepted.status, "PASS", JSON.stringify(accepted.errors));
+  assertCleanSynthetic(accepted);
   assert.equal(accepted.manualOverride.rejectedReceipts, 1);
 
   payload.extensionReceipts.at(-1).baselineRetained = false;

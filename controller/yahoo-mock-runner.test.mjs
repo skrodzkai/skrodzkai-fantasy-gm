@@ -418,15 +418,96 @@ test("position runs change acquisition probability, never football projection or
   assert.ok(runEntry.pAvailableNext < calmEntry.pAvailableNext);
 });
 
-test("live position pressure comes from exact Yahoo IDs removed between owned turns and excludes our pick", () => {
-  const previous = [
-    player("WR", 1, 10), player("WR", 2, 11), player("WR", 3, 12), player("WR", 4, 13),
-    player("RB", 5, 14), player("RB", 6, 15),
-  ];
-  const current = [previous[3], previous[5]];
-  const pressure = helpers.runPressureFromAvailability(previous, current, [previous[0]]);
-  assert.equal(pressure.WR, 0.5);
-  assert.equal(pressure.RB, 0);
+test("filtered rows are not opponent-pick evidence; TEST requires a verified scoring schema", () => {
+  assert.equal(helpers.runPressureFromAvailability, undefined);
+  assert.equal(helpers.scoringFailure(testConfig, {}), "test_board_scoring_identity_mismatch");
+  assert.equal(helpers.scoringFailure({ ...testConfig, expectedScoring:{ ...testConfig.expectedScoring, scoringSchemaHash:null } }, {}), "test_scoring_schema_unverified");
+  const expectedScoring = { leagueId:"542830", scoringModel:"league-two-2026", scoringSchemaHash:"b".repeat(64) };
+  const fixture = { ...testConfig, expectedScoring };
+  assert.equal(helpers.scoringFailure(fixture, expectedScoring), null);
+  for (const key of Object.keys(expectedScoring)) assert.equal(helpers.scoringFailure(fixture, { ...expectedScoring, [key]:"wrong" }), "test_board_scoring_identity_mismatch");
+});
+
+function discoveryFixture({ owned = false, missingFilter = false, allUnavailable = false } = {}) {
+  const board = boardForConfig(testConfig);
+  const calls = [];
+  let ownedTurn = owned;
+  let queue = "EMPTY";
+  let roster = 0;
+  let controllerCreated = 0;
+  const select = { value:"All Positions", options:helpers.requiredTestFilterLabels().filter((label) => !missingFilter || label !== "Kickers")
+    .map((label) => ({ value:label, textContent:label })), dispatchEvent(event) { if (event.type === "change") calls.push({ label:this.value, owned:ownedTurn }); } };
+  const players = () => board.filter((player) => select.value === "All Positions" ? !allUnavailable
+    : select.value === "Kickers" ? player.position === "K" : select.value === "Team Defenses" ? player.position === "DEF" : ["D", "LB", "CB", "S"].includes(player.position));
+  const turn = { label:"R1P6", round:1, pick:6 };
+  const runtime = {
+    parseRoom:() => ({ roomId:"542830", seat:3 }), readOwnedTurn:() => ownedTurn ? turn : null,
+    readOwnedTurnState:() => ({ state:ownedTurn ? "OWNED" : "OFF_TURN", turn:ownedTurn ? turn : null }),
+    readRosterCount:() => ({ filled:roster, total:19 }), readAutodraftState:() => "INACTIVE", readQueueState:() => queue,
+    readDraftClock:() => ({ label:"00:30", seconds:30 }), readAvailablePlayerRows:players,
+  };
+  const controller = { runtime, create() { controllerCreated++; return {
+    start() { return this; }, stop() {}, getStatus:() => ({ state:"running", confirmedPicks:0 }), exportReceipts:() => [],
+  }; } };
+  const api = loadRunner(controller);
+  const environment = { document:{ querySelectorAll:() => [select] }, location:{ pathname:"/draftclient/f1/542830/3" },
+    localStorage:storageFixture(), crypto, setTimeout, clearTimeout, setInterval, clearInterval,
+    Event:class Event { constructor(type) { this.type = type; } }, SKRODZKaiYahooDraftController:controller,
+    SKRODZKaiYahooPageReaders:{ readDiscoveryRows:players, readProjectedOrder:() => ({ descending:true }) } };
+  const runner = api.create({ configName:"test_league_19_idp", executionMode:"TEST", expectedRoomId:"542830", expectedSeat:6, expectedUrlSeat:3,
+    observedTeamCount:12, observedRosterSlots:testConfig.rosterSlots, board, replacementBySlot, scoringIdentity:api.configs.test_league_19_idp.expectedScoring,
+    assertRunnerLease:() => true, runtimeAttestation:{ ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"synthetic-12345678", bootedAt:1 },
+    selectionHoldMs:0, filterDeadlineMs:500,
+  }, environment);
+  return { runner, calls, select, enterTurn:() => { ownedTurn = true; }, changeQueue:() => { queue = "NONEMPTY_OR_UNKNOWN"; },
+    changeRoster:() => { roster = 1; }, controllers:() => controllerCreated };
+}
+
+test("incomplete discovery uses exactly one receipted pre-click All Positions fallback with five fresh targets", async () => {
+  const f = discoveryFixture({ owned:true }); f.runner.start();
+  try {
+    await waitFor(() => f.controllers() === 1);
+    const receipts = f.runner.exportReceipts();
+    const fallback = receipts.filter((row) => row.kind === "view_fallback_all_positions");
+    assert.equal(fallback.length, 1);
+    assert.equal(fallback[0].beforeClick, true);
+    const resolved = receipts.find((row) => row.kind === "runner_turn_resolved");
+    assert.equal(resolved.filterLabel, "All Positions");
+    assert.equal(resolved.viewFallback, true);
+    assert.ok(resolved.coverage.targetYahooIds.length >= 5);
+    assert.ok(resolved.coverage.targetYahooIds.every((id) => resolved.coverage.yahooIds.includes(id)));
+    assert.ok(resolved.panelReadyMs < 1200);
+  } finally { f.runner.stop(); }
+});
+
+test("off-turn discovery yields before further filter writes when an owned banner arrives", async () => {
+  const f = discoveryFixture(); f.runner.start();
+  try {
+    await waitFor(() => f.calls.some((call) => call.label === "Kickers"));
+    f.enterTurn();
+    await waitFor(() => f.controllers() === 1);
+    assert.deepEqual(f.calls.filter((call) => call.owned).map((call) => call.label), ["All Positions"]);
+    assert.equal(f.runner.exportReceipts().filter((row) => row.kind === "view_fallback_all_positions").length, 1);
+  } finally { f.runner.stop(); }
+});
+
+test("discovery failure cannot fallback across queue or roster drift, nor retry a failed All Positions read", async () => {
+  for (const mutate of ["changeQueue", "changeRoster"]) {
+    const f = discoveryFixture({ missingFilter:true }); f.runner.start();
+    try {
+      await waitFor(() => f.runner.exportReceipts().some((row) => row.kind === "view_discovered"));
+      f[mutate](); f.enterTurn();
+      await waitFor(() => f.runner.getStatus().state === "failed");
+      assert.equal(f.controllers(), 0);
+      assert.equal(f.runner.exportReceipts().filter((row) => row.kind === "view_fallback_all_positions").length, 0);
+    } finally { f.runner.stop(); }
+  }
+  const f = discoveryFixture({ owned:true, allUnavailable:true }); f.runner.start();
+  try {
+    await waitFor(() => f.runner.getStatus().state === "failed", 1000);
+    assert.equal(f.controllers(), 0);
+    assert.equal(f.runner.exportReceipts().filter((row) => row.kind === "view_fallback_all_positions").length, 1);
+  } finally { f.runner.stop(); }
 });
 
 test("unified BPA plus one-turn alternatives returns five legal exact-ID targets", () => {

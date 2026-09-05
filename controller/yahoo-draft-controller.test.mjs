@@ -3,10 +3,13 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 import { evaluateTestDraftExport } from "../analysis/test-draft-acceptance.mjs";
+import { withScoringTable } from "../tests/fixtures/league-two-settings.mjs";
+import { makeDraftRail } from "../tests/fixtures/draft-rail.mjs";
 
 const source = await readFile(new URL("./yahoo-draft-controller.js", import.meta.url), "utf8");
 const readerSource = await readFile(new URL("./yahoo-page-readers.js", import.meta.url), "utf8");
 const runnerSource = await readFile(new URL("./yahoo-mock-runner.js", import.meta.url), "utf8");
+const extensionSource = await readFile(new URL("../extension/yahoo-mock-extension.js", import.meta.url), "utf8");
 const context = {
   clearInterval,
   console,
@@ -23,6 +26,20 @@ vm.runInContext(source, context);
 vm.runInContext(runnerSource, context);
 const helpers = context.SKRODZKaiYahooDraftController._test;
 const controllerApi = context.SKRODZKaiYahooDraftController;
+
+test("observed Proj Pts column preserves missing values and verifies descending numeric order", () => {
+  const header = { innerText:"Proj Pts" };
+  header.parentElement = { querySelectorAll:() => [header] };
+  const document = { querySelector:() => header };
+  const rows = (values) => values.map((value) => ({ row:{ querySelectorAll:() => [{ textContent:value }] } }));
+  const read = context.SKRODZKaiYahooPageReaders.readProjectedOrder;
+  const descending = read(document, rows(["230.5", "200", "190", "140", "0", "-"]));
+  assert.deepEqual(Array.from(descending.values), [230.5, 200, 190, 140, 0, null]);
+  assert.equal(descending.descending, true);
+  assert.equal(read(document, rows(["0", "1", "2", "3", "4"])).descending, false);
+  assert.equal(read(document, rows(["230", "-", "200", "190", "140", "0"])).descending, false);
+  assert.equal(read({ querySelector:() => null }, rows(["1"])), null);
+});
 
 function button(text, icon = null, disabled = false) {
   return {
@@ -124,23 +141,32 @@ async function waitFor(predicate, timeoutMs = 500) {
   assert.fail("condition was not reached before timeout");
 }
 
-test("production readers, runner and click controller produce 19 gradeable TEST picks including an on-clock override", async () => {
-  const runnerApi = context.SKRODZKaiYahooMockRunner;
+for (const { seat, onClock = false, skipDiscovery = false, sparseDiscovery = false, lateSparse = false } of [{ seat:1 }, { seat:6 }, { seat:12 }, { seat:6, onClock:true }, { seat:6, skipDiscovery:true }, { seat:6, sparseDiscovery:true }, { seat:12, sparseDiscovery:true }, { seat:6, lateSparse:true }]) test(`production ${lateSparse ? "forced IDP fallback exhaustion stops without a click" : sparseDiscovery ? "sparse hint uses one receipted fresh fallback" : skipDiscovery ? "non-adjacent stale discovery refuses clean acceptance" : "19-round zero-fallback acceptance"}, slot ${seat}, on-clock choice ${onClock}, 30-second clock (synthetic DOM, not live proof)`, async (t) => {
+  const fixtureContext = vm.createContext({ ...context });
+  fixtureContext.globalThis = fixtureContext;
+  vm.runInContext(runnerSource, fixtureContext);
+  vm.runInContext(extensionSource, fixtureContext);
+  const runnerApi = fixtureContext.SKRODZKaiYahooMockRunner;
   const config = runnerApi.configs.test_league_19_idp;
   const board = ["QB", "RB", "WR", "TE", "K", "DEF", "LB", "CB"].flatMap((position, positionIndex) =>
     Array.from({ length:20 }, (_, index) => ({
       yahooId:String(50000 + positionIndex * 100 + index), name:`${position} Player ${index}`,
       position, team:position === "DEF" ? "" : "BUF", eligible:position === "LB" ? ["LB", "D"] : position === "CB" ? ["CB", "DB", "D"] : [position],
-      rank:positionIndex * 20 + index + 1, projection:500 - positionIndex * 35 - index,
-      replacementPoints:100, vor:400 - positionIndex * 35 - index,
+      rank:positionIndex * 20 + index + 1, projection:lateSparse && positionIndex >= 6 ? 1 : 500 - positionIndex * 35 - index,
+      replacementPoints:100, vor:lateSparse && positionIndex >= 6 ? -99 : 400 - positionIndex * 35 - index,
       adpLow:positionIndex * 20 + index + 10, adpHigh:positionIndex * 20 + index + 30,
       automaticEligible:true, manualEligible:true,
     })));
   const rosterIds = [];
   const clickedIds = [];
+  const { rail, state:railState } = makeDraftRail();
   const document = documentFixture();
+  let pendingRound = null;
+  let projectionDescending = true;
+  let ownedSortClicks = 0;
   const setTurn = (round) => {
-    const pick = runnerApi._test.overallPick(round, 1, 12);
+    if (round >= 17) projectionDescending = false; // Yahoo re-render resets the D sort at turn entry.
+    const pick = runnerApi._test.overallPick(round, seat, 12);
     document.title = round <= 19 ? "YOUR TURN, DRAFT NOW | Live NFL Draft" : "Draft complete";
     document.body.innerText = `00:30\n${round <= 19 ? `YOUR TURN • ROUND ${round}, PICK ${pick}` : "Draft complete"}\nYOUR TEAM (${rosterIds.length}/19)\nYour queue is empty.`;
   };
@@ -155,10 +181,16 @@ test("production readers, runner and click controller produce 19 gradeable TEST 
       assert.ok(!clickedIds.includes(entry.yahooId), "no repeated click");
       clickedIds.push(entry.yahooId);
       rosterIds.push(entry.yahooId);
-      // Adjacent snake turns can open immediately, with no off-turn frame.
-      setTurn(rosterIds.length + 1);
+      const nextRound = rosterIds.length + 1;
+      const adjacent = runnerApi._test.overallPick(nextRound, seat, 12) === runnerApi._test.overallPick(nextRound - 1, seat, 12) + 1;
+      if (adjacent || nextRound > 19 || (skipDiscovery && nextRound === 2)) setTurn(nextRound);
+      else {
+        pendingRound = nextRound;
+        document.title = "Waiting";
+        document.body.innerText = `YOUR TEAM (${rosterIds.length}/19)\nYour queue is empty.`;
+      }
     };
-    return { entry, draftButton, querySelector:(selector) => selector === ".ys-player[data-id]" ? playerNode : null, querySelectorAll:(selector) => selector === "button" ? [draftButton] : [] };
+    return { entry, draftButton, querySelector:(selector) => selector === ".ys-player[data-id]" ? playerNode : null, querySelectorAll:(selector) => selector === "button" ? [draftButton] : selector === "td" ? [{ textContent:String(entry.projection) }] : [] };
   });
   const rosterPanel = {
     get innerText() { return `YOUR TEAM (${rosterIds.length}/19)`; },
@@ -168,38 +200,124 @@ test("production readers, runner and click controller produce 19 gradeable TEST 
   const heading = { get innerText() { return rosterPanel.innerText; }, querySelectorAll:() => [], parentElement:rosterPanel };
   const labels = runnerApi._test.requiredTestFilterLabels();
   const select = { value:"All Positions", options:Array.from(labels, (label) => ({ value:label, textContent:label })), dispatchEvent() {} };
+  const header = { innerText:"Proj Pts", click() { projectionDescending = true; if (document.title.startsWith("YOUR TURN")) ownedSortClicks++; } };
+  header.parentElement = { querySelectorAll:() => [header] };
+  document.querySelector = (selector) => selector === 'th[data-id="values:projected:points"]' ? header : null;
   document.querySelectorAll = (selector) => {
+    if (selector === '.ys-team[data-id]') {
+      const first = Array.from({ length:12 }, (_, index) => String(index + 1));
+      [first[2], first[seat - 1]] = [first[seat - 1], first[2]];
+      return Array.from({ length:19 }, (_, index) => index % 2 ? [...first].reverse() : first).flat()
+        .map((id) => ({ getAttribute:() => id, textContent:id === "3" ? "You" : `Team ${id}` }));
+    }
     if (selector === "button") return [button("Autodraft")];
-    if (selector === "tr") return rows.filter((row) => !rosterIds.includes(row.entry.yahooId));
+    if (selector === "tr") {
+      if (lateSparse && rosterIds.length === 17 && document.title.startsWith("YOUR TURN") && select.value === "Defensive Players") return [];
+      let visible = rows.filter((row) => !rosterIds.includes(row.entry.yahooId) &&
+      (select.value === "All Positions" || (select.value === "Kickers" ? row.entry.position === "K" : select.value === "Team Defenses" ? row.entry.position === "DEF" : ["LB", "CB"].includes(row.entry.position)))).slice(0, 100);
+      if (lateSparse && rosterIds.length === 17 && document.title.startsWith("YOUR TURN")) visible = visible.filter((row) => !["LB", "CB"].includes(row.entry.position));
+      if (sparseDiscovery && environment.__skrodzkaiYahooMockExtensionV1?.runner && !document.title.startsWith("YOUR TURN")) {
+        visible = visible.filter((row) => ["K", "DEF", "LB", "CB"].includes(row.entry.position) || (row.entry.position === "QB" && row.entry.rank <= 4));
+      }
+      return select.value === "Defensive Players" && !projectionDescending ? visible.reverse() : visible;
+    }
     if (selector === "select") return [select];
     if (selector === "h1,h2,h3,h4,h5,h6,div,span") return [heading];
     return [];
   };
-  setTurn(1);
+  document.getElementById = (id) => id === "skrodzkai-yahoo-mock-control" ? { _controlApi:rail } : null;
+  document.title = `You pick ${seat}th | Live NFL Draft | Yahoo Fantasy Sports`;
+  document.body.innerText = "League Two\nDraft Starting Soon\nYOUR TEAM (0/19)\nYour queue is empty.";
   const storage = storageFixture();
+  const sessionStorage = storageFixture();
+  const activeTimers = new Set();
+  const runtimeAttestation = { ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"synthetic-boot-1234", bootedAt:1 };
+  const now = new Date().toISOString();
+  const boardData = { ...config.expectedScoring, generatedAt:now, players:board,
+    marketAdpReceipt:{ observedAt:now, rows:218 },
+    injuryCoverage:{ complete:true, checkedPlayers:board.length, expectedPlayers:board.length },
+    byeCoverage:{ complete:true, playersWithBye:board.length, playersTotal:board.length },
+    replacementBySlot:{ QB:300, RB:180, WR:170, TE:140, "W/R/T":175, K:80, DEF:75, D:70 },
+  };
   const environment = { document, location:{ pathname:"/draftclient/f1/542830/3" }, localStorage:storage,
-    crypto, clearInterval, clearTimeout, setInterval, setTimeout,
+    crypto, sessionStorage, clearTimeout, setTimeout, SKRODZKaiYahooMockBoard:boardData,
+    setInterval(fn, ms) { const id = setInterval(fn, ms); activeTimers.add(id); return id; },
+    clearInterval(id) { clearInterval(id); activeTimers.delete(id); },
     Event:class Event { constructor(type) { this.type=type; } },
     getComputedStyle:() => ({ display:"block", visibility:"visible" }),
     SKRODZKaiYahooDraftController:controllerApi,
+    SKRODZKaiYahooPageReaders:context.SKRODZKaiYahooPageReaders,
+    SKRODZKaiYahooMockRunner:runnerApi,
+    chrome:{ runtime:{ onMessage:{ addListener() {}, removeListener() {} }, async sendMessage(message) { return message.type === "version_handshake" ? runtimeAttestation : { ok:true }; } } },
   };
-  const runtimeAttestation = { ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"synthetic-boot-1234", bootedAt:1 };
-  const runner = runnerApi.create({
-    configName:"test_league_19_idp", executionMode:"TEST", expectedRoomId:"542830", expectedSeat:1, expectedUrlSeat:3,
-    observedTeamCount:12, observedRosterSlots:config.rosterSlots, board, selectionHoldMs:100, minimumFallbacks:5,
-    replacementBySlot:{ QB:300, RB:180, WR:170, TE:140, "W/R/T":175, K:80, DEF:75, D:70 },
-    assertRunnerLease:() => true,
-    runtimeAttestation,
-  }, environment);
-  runner.start();
+  fixtureContext.SKRODZKaiYahooMockBoard = boardData;
+  t.after(() => { environment.__skrodzkaiYahooMockExtensionV1?.runner?.stop("test_cleanup"); for (const id of activeTimers) clearInterval(id); });
+  const ext = fixtureContext.SKRODZKaiYahooMockExtension;
+  const settings = withScoringTable({ body:{ innerText:"League Name:\tLeague Two\nDraft Type:\tLive Standard Draft\nMax Teams:\t12\nLive Draft Pick Time:\t1 Minute\nPassing Touchdowns\t4\nReceptions\t0.5\nRoster Positions:\tQB, WR, WR, WR, RB, RB, TE, W/R/T, W/R/T, K, DEF, D, D, BN, BN, BN, BN, BN, BN, IR, IR, IR" } });
+  storage.setItem("skrodzkai-yahoo-test-settings-v1", JSON.stringify(ext._test.makeTestSettingsReceipt(ext._test.parseTestSettings(settings, { pathname:"/f1/542830/settings" }))));
+  await ext.boot(environment);
+  assert.equal(railState.label, "TEST READY TO ARM", railState.detail);
+  await rail.controls.arm.handler();
+  const runner = environment.__skrodzkaiYahooMockExtensionV1?.runner;
+  assert.ok(runner, railState.detail);
+  let rejectedStaged = false;
+  const opponentTimer = setInterval(() => {
+    if (pendingRound && runner.exportReceipts().some((entry) => entry.kind === "view_discovered" && entry.round === pendingRound && entry.filterLabel === "Defensive Players") && !runner.getStatus().busy) {
+      if (!onClock && !rejectedStaged) {
+        assert.equal(rail.manual([board.find((player) => player.yahooId === clickedIds[0])], { mode:"NEXT_PICK", round:pendingRound, turnLabel:`R${pendingRound}` }), true);
+        rejectedStaged = true;
+      }
+      const round = pendingRound; pendingRound = null; setTurn(round);
+    }
+  }, 10);
   try {
-    await waitFor(() => runner.getStatus().pendingDecision !== null);
-    const baseline = runner.exportReceipts().find((row) => row.kind === "runner_turn_resolved").decision.targetYahooIds;
-    const override = board.find((player) => player.position === "RB" && !baseline.includes(player.yahooId));
-    assert.ok(override, "the override must be outside all five baseline targets");
-    assert.equal(runner.chooseOnClock(override.yahooId, "test_operator"), true);
-    await waitFor(() => ["completed", "failed"].includes(runner.getStatus().state), 10_000);
+    await waitFor(() => runner.exportReceipts().filter((row) => row.kind === "view_discovered").length === 4, 1000);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const views = runner.exportReceipts().filter((row) => row.kind === "view_discovered");
+    assert.equal(views[0].yahooIds.length, sparseDiscovery ? 24 : 100);
+    assert.ok(views[3].yahooIds.some((id) => !views[0].yahooIds.includes(id)), "specialists beyond All Positions' first 100 must be discovered");
+    const override = board.find((player) => player.position === "RB" && player.rank === 40);
+    if (!onClock) assert.equal(rail.manual([override], { mode:"NEXT_PICK", round:1, turnLabel:"R1" }), true);
+    setTurn(1);
+    if (sparseDiscovery) {
+      const expectedPicks = seat === 12 ? 2 : 1;
+      await waitFor(() => runner.getStatus().picks.length >= expectedPicks || runner.getStatus().state === "failed", 5000);
+      assert.equal(runner.getStatus().picks.length, expectedPicks, JSON.stringify(runner.getStatus().failure));
+      const fallbacks = runner.exportReceipts().filter((row) => row.kind === "view_fallback_all_positions");
+      assert.equal(fallbacks.length, expectedPicks);
+      assert.ok(fallbacks.every((row) => row.reason === "fewer_than_5_legal_bpa_targets" && row.beforeClick));
+      assert.ok(runner.exportReceipts().filter((row) => row.kind === "runner_turn_resolved").every((row) => row.viewFallback && row.targetCount >= 5));
+      assert.ok(runner.getStatus().picks.every((pick) => pick.turnDetectionToClickMs < 2000));
+      return;
+    }
+    if (onClock) {
+      await waitFor(() => runner.getStatus().pendingDecision !== null);
+      assert.ok(!runner.getStatus().pendingDecision.targetYahooIds.includes(override.yahooId));
+      assert.equal(rail.manual([override], { mode:"ON_CLOCK", round:1, turnLabel:`R1P${seat}` }), true);
+    }
+    if (skipDiscovery) {
+      await waitFor(() => runner.getStatus().picks.length >= 2 || runner.getStatus().state === "failed", 5000);
+      assert.equal(runner.getStatus().picks.length, 2, JSON.stringify(runner.getStatus().failure));
+      assert.ok(!runner.exportReceipts().some((row) => row.kind === "adjacent_turn_view_hint"));
+      const fallback = runner.exportReceipts().filter((row) => row.kind === "view_fallback_all_positions");
+      assert.equal(fallback.length, 1);
+      assert.equal(fallback[0].turn, "R2P19");
+      assert.equal(fallback[0].reason, "view_discovery_incomplete_for_current_round");
+      return;
+    }
+    await waitFor(() => ["completed", "failed"].includes(runner.getStatus().state), 45_000);
     const status = runner.getStatus();
+    if (lateSparse) {
+      assert.equal(status.state, "failed", JSON.stringify(status.failure));
+      assert.equal(clickedIds.length, 17, "no round-18 click after specialist discovery and fallback fail");
+      assert.equal(status.picks.length, 17);
+      assert.equal(status.picks.filter((pick) => ["LB", "CB"].includes(pick.position)).length, 0, "both D slots must be forced in the final two rounds");
+      const fallbacks = runner.exportReceipts().filter((row) => row.kind === "view_fallback_all_positions");
+      assert.equal(fallbacks.length, 1);
+      assert.equal(fallbacks[0].turn, "R18P211");
+      assert.ok(!runner.exportReceipts().some((row) => row.kind === "runner_completed"));
+      return;
+    }
     assert.equal(status.state, "completed", JSON.stringify(status.failure));
     assert.equal(clickedIds.length, 19);
     assert.deepEqual(Array.from(status.picks, (pick) => pick.yahooId), clickedIds);
@@ -208,7 +326,17 @@ test("production readers, runner and click controller produce 19 gradeable TEST 
     assert.equal(controllers.filter((row) => row.kind === "pick_confirmed").length, 19);
     assert.ok(status.picks.every((pick) => pick.turnDetectionToClickMs < 2000));
     assert.ok(!runner.exportReceipts().some((row) => row.kind === "runner_failed"));
-    assert.equal(clickedIds[0], override.yahooId);
+    assert.ok(ownedSortClicks > 0, "owned-turn sort reset must be repaired before D selection");
+    const viewFallbacks = runner.exportReceipts().filter((row) => row.kind === "view_fallback_all_positions");
+    assert.deepEqual(Array.from(viewFallbacks, (row) => row.turn), []);
+    const adjacentHints = runner.exportReceipts().filter((row) => row.kind === "adjacent_turn_view_hint");
+    assert.equal(adjacentHints.length, seat === 6 ? 0 : 9);
+    for (const row of adjacentHints) {
+      const pick = Number(row.turn.match(/P(\d+)/)[1]);
+      assert.equal(row.previousTurn, `R${row.fromRound}P${pick - 1}`);
+      assert.equal(row.freshTargetsRequired, true);
+    }
+    if (override) assert.equal(clickedIds[0], override.yahooId);
     // Only the final Yahoo roster/attestation envelope is synthetic. Runner and
     // click-controller receipts are consumed untouched, as the extension exports them.
     const finalRosterSlots = runnerApi._test.allocateRosterSlots(status.picks, config.rosterSlots).map((entry) => ({
@@ -218,21 +346,28 @@ test("production readers, runner and click controller produce 19 gradeable TEST 
       extensionVersion:"0.16.3", runtimeAttestation, roomId:status.roomId, seat:status.seat, urlSeat:status.urlSeat, status,
       operatorAttestation:{ status:"none", source:"operator_attested", attestedAt:new Date().toISOString(), interventions:[] },
       runnerReceipts:runner.exportReceipts(), controllerReceipts:controllers,
-      extensionReceipts:[{ at:new Date().toISOString(), version:"0.16.3", roomId:status.roomId, seat:status.seat,
+      extensionReceipts:[...JSON.parse(storage.getItem("skrodzkai-yahoo-mock-extension-receipts-v1")), { at:new Date().toISOString(), version:"0.16.3", roomId:status.roomId, seat:status.seat,
         urlSeat:status.urlSeat, runId:status.runId, kind:"final_roster_readback", valid:true, finalRosterSlots }],
     };
-    const result = evaluateTestDraftExport(payload);
+    const result = evaluateTestDraftExport(payload, { requireManualOverride:!onClock, requireRejectedOverride:!onClock });
     assert.equal(result.status, "PASS", JSON.stringify(result.errors));
-    assert.equal(result.picks[0].replayMode, "ON_CLOCK_OVERRIDE");
-    assert.equal(result.picks[0].targetIndex, -1);
-    const choice = payload.runnerReceipts.find((entry) => entry.kind === "runner_on_clock_choice_applied");
-    assert.equal(typeof choice.turn, "string", "the grader must use the producer's string turn contract");
-    const wrongTurn = structuredClone(payload);
-    wrongTurn.runnerReceipts.find((entry) => entry.kind === "runner_on_clock_choice_applied").turn = { label:choice.turn };
-    assert.ok(evaluateTestDraftExport(wrongTurn).errors.includes("on_clock_choice_unknown_turn"));
-    const missingChoice = { ...payload, runnerReceipts:payload.runnerReceipts.filter((entry) => entry !== choice) };
-    assert.ok(evaluateTestDraftExport(missingChoice).errors.includes("round_1_unintended_selection"));
-  } finally { runner.stop("test_cleanup"); }
+    assert.deepEqual(result.errors, []);
+    if (!onClock) {
+      assert.equal(result.picks[0].replayMode, "MANUAL_OVERRIDE");
+      assert.equal(result.manualOverride.rejectedReceipts, 1);
+      assert.ok(!payload.runnerReceipts.some((row) => row.kind === "runner_on_clock_choice_applied"));
+    } else {
+      assert.equal(result.picks[0].replayMode, "ON_CLOCK_OVERRIDE");
+      assert.equal(result.picks[0].targetIndex, -1);
+      const choice = payload.runnerReceipts.find((row) => row.kind === "runner_on_clock_choice_applied");
+      assert.equal(typeof choice.turn, "string");
+      const wrongTurn = structuredClone(payload);
+      wrongTurn.runnerReceipts.find((row) => row.kind === "runner_on_clock_choice_applied").turn = { label:choice.turn };
+      assert.ok(evaluateTestDraftExport(wrongTurn).errors.includes("on_clock_choice_unknown_turn"));
+      const missingChoice = { ...payload, runnerReceipts:payload.runnerReceipts.filter((row) => row !== choice) };
+      assert.ok(evaluateTestDraftExport(missingChoice).errors.includes("round_1_unintended_selection"));
+    }
+  } finally { clearInterval(opponentTimer); runner.stop("test_cleanup"); for (const id of activeTimers) clearInterval(id); }
 });
 
 test("requires both the live title and exact owned-turn banner", () => {

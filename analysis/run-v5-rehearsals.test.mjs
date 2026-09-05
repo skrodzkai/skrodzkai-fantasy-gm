@@ -25,22 +25,13 @@ test("offline runtime exposes no browser or network globals and receipts runner 
   assert.equal(runtime.runner.configs.real_league_19_idp.qualification, "unverified-real-room");
 });
 
-test("offline runner-loop replay completes 19 turns and separately proves the kill switch", async () => {
+test("offline runner-loop cannot promote a REAL board into TEST-scored execution", async () => {
   const replay = await replayRunnerLoop({ boardSource, runnerSource, seat: 6 });
   assert.equal(replay.evidenceClass, "OFFLINE_RUNNER_LOOP_REPLAY");
   assert.equal(replay.yahooLiveDraft, false);
   assert.equal(replay.yahooTestLeagueCleanAutomationPass, false);
-  assert.equal(replay.accepted, true);
-  assert.equal(replay.completion.picks, 19);
-  assert.equal(replay.completion.poolSize, 120);
-  assert.equal(replay.completion.turns.length, 19);
-  assert.equal(replay.acceptance.onClockOverrideApplied, true);
-  assert.equal(replay.acceptance.everyPanelReadyWithinBudget, true);
-  assert.equal(replay.acceptance.firstTurnPressureNeutral, true);
-  assert.equal(replay.acceptance.laterTurnPressureObserved, true);
-  assert.equal(Object.keys(replay.completion.turns[0].runPressureByPosition).length, 0);
-  assert.equal(replay.completion.turns.slice(1).some((turn) => Object.values(turn.runPressureByPosition).some((value) => value > 0)), true);
-  assert.equal(replay.acceptance.killDuringDecisionWindow, true);
-  assert.equal(replay.acceptance.killProducedNoClick, true);
-  assert.equal(replay.acceptance.realLeagueExecutionDisabled, true);
+  assert.equal(replay.accepted, false);
+  assert.equal(replay.status, "LOCKED");
+  assert.equal(replay.failure, "test_board_scoring_identity_mismatch");
+  assert.equal(replay.completion, null);
 });
