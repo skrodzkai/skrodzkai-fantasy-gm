@@ -28,6 +28,16 @@ test("observed TEST scoring is fingerprinted and never inherits REAL QB, IDP, or
   assert.equal(scoreKickerStatLine({ fieldGoals0To19:0, fieldGoals20To29:10, fieldGoals30To39:10, fieldGoals40To49:5, fieldGoals50Plus:5, extraPointsMade:40 }, rules.kicker), 145);
 });
 
+test("board preserves source expiry and the exact replacement calculation field", () => {
+  const binding={teamCount:10,rosterSlots:["QB"]};
+  const board=fixture({replacementRoster:binding,offenseSnapshot:{observedAt:"2026-08-22T10:00:00Z",
+    players:Array.from({length:10},(_,i)=>({yahooId:String(i+1),name:`Quarterback ${i}`,team:"BUF",position:"QB",yahooProjectedPoints:400-i,injuryStatus:null}))}});
+  assert.deepEqual(board.replacementRoster,binding);
+  assert.deepEqual(board.sourceExpirations.find(s=>s.sourceId==="yahoo-season-projection"),
+    {sourceId:"yahoo-season-projection",observedAt:"2026-08-22T10:00:00Z",maxAgeHours:6});
+  assert.ok(board.sourceExpirations.some(s=>s.sourceId==="yahoo-player-list"&&s.maxAgeHours===6));
+});
+
 test("TEST builder rejects REAL snapshots and rescores independent raw statistics under TEST rules", () => {
   assert.throws(() => fixture({ leagueId:"542830" }), /projection scoring identity mismatch/);
   const identity = testContract.expectedScoring;

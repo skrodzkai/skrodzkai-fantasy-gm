@@ -25,37 +25,41 @@ export function applyFreshAdpSnapshot(baselineRows, snapshot) {
   }
   const byIdentity = new Map();
   const ambiguous = new Set();
+  const keyFor = (row) => {
+    const position = String(row.position ?? "").toUpperCase().replace(/^PK$/, "K");
+    return position === "DEF" ? `${canonicalTeam(row.team)}:DEF` : `${identityKey(row.name, row.team)}:${position}`;
+  };
   for (const player of snapshot.players) {
-    const key = `${identityKey(player.name, player.team)}:${String(player.position ?? "").toUpperCase()}`;
+    const key = keyFor(player);
     if (byIdentity.has(key)) { byIdentity.delete(key); ambiguous.add(key); }
     else if (!ambiguous.has(key)) byIdentity.set(key, player);
   }
   let joined = 0;
   const rows = Array.from(baselineRows ?? [], (row) => {
-    const key = `${identityKey(row.name, row.team)}:${String(row.position ?? "").toUpperCase()}`;
+    const key = keyFor(row);
     const market = byIdentity.get(key);
-    if (!market || !Number.isFinite(Number(market.adp))) return row;
-    joined += 1;
+    const matched = market?.adp != null && market.adp !== "" && Number.isFinite(Number(market.adp));
+    if (matched) joined += 1;
     let payload = {};
     try { payload = row?.payload_json ? JSON.parse(row.payload_json) : {}; } catch { payload = {}; }
     return {
       ...row,
-      adp:Number(market.adp),
-      adp_low:Number.isFinite(Number(market.low)) ? Number(market.low) : row.adp_low,
-      adp_high:Number.isFinite(Number(market.high)) ? Number(market.high) : row.adp_high,
+      adp:matched ? Number(market.adp) : null,
+      adp_low:matched && market.low != null && market.low !== "" && Number.isFinite(Number(market.low)) ? Number(market.low) : null,
+      adp_high:matched && market.high != null && market.high !== "" && Number.isFinite(Number(market.high)) ? Number(market.high) : null,
       payload_json:JSON.stringify({
         ...payload,
-        adp:Number(market.adp),
-        adp_low:Number.isFinite(Number(market.low)) ? Number(market.low) : payload.adp_low,
-        adp_high:Number.isFinite(Number(market.high)) ? Number(market.high) : payload.adp_high,
-        adp_samples:Number.isFinite(Number(market.times_drafted)) ? Number(market.times_drafted) : payload.adp_samples,
-        adp_source:"ffc-adp",
+        adp:matched ? Number(market.adp) : null,
+        adp_low:matched && market.low != null && market.low !== "" && Number.isFinite(Number(market.low)) ? Number(market.low) : null,
+        adp_high:matched && market.high != null && market.high !== "" && Number.isFinite(Number(market.high)) ? Number(market.high) : null,
+        adp_samples:matched && market.times_drafted != null && Number.isFinite(Number(market.times_drafted)) ? Number(market.times_drafted) : null,
+        adp_source:matched ? "ffc-adp" : null,
       }),
     };
   });
   const minimumJoined = Array.from(baselineRows ?? []).length >= 150 ? 100 : 1;
   if (joined < minimumJoined) throw new Error(`FFC ADP identity coverage is too small: ${joined}`);
-  return { rows, joined, ambiguousIdentities:ambiguous.size };
+  return { rows, joined, unmatched:rows.length - joined, ambiguousIdentities:ambiguous.size };
 }
 
 export function adpSourceHealth(receipt, fileStat, asOf, options = {}) {
@@ -79,4 +83,3 @@ export function adpSourceHealth(receipt, fileStat, asOf, options = {}) {
     contentSha256:receipt.contentSha256,
   };
 }
-

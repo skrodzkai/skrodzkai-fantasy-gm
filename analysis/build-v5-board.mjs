@@ -525,6 +525,15 @@ export function assembleV5Board({
     schemaVersion: 2,
     generatedAt: asOf,
     ...scoringIdentity,
+    replacementRoster: replacementRoster ? { teamCount:replacementRoster.teamCount, rosterSlots:[...replacementRoster.rosterSlots] } : null,
+    sourceExpirations: [
+      ...projectionBoard.sourceReceipts.filter((source) => source.fresh || source.family === "yahoo")
+        .map((source) => ({ sourceId:source.sourceId, observedAt:source.updatedAt, maxAgeHours:source.maxAgeHours })),
+      ...(eligibilityObservedAt ? [{ sourceId:"yahoo-eligibility", observedAt:eligibilityObservedAt, maxAgeHours:6 }] : []),
+      ...[...new Map(injuryBoard.players.flatMap((player) => player.evidence.filter((entry) => entry.fresh)
+        .map((entry) => [`${entry.sourceId}:${entry.observedAt}`, { sourceId:entry.sourceId, observedAt:entry.observedAt,
+          maxAgeHours:injuryBoard.freshnessPolicyHours[entry.sourceKind] ?? injuryBoard.freshnessPolicyHours.default }]))).values()],
+    ],
     replacementRanks: LEAGUE_REPLACEMENT_RANKS,
     replacementBySlot: projectionBoard.replacementBySlot,
     rawReplacementBySlot: projectionBoard.rawReplacementBySlot,

@@ -311,7 +311,7 @@ test("grouped weekly scoring matches the ungrouped exact lineup reference", () =
   const reference = pool.map((candidate) => ({
     player: candidate,
     marginalUtility: helpers.optimalRosterUtility([...picks, candidate], config, replacementBySlot) - baseUtility,
-    pAvailableNext: helpers.survivalProbability(candidate, scored.window.nextPick, 0),
+    pAvailableNext: helpers.survivalProbability(candidate, scored.window.nextPick, 0, null, scored.window.currentPick),
   }));
   const nextCandidates = reference.slice().sort((left, right) =>
     right.marginalUtility - left.marginalUtility || left.player.rank - right.player.rank
@@ -361,7 +361,7 @@ test("next-turn bench value matches the same decision made on that next turn", (
   for (const entry of scored.ranked) {
     const remaining = pool.filter((candidate) => candidate !== entry.player);
     const next = helpers.scoreCandidates({ round:3, seat:6, picks:[...picks, entry.player], pool:remaining, config, replacementBySlot:baselines });
-    const expected = next.ranked[0].marginalUtility * helpers.survivalProbability(remaining[0], scored.window.nextPick);
+    const expected = next.ranked[0].marginalUtility * helpers.survivalProbability(remaining[0], scored.window.nextPick, 0, null, scored.window.currentPick);
     assert.ok(Math.abs(entry.expectedNextUtility - expected) < 1e-9);
     assert.ok(entry.expectedNextUtility > 0, "even the weaker backup retains the existing bounded depth value");
   }
@@ -381,8 +381,8 @@ test("lookahead respects next-round specialist policy, including newly unlocked 
   assert.ok(withoutSpecialists.ranked.every((entry) => entry.expectedNextUtility === 0), "round-15 offense cannot be promised when both K and DEF remain");
   const withSpecialists = helpers.scoreCandidates({ round:14, seat:6, picks, pool:[rb, wr, k, def], config, replacementBySlot });
   assert.ok(withSpecialists.ranked.every((entry) => ["RB", "WR"].includes(entry.player.position)), "no early specialist pick");
-  const kSurvival = helpers.survivalProbability(k, withSpecialists.window.nextPick);
-  const defSurvival = helpers.survivalProbability(def, withSpecialists.window.nextPick);
+  const kSurvival = helpers.survivalProbability(k, withSpecialists.window.nextPick, 0, null, withSpecialists.window.currentPick);
+  const defSurvival = helpers.survivalProbability(def, withSpecialists.window.nextPick, 0, null, withSpecialists.window.currentPick);
   const expected = kSurvival * 20 + (1 - kSurvival) * defSurvival * 15;
   assert.ok(withSpecialists.ranked.every((entry) => Math.abs(entry.expectedNextUtility - expected) < 1e-9));
 });
@@ -397,7 +397,7 @@ test("uses the held-out survival packet when its gate is enabled", () => {
       positions: { QB: { sampleCount: 3, scale: 5, values: [{ residual: -10, weight: 1 }, { residual: 0, weight: 1 }, { residual: 10, weight: 1 }] } },
     },
   };
-  assert.equal(helpers.survivalProbability(candidate, 50, 0, survivalCalibration), 0.6);
+  assert.ok(Math.abs(helpers.survivalProbability(candidate, 50, 0, survivalCalibration) - 0.75) < 1e-12);
   const pool = [candidate, ...boardForConfig(mockConfig).slice(0, 8)];
   const result = helpers.scoreCandidates({ round: 3, seat: 6, picks: [], pool, config: mockConfig, replacementBySlot, survivalCalibration });
   assert.equal(result.ranked.find((entry) => entry.player.yahooId === candidate.yahooId).survivalStatus, "HELD_OUT_CALIBRATED_POSITION_RESIDUAL");
@@ -456,6 +456,7 @@ function discoveryFixture({ owned = false, missingFilter = false, allUnavailable
     SKRODZKaiYahooPageReaders:{ readDiscoveryRows:players, readProjectedOrder:() => ({ descending:true }) } };
   const runner = api.create({ configName:"test_league_19_idp", executionMode:"TEST", expectedRoomId:"542830", expectedSeat:6, expectedUrlSeat:3,
     observedTeamCount:12, observedRosterSlots:testConfig.rosterSlots, board, replacementBySlot, scoringIdentity:api.configs.test_league_19_idp.expectedScoring,
+    replacementRoster:{teamCount:12,rosterSlots:testConfig.rosterSlots.filter(s=>s!=="BN")},
     assertRunnerLease:() => true, runtimeAttestation:{ ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"synthetic-12345678", bootedAt:1 },
     selectionHoldMs:0, filterDeadlineMs:500,
   }, environment);
@@ -712,8 +713,75 @@ function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE",
     assertRunnerLease:() => leaseState.current === true,
     runtimeAttestation:{ ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
   }, environment);
-  return { runner, board, getControllerTargets:() => controllerTargets, getControllerOptions:() => controllerOptions, getClearedTimeouts:() => clearedTimeouts, getRowReads:() => rowReads };
+  return { runner, board, getControllerTargets:() => controllerTargets, getControllerOptions:() => controllerOptions, getClearedTimeouts:() => clearedTimeouts, getRowReads:() => rowReads,
+    setSignals(values) { ownedSignalState = values.owned ?? ownedSignalState; autodraftState = values.autodraft ?? autodraftState; queueState = values.queue ?? queueState; } };
 }
+
+test("between decisions a transient unreadable frame suspends actions without killing the run", async () => {
+  for (const signals of [{owned:"INCONSISTENT"}, {autodraft:"UNKNOWN"}, {queue:"UNKNOWN"}]) {
+    const fixture = integrationFixture({ownedSignalState:"OFF_TURN"});
+    fixture.runner.start();
+    try {
+      fixture.setSignals(signals);
+      await new Promise(resolve=>setTimeout(resolve, 65));
+      assert.equal(fixture.runner.getStatus().state, "running");
+      assert.equal(fixture.getRowReads(), 0, "uncertain monitor must not select filters or resolve players");
+      assert.equal(fixture.getControllerTargets(), null);
+      fixture.setSignals({owned:"OWNED",autodraft:"INACTIVE",queue:"EMPTY"});
+      await waitFor(()=>fixture.runner.getStatus().pendingDecision);
+    } finally { fixture.runner.halt("test_complete"); }
+  }
+});
+
+test("uncertain observation cannot delay affirmative danger or survive beyond 250ms", async () => {
+  for (const danger of [{autodraft:"ACTIVE"}, {autodraft:"UNKNOWN",queue:"NONEMPTY_OR_UNKNOWN"}, null]) {
+    const fixture = integrationFixture({ownedSignalState:"OFF_TURN"});
+    fixture.runner.start();
+    try {
+      fixture.setSignals({autodraft:"UNKNOWN"});
+      await new Promise(resolve=>setTimeout(resolve, 40));
+      if (danger) fixture.setSignals({autodraft:"INACTIVE",...danger});
+      await waitFor(()=>fixture.runner.getStatus().state==="failed");
+      assert.equal(fixture.getControllerTargets(), null);
+      assert.match(fixture.runner.getStatus().failure.code, /autodraft|queue/);
+    } finally { fixture.runner.halt("test_complete"); }
+  }
+});
+
+test("conditional survival handles endpoints, long waits, and players already past ADP", () => {
+  const p=helpers.validateBoard([player("RB",1,1,{adpLow:1,adpHigh:8})])[0];
+  for (const [round,seat] of [[1,12],[2,1]]) {
+    const current=helpers.overallPick(round,seat,12);
+    assert.equal(helpers.survivalProbability(p,current+1,0,null,current),1);
+  }
+  const short=helpers.survivalProbability(p,102,0,null,100);
+  const long=helpers.survivalProbability(p,124,0,null,100);
+  assert.ok(short>long && short<1 && long>0);
+  assert.equal(helpers.survivalProbability(p,null,0,null,100),0);
+});
+
+test("unknown state during an owned decision remains immediately terminal", async () => {
+  const fixture=integrationFixture({selectionHoldMs:1200});
+  fixture.runner.start();
+  try {
+    await waitFor(()=>fixture.runner.getStatus().pendingDecision);
+    fixture.setSignals({autodraft:"UNKNOWN"});
+    await waitFor(()=>fixture.runner.getStatus().state==="failed");
+    assert.equal(fixture.getControllerTargets(),null);
+    assert.equal(fixture.runner.getStatus().failure.code,"autodraft_state_unknown_monitor");
+  } finally { fixture.runner.halt("test_complete"); }
+});
+
+test("TEST replacement values bind exact field size and starter slots", () => {
+  for(const teams of [10,12]) {
+    const config={...testConfig,teams};
+    const binding={teamCount:teams,rosterSlots:config.rosterSlots.filter(s=>s!=="BN")};
+    assert.equal(helpers.replacementFailure(config,binding),null);
+    assert.equal(helpers.replacementFailure(config,{...binding,teamCount:11}),"test_replacement_room_mismatch");
+    assert.equal(helpers.replacementFailure(config,{...binding,rosterSlots:["QB"]}),"test_replacement_room_mismatch");
+    assert.equal(helpers.replacementFailure(config,null),"test_replacement_room_mismatch");
+  }
+});
 
 test("a slow panel shortens the optional hold without relaxing the two-second click deadline", async () => {
   const fixture = integrationFixture({ selectionHoldMs:1200, readStallMs:900 });

@@ -81,6 +81,8 @@ function waitingFixture({ teams = 12, starters = "QB, WR, WR, RB, RB, TE, W/R/T,
 function healthyBoard(now = 1_000) {
   return {
     generatedAt: new Date(now - 100).toISOString(),
+    sourceExpirations:[{sourceId:"yahoo",observedAt:new Date(now - 100).toISOString(),maxAgeHours:6}],
+    replacementRoster:{teamCount:12,rosterSlots:["QB","WR","WR","WR","RB","RB","TE","W/R/T","W/R/T","K","DEF","D","D"]},
     marketAdpReceipt: { observedAt:new Date(now - 100).toISOString(), sourceAsOf:new Date(now - 100).toISOString(), rows:218 },
     injuryCoverage: { complete:true, checkedPlayers:872, expectedPlayers:872 },
     byeCoverage: { complete:true, playersWithBye:872, playersTotal:872 },
@@ -96,6 +98,15 @@ function memoryLocalStorage() {
     removeItem: (key) => values.delete(key),
   };
 }
+
+test("required source clocks expire independently of fresh board and ADP generation", () => {
+  const now=Date.parse("2026-09-05T18:00:00Z");
+  const board=healthyBoard(now);
+  assert.equal(helpers.boardHealthGate({...board,sourceExpirations:null},now),"draft_board_source_expirations_missing");
+  board.sourceExpirations=[{sourceId:"yahoo",observedAt:new Date(now-6*3600_000).toISOString(),maxAgeHours:6}];
+  assert.equal(helpers.boardHealthGate(board,now),null);
+  assert.equal(helpers.boardHealthGate(board,now+1),"draft_board_required_source_expired_or_invalid");
+});
 
 test("qualifies only the exact 12-team public mock waiting-room shape", () => {
   const fixture = waitingFixture();

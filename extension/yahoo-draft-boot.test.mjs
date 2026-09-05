@@ -41,6 +41,8 @@ function fixture({ path = "/draftclient/f1/542830/3", bridge = "ok", filled = 0,
   const now = Date.now() - (stale ? 25 * 3600_000 : 1000);
   const board = { leagueId:"542830", scoringModel:"league-two-2026", scoringSchemaHash:configured ? context.SKRODZKaiYahooMockRunner.configs.test_league_19_idp.expectedScoring.scoringSchemaHash : "b".repeat(64), generatedAt:new Date(now).toISOString(),
     marketAdpReceipt:{ observedAt:new Date(now).toISOString(), rows:218 },
+    sourceExpirations:[{sourceId:"yahoo",observedAt:new Date(now).toISOString(),maxAgeHours:6}],
+    replacementRoster:{teamCount:12,rosterSlots:context.SKRODZKaiYahooMockRunner.configs.test_league_19_idp.rosterSlots.filter(s=>s!=="BN")},
     injuryCoverage:{ complete:true, checkedPlayers:6, expectedPlayers:6 }, byeCoverage:{ complete:true, playersWithBye:6, playersTotal:6 }, players:[] };
   if (startable) {
     board.players = ["QB", "RB", "WR", "TE", "K", "DEF", "LB", "CB"].flatMap((position, group) => Array.from({ length:8 }, (_, index) => ({

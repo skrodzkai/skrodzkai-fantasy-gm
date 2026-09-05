@@ -50,7 +50,32 @@ test("fresh FFC ADP replaces only exact current name-team-position market rows",
   const result = applyFreshAdpSnapshot(baseline, snapshot);
   assert.equal(result.rows[0].adp, 7.2);
   assert.equal(JSON.parse(result.rows[0].payload_json).adp_samples, 44);
-  assert.equal(result.rows[1].adp, 88);
+  assert.equal(result.rows[1].adp, null);
+});
+
+test("fresh ADP joins PK and unique team defenses and clears unmatched or ambiguous endpoints", () => {
+  const baseline = [
+    { name:"Ka'imi Fairbairn", team:"HOU", position:"K", adp:142.6 },
+    { name:"Seahawks", team:"SEA", position:"DEF", adp:190 },
+    { name:"Missing Player", team:"BUF", position:"WR", adp:88, adp_low:70, payload_json:JSON.stringify({adp:88,adp_low:70,adp_high:90,adp_samples:5}) },
+    { name:"Duplicate", team:"BUF", position:"WR", adp:40 },
+  ];
+  const snapshot = adpSnapshot();
+  snapshot.players.push({ name:"Ka'imi Fairbairn", team:"HOU", position:"PK", adp:133.8, high:80, low:159 },
+    { name:"Seattle Defense", team:"SEA", position:"DEF", adp:160, high:145, low:180 },
+    { name:"Duplicate", team:"BUF", position:"WR", adp:30 }, { name:"Duplicate", team:"BUF", position:"WR", adp:31 });
+  const result = applyFreshAdpSnapshot(baseline, snapshot);
+  assert.equal(result.joined, 2);
+  assert.equal(result.unmatched, 2);
+  assert.equal(result.ambiguousIdentities, 1);
+  assert.equal(result.rows[0].adp, 133.8);
+  assert.equal(result.rows[0].adp_high, 80);
+  assert.equal(result.rows[1].adp, 160);
+  for (const row of result.rows.slice(2)) {
+    for (const key of ["adp","adp_low","adp_high"]) assert.equal(row[key], null);
+    for (const key of ["adp","adp_low","adp_high","adp_samples","adp_source"]) assert.equal(JSON.parse(row.payload_json)[key], null);
+  }
+  assert.equal(baseline[2].adp, 88);
 });
 
 test("fetches the ESPN PDF once and receipts publisher and retrieval timestamps separately", async () => {

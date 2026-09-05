@@ -667,7 +667,7 @@
     return rbMissing + kDefMissing + idpMissing <= Number(config.rounds) - after.length;
   }
 
-  function survivalProbability(player, nextPick, runPressure = 0, survivalCalibration = null) {
+  function draftPositionTail(player, nextPick, runPressure = 0, survivalCalibration = null) {
     if (!Number.isFinite(nextPick)) return 0;
     const packet = survivalCalibration?.model ? survivalCalibration : null;
     if (packet?.calibration?.enabled && packet.model?.global?.values?.length) {
@@ -697,7 +697,7 @@
       }
       const survivedWeight = index.suffixWeights[low];
       const totalWeight = index.suffixWeights[0];
-      return Math.max(0.01, Math.min(0.99, (survivedWeight + 1) / (totalWeight + 2)));
+      return (survivedWeight + 1) / (totalWeight + 2);
     }
     const observedRange = Number.isFinite(player.adpEarliest) && Number.isFinite(player.adpLatest);
     const mean = observedRange ? (player.adpEarliest + player.adpLatest) / 2 : player.marketMean ?? player.rank;
@@ -705,7 +705,17 @@
       ? Math.max(3, (player.adpLatest - player.adpEarliest) / 3.29)
       : Math.max(6, mean * 0.12);
     const adjustedMean = mean - Math.max(-2, Math.min(2, Number(runPressure) || 0)) * spread * 0.5;
-    return Math.max(0.01, Math.min(0.99, 1 / (1 + Math.exp((nextPick - adjustedMean) / spread))));
+    return 1 / (1 + Math.exp((nextPick - adjustedMean) / spread));
+  }
+
+  function survivalProbability(player, nextPick, runPressure = 0, survivalCalibration = null, currentPick = 1) {
+    if (!Number.isFinite(nextPick)) return 0;
+    if (!Number.isFinite(currentPick) || nextPick <= currentPick) throw new Error("invalid_survival_pick_window");
+    if (nextPick === currentPick + 1) return 1;
+    // Condition on observed availability, advancing only through opposing picks.
+    // Our current selection is not a competing opportunity for an unchosen player.
+    return Math.min(1, draftPositionTail(player, nextPick - 1, runPressure, survivalCalibration) /
+      draftPositionTail(player, currentPick, runPressure, survivalCalibration));
   }
 
   function scoringFailure(config, boardData) {
@@ -714,6 +724,13 @@
     if (!/^[a-f0-9]{64}$/.test(String(expected?.scoringSchemaHash ?? ""))) return "test_scoring_schema_unverified";
     return ["leagueId", "scoringModel", "scoringSchemaHash"].every((key) =>
       String(boardData?.[key] ?? "") === String(expected[key])) ? null : "test_board_scoring_identity_mismatch";
+  }
+
+  function replacementFailure(config, replacementRoster) {
+    if (config.qualification !== "verified-test-room") return null;
+    return replacementRoster?.teamCount === config.teams &&
+      sameSlots(replacementRoster.rosterSlots, config.rosterSlots.filter((slot) => slot !== "BN"))
+      ? null : "test_replacement_room_mismatch";
   }
 
   function compactPlayer(player) {
@@ -839,7 +856,7 @@
           slotIndexes,
           feasibilityKey: `${player.position}:${slotIndexes.join(",")}`,
           contextValueGroups,
-          pAvailableNext: survivalProbability(player, window.nextPick, pressure, survivalCalibration),
+          pAvailableNext: survivalProbability(player, window.nextPick, pressure, survivalCalibration, window.currentPick),
           survivalStatus: survivalCalibration?.calibration?.enabled
             ? survivalCalibration.calibration.positionLayerEnabled
               ? "HELD_OUT_CALIBRATED_POSITION_RESIDUAL"
@@ -1230,6 +1247,8 @@
     if (config.urlTeamId && expectedUrlSeat !== config.urlTeamId) throw new Error("test team ID does not match verified configuration");
     const scoringError = scoringFailure(config, options.scoringIdentity);
     if (scoringError) throw new Error(scoringError);
+    const replacementError = replacementFailure(config, options.replacementRoster);
+    if (replacementError) throw new Error(replacementError);
     if (!sameSlots(observedRosterSlots, config.rosterSlots)) throw new Error(`draft roster shape does not match ${config.name}`);
     if (!Number.isInteger(minimumFallbacks) || minimumFallbacks < 5) throw new Error("minimumFallbacks must be at least 5");
     if (pollMs < 25 || filterDeadlineMs <= 0 || selectionHoldMs < 0 || selectionHoldMs > 1500) {
@@ -1271,7 +1290,9 @@
       const autodraftState = controllerApi.runtime.readAutodraftState(documentRef);
       const queueState = controllerApi.runtime.readQueueState(documentRef);
       if (autodraftState === "ACTIVE") throw new Error(`autodraft_active_${stage}`);
+      if (!["EMPTY", "UNKNOWN"].includes(queueState)) throw new Error(`yahoo_queue_not_empty_or_unknown_${stage}`);
       if (autodraftState !== "INACTIVE") throw new Error(`autodraft_state_unknown_${stage}`);
+      if (queueState === "UNKNOWN") throw new Error(`yahoo_queue_state_unknown_${stage}`);
       if (queueState !== "EMPTY") throw new Error(`yahoo_queue_not_empty_or_unknown_${stage}`);
       return { autodraftState, queueState };
     }
@@ -1287,6 +1308,7 @@
     const runId = environment.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
     const picks = [];
     let monitorId = null;
+    let uncertainSince = null;
     let currentController = null;
     let state = "created";
     let failure = null;
@@ -1686,16 +1708,30 @@
 
     async function advance() {
       if (busy || state !== "running") return;
+      let uncertainty = null;
       try {
         assertDraftSafety("monitor");
       } catch (error) {
-        fail(String(error?.message ?? error));
-        return;
+        const code = String(error?.message ?? error);
+        if (!currentController && !pendingDecision && ["autodraft_state_unknown_monitor", "yahoo_queue_state_unknown_monitor"].includes(code)) uncertainty = code;
+        else { fail(code); return; }
       }
       if (!currentController) {
         if (pendingDecision) return;
         const turnSignal = controllerApi.runtime.readOwnedTurnState(documentRef);
-        if (turnSignal?.state === "INCONSISTENT") return fail("owned_turn_signal_inconsistent", { turnSignal });
+        if (turnSignal?.state === "INCONSISTENT") uncertainty ??= "owned_turn_signal_inconsistent";
+        if (uncertainty) {
+          // No filter writes, candidate resolution, or click retry while a page
+          // frame is unreadable. This is observation, never terminal recovery.
+          if (uncertainSince == null) { uncertainSince = Date.now(); receipt("monitor_observation_paused", { reason:uncertainty, maximumMs:250 }); }
+          if (Date.now() - uncertainSince >= 250) fail(uncertainty, { turnSignal });
+          return;
+        }
+        if (uncertainSince != null) {
+          const elapsedMs = Date.now() - uncertainSince;
+          if (elapsedMs >= 250) return fail("monitor_observation_deadline_exceeded", { elapsedMs });
+          receipt("monitor_observation_resumed", { elapsedMs }); uncertainSince = null;
+        }
         const turn = turnSignal?.state === "OWNED" ? turnSignal.turn : null;
         if (!turn) {
           try {
@@ -1918,6 +1954,7 @@
     overallPick,
     turnWindow,
     scoringFailure,
+    replacementFailure,
   });
 
   root.SKRODZKaiYahooMockRunner = {
@@ -1942,6 +1979,7 @@
       turnWindow,
       survivalProbability,
       scoringFailure,
+      replacementFailure,
       optimalRosterUtility,
       maximumFilledStarterSlots,
       canCompleteRoster,
