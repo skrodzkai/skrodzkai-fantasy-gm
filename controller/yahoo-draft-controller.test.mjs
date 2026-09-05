@@ -141,7 +141,7 @@ async function waitFor(predicate, timeoutMs = 500) {
   assert.fail("condition was not reached before timeout");
 }
 
-for (const { seat, onClock = false, skipDiscovery = false, sparseDiscovery = false } of [{ seat:1 }, { seat:6 }, { seat:12 }, { seat:6, onClock:true }, { seat:6, skipDiscovery:true }, { seat:6, sparseDiscovery:true }, { seat:12, sparseDiscovery:true }]) test(`production ${sparseDiscovery ? "sparse hint uses one receipted fresh fallback" : skipDiscovery ? "non-adjacent stale discovery refuses clean acceptance" : "19-round zero-fallback acceptance"}, slot ${seat}, on-clock choice ${onClock}, 30-second clock (synthetic DOM, not live proof)`, async (t) => {
+for (const { seat, onClock = false, skipDiscovery = false, sparseDiscovery = false, lateSparse = false } of [{ seat:1 }, { seat:6 }, { seat:12 }, { seat:6, onClock:true }, { seat:6, skipDiscovery:true }, { seat:6, sparseDiscovery:true }, { seat:12, sparseDiscovery:true }, { seat:6, lateSparse:true }]) test(`production ${lateSparse ? "forced IDP fallback exhaustion stops without a click" : sparseDiscovery ? "sparse hint uses one receipted fresh fallback" : skipDiscovery ? "non-adjacent stale discovery refuses clean acceptance" : "19-round zero-fallback acceptance"}, slot ${seat}, on-clock choice ${onClock}, 30-second clock (synthetic DOM, not live proof)`, async (t) => {
   const fixtureContext = vm.createContext({ ...context });
   fixtureContext.globalThis = fixtureContext;
   vm.runInContext(runnerSource, fixtureContext);
@@ -152,8 +152,8 @@ for (const { seat, onClock = false, skipDiscovery = false, sparseDiscovery = fal
     Array.from({ length:20 }, (_, index) => ({
       yahooId:String(50000 + positionIndex * 100 + index), name:`${position} Player ${index}`,
       position, team:position === "DEF" ? "" : "BUF", eligible:position === "LB" ? ["LB", "D"] : position === "CB" ? ["CB", "DB", "D"] : [position],
-      rank:positionIndex * 20 + index + 1, projection:500 - positionIndex * 35 - index,
-      replacementPoints:100, vor:400 - positionIndex * 35 - index,
+      rank:positionIndex * 20 + index + 1, projection:lateSparse && positionIndex >= 6 ? 1 : 500 - positionIndex * 35 - index,
+      replacementPoints:100, vor:lateSparse && positionIndex >= 6 ? -99 : 400 - positionIndex * 35 - index,
       adpLow:positionIndex * 20 + index + 10, adpHigh:positionIndex * 20 + index + 30,
       automaticEligible:true, manualEligible:true,
     })));
@@ -212,8 +212,10 @@ for (const { seat, onClock = false, skipDiscovery = false, sparseDiscovery = fal
     }
     if (selector === "button") return [button("Autodraft")];
     if (selector === "tr") {
+      if (lateSparse && rosterIds.length === 17 && document.title.startsWith("YOUR TURN") && select.value === "Defensive Players") return [];
       let visible = rows.filter((row) => !rosterIds.includes(row.entry.yahooId) &&
       (select.value === "All Positions" || (select.value === "Kickers" ? row.entry.position === "K" : select.value === "Team Defenses" ? row.entry.position === "DEF" : ["LB", "CB"].includes(row.entry.position)))).slice(0, 100);
+      if (lateSparse && rosterIds.length === 17 && document.title.startsWith("YOUR TURN")) visible = visible.filter((row) => !["LB", "CB"].includes(row.entry.position));
       if (sparseDiscovery && environment.__skrodzkaiYahooMockExtensionV1?.runner && !document.title.startsWith("YOUR TURN")) {
         visible = visible.filter((row) => ["K", "DEF", "LB", "CB"].includes(row.entry.position) || (row.entry.position === "QB" && row.entry.rank <= 4));
       }
@@ -305,6 +307,17 @@ for (const { seat, onClock = false, skipDiscovery = false, sparseDiscovery = fal
     }
     await waitFor(() => ["completed", "failed"].includes(runner.getStatus().state), 45_000);
     const status = runner.getStatus();
+    if (lateSparse) {
+      assert.equal(status.state, "failed", JSON.stringify(status.failure));
+      assert.equal(clickedIds.length, 17, "no round-18 click after specialist discovery and fallback fail");
+      assert.equal(status.picks.length, 17);
+      assert.equal(status.picks.filter((pick) => ["LB", "CB"].includes(pick.position)).length, 0, "both D slots must be forced in the final two rounds");
+      const fallbacks = runner.exportReceipts().filter((row) => row.kind === "view_fallback_all_positions");
+      assert.equal(fallbacks.length, 1);
+      assert.equal(fallbacks[0].turn, "R18P211");
+      assert.ok(!runner.exportReceipts().some((row) => row.kind === "runner_completed"));
+      return;
+    }
     assert.equal(status.state, "completed", JSON.stringify(status.failure));
     assert.equal(clickedIds.length, 19);
     assert.deepEqual(Array.from(status.picks, (pick) => pick.yahooId), clickedIds);

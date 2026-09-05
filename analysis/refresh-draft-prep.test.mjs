@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 import { SCORING_SCHEMA_HASH } from "./build-v5-board.mjs";
+import { adpSourceHealth } from "./market-adp.mjs";
 import { applyFreshAdpSnapshot, boardMovers, buildHealth, byeCoverage, discoverPreviousPassingBoard, fetchEspnClayPdf, joinEspnRowsToYahoo, joinProjectionRowsToYahoo, loadOrFetchSleeper, publishSuccessfulRun, refreshDraftPrep, renderBoardMovementMarkdown, writeSleeperCache } from "./refresh-draft-prep.mjs";
 
 function response(bytes, headers = {}) {
@@ -24,6 +25,23 @@ function adpSnapshot() {
     players:Array.from({ length:150 }, (_, index) => ({ name:`Player ${index}`, team:"BUF", position:"RB", adp:index + 1, high:index + 1, low:index + 2, times_drafted:10 })),
   };
 }
+
+test("explicit ADP retrieval time survives file copying and preserves the REAL legacy call", () => {
+  const now = "2026-09-05T18:00:00Z";
+  const receipt = { value:adpSnapshot(), contentSha256:"test-hash" };
+  const copiedFile = { mtime:new Date(now) };
+  assert.equal(adpSourceHealth(receipt, copiedFile, now).fresh, true);
+  const stale = adpSourceHealth(receipt, copiedFile, now, { observedAt:"2026-09-04T17:59:59Z" });
+  assert.equal(stale.fresh, false);
+  assert.equal(stale.observedAt, "2026-09-04T17:59:59Z");
+  assert.equal(adpSourceHealth(receipt, copiedFile, now, { observedAt:"invalid" }).fresh, false);
+  const observed = "2026-09-05T17:00:00Z";
+  const health = adpSourceHealth(receipt, copiedFile, now, { observedAt:observed });
+  const joined = applyFreshAdpSnapshot([{ name:"Player 1", team:"BUF", position:"RB", adp:99 }], receipt.value);
+  assert.equal(health.fresh, true);
+  assert.equal(health.observedAt, observed);
+  assert.equal(joined.rows[0].adp, 2);
+});
 
 test("fresh FFC ADP replaces only exact current name-team-position market rows", () => {
   const baseline = [{ name:"Player 1", team:"BUF", position:"RB", adp:99, payload_json:"{}" }, { name:"Player 1", team:"BUF", position:"WR", adp:88, payload_json:"{}" }];

@@ -80,7 +80,12 @@ The repository root is also a dependency-free Manifest V3 extension. Load the re
 The compact `SKRODZKai` command center arms public mocks from `/f1/mock_waiting`. The TEST lane parses `/f1/542830/settings` for the exact roster, 12-team maximum, 60-second clock, and every enabled scoring row in each section. It reads the league-value column, not Yahoo defaults; missing, added, changed, or duplicate rows fail closed. The settings receipt binds the verified scoring hash. Subject to all scoring and board-health gates, TEST may be explicitly armed from `/f1/542830/draft` or the exact prestart draftclient with its verified full snake strip, empty roster, and team 3 at the independently observed snake slot. Each token binds the room, URL team, snake slot, actual team count, and roster shape. An arm failure is terminal; league 420010 is excluded at manifest and runtime layers.
 
 For a separate TEST board, use the existing `analysis/build-v5-board.mjs` CLI
-with `--league-id=542830` and its existing required input paths. Both Yahoo
+with `--league-id=542830`, the observed `--team-count=12` (10–12 supported),
+`--adp=<raw-FFC-JSON>`, `--adp-observed-at=<actual-retrieval-ISO>`, and its
+existing required input paths. `--as-of` must match the current build clock
+within 15 minutes. The shared ADP helper applies exact name/team/position market
+values and carries their freshness/hash receipt into the board; copying an old
+file cannot refresh its explicit observation timestamp. Both Yahoo
 projection snapshots must carry the TEST league/model/schema identity; REAL
 snapshots are rejected, never relabeled. Independent raw statistics are rescored
 using TEST coefficients. Aggregate kicker totals cannot invent distance buckets;
@@ -88,6 +93,25 @@ the REAL-trained IDP calibration is withheld. Freshness, injury, identity,
 multi-source, and export-coverage gates remain in force. The default build and
 `refresh-draft-prep.mjs` remain REAL-only; the TEST builder does not replace the
 bundled board or deploy it.
+
+Yahoo rows with projected `games` use that denominator; invalid or unknown
+explicit games are excluded individually and listed in `projectionDiagnostics`.
+Null games require an explicitly established snapshot `projectionGames` basis;
+do not guess 16 or 17 for team defenses. Legacy inputs that omit the games field
+retain their existing 17-game source contract. Reduced projected games cap weekly
+availability, but do not provide medical clearance: fewer than 16 games without
+an explicit availability disposition remain manual-review only. `PUP-R` maps to
+PUP; injury exclusions and conflicts take precedence in displayed validation.
+Current Yahoo team and eligibility replace stale baseline facts, including old
+specialist and position-fallback channels. Travis Hunter remains manual-only.
+
+Validate the actual result with `export-extension-board.mjs`, then the production
+`boardHealthGate` and TEST `scoringFailure`. Export requires at least 100 usable
+offensive players, 12 kickers, and exactly 32 defenses. A missing source-period
+basis is a data gap, not permission to relax these thresholds. The late-IDP
+negative synthetic fixture forces two open D slots in the last two rounds,
+removes D rows at turn entry and from the fallback, and verifies one receipted
+fallback followed by a stop with no additional click or completion receipt.
 
 On the matching draftclient page the extension:
 
