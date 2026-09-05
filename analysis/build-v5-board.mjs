@@ -6,6 +6,7 @@ import { buildDraftWatchlist, compileInjuryBoard } from "./injury-monitor.mjs";
 import { buildPlayerBoard, IDP_SCORING, KICKER_SCORING, OFFENSE_SCORING } from "./player-intelligence.mjs";
 import { buildWeeklyProjectionProfile, expectedGamesFromInjury } from "./weekly-roster-utility.mjs";
 import { FREE_SOURCE_REGISTRY, validateSourceSnapshot } from "./free-source-registry.mjs";
+import "../controller/yahoo-mock-runner.js";
 
 export const LEAGUE_REPLACEMENT_RANKS = Object.freeze({
   QB: 12,
@@ -152,8 +153,23 @@ export function assembleV5Board({
   externalInjuryReports = [],
   projectionSnapshots = [],
   survivalCalibration = null,
-  replacementRoster = { teamCount: 12, rosterSlots: LEAGUE_STARTER_SLOTS },
+  leagueId = "420010",
+  replacementRoster = undefined,
 }) {
+  if (!["420010", "542830"].includes(leagueId)) throw new Error("unsupported scoring league");
+  const testConfig = globalThis.SKRODZKaiYahooMockRunner.configs.test_league_19_idp;
+  const isTest = leagueId === "542830";
+  const scoring = isTest ? testConfig.scoringRules : { offense:OFFENSE_SCORING, idp:IDP_SCORING, kicker:KICKER_SCORING };
+  const scoringIdentity = isTest ? testConfig.expectedScoring : { leagueId, scoringModel:"2-minute-drillers-2026", scoringSchemaHash:SCORING_SCHEMA_HASH };
+  if (isTest) {
+    if (createHash("sha256").update(JSON.stringify(scoring)).digest("hex") !== scoringIdentity.scoringSchemaHash) throw new Error("TEST scoring contract hash drift");
+    for (const [label, snapshot] of [["offense", offenseSnapshot], ["specialists", specialistSnapshot]]) {
+      if (Object.keys(scoringIdentity).some((key) => snapshot?.[key] !== scoringIdentity[key])) throw new Error(`TEST ${label} projection scoring identity mismatch`);
+    }
+    // The historical IDP model was calibrated on REAL scoring, not TEST.
+    survivalCalibration = null;
+  }
+  if (replacementRoster === undefined) replacementRoster = { teamCount:12, rosterSlots:isTest ? testConfig.rosterSlots.filter((slot) => slot !== "BN") : LEAGUE_STARTER_SLOTS };
   const offenseObservedAt = requireObservedAt(offenseSnapshot, "offenseSnapshot");
   const specialistObservedAt = requireObservedAt(specialistSnapshot, "specialistSnapshot");
   const eligibilityObservedAt = eligibilitySnapshot
@@ -295,6 +311,8 @@ export function assembleV5Board({
         .filter((row) => !hasFiniteProjection(row.projectionGames) || Number(row.projectionGames) > 0)
         .map((row) => ({
           ...row,
+          // TEST rescoring must use raw stats, never an already-scored REAL total.
+          ...(isTest ? { leaguePoints:undefined, perGamePoints:undefined } : {}),
           playerId: row.playerId ?? null,
           acceptedOmissions: row.scoringKind === "idp"
             ? ACCEPTED_IDP_OMISSIONS
@@ -317,6 +335,7 @@ export function assembleV5Board({
     }),
     replacementRoster,
     idpCalibration: survivalCalibration?.idpRanking ?? null,
+    scoring,
   });
 
   const reports = Array.from(externalInjuryReports ?? []);
@@ -480,13 +499,11 @@ export function assembleV5Board({
   return Object.freeze({
     schemaVersion: 2,
     generatedAt: asOf,
-    leagueId: "420010",
-    scoringModel: "2-minute-drillers-2026",
-    scoringSchemaHash: SCORING_SCHEMA_HASH,
+    ...scoringIdentity,
     replacementRanks: LEAGUE_REPLACEMENT_RANKS,
     replacementBySlot: projectionBoard.replacementBySlot,
     rawReplacementBySlot: projectionBoard.rawReplacementBySlot,
-    replacementRankBasis: "joint maximum-weight allocation of every 2 Minute Drillers starter slot",
+    replacementRankBasis: `joint maximum-weight allocation of every ${isTest ? "League Two" : "2 Minute Drillers"} starter slot`,
     specialistRankingBasis: { K: "Yahoo preseason rank; Razzball raw-stat total is a diagnostic challenger", DEF: "Yahoo preseason rank; season aggregates cannot reconstruct weekly scoring", DL: "global-gated IDP decision score, otherwise exact-scored source-family consensus", LB: "global-gated IDP decision score, otherwise exact-scored source-family consensus", DB: "global-gated IDP decision score, otherwise exact-scored source-family consensus" },
     sources: projectionBoard.sourceReceipts,
     snapshotReceipts: {
@@ -551,6 +568,7 @@ async function main() {
     externalInjuryReports,
     survivalCalibration,
     projectionSnapshots,
+    leagueId: args["league-id"] ?? "420010",
   });
   await writeFile(args.output, `${JSON.stringify(board, null, 2)}\n`, "utf8");
   process.stdout.write(

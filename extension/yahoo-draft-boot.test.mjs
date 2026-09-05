@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
+import { withScoringTable } from "../tests/fixtures/league-two-settings.mjs";
+import { makeDraftRail } from "../tests/fixtures/draft-rail.mjs";
 
 const files = ["../controller/yahoo-page-readers.js", "../controller/yahoo-draft-controller.js", "../controller/yahoo-mock-runner.js", "yahoo-mock-extension.js"];
 const sources = await Promise.all(files.map((file) => readFile(new URL(file, import.meta.url), "utf8")));
@@ -16,25 +18,10 @@ function fixture({ path = "/draftclient/f1/542830/3", bridge = "ok", filled = 0,
   const timers = new Map();
   let timerId = 0;
   let runtimeFailure = false;
-  const state = { mode:"UNKNOWN", context:{}, label:"LOCKED", board:[], attestation:null, locked:false };
-  const control = () => ({ disabled:true, textContent:"", addEventListener(_event, handler) { this.handler = handler; } });
-  const rail = {
-    controls:Object.fromEntries(["arm", "export", "halt", "dock", "reload"].map((name) => [name, control()])),
-    getSnapshot:() => state,
-    setMode:(mode) => { state.mode = mode; },
-    setContext:(context) => { Object.assign(state.context, context); },
-    render:(_kind, label, detail) => { Object.assign(state, { label, detail }); },
-    lock:(detail, label = "EXTENSION RELOAD REQUIRED") => { Object.assign(state, { locked:true, label, detail }); rail.controls.arm.disabled = true; },
-    isLocked:() => state.locked,
-    setAttestation:(attestation) => { state.attestation = attestation; },
-    setBoard:(board) => { state.board = board; },
-    setManualHandler() {}, setPinned() {},
-    setReloadHandler() {}, setOpenHandler() {}, setExpanded() {}, setRoster() {}, setBetweenTurns() {}, setWarnings() {}, setRecommendations() {}, addEvent() {},
-  };
+  const { state, rail } = makeDraftRail();
   const context = vm.createContext({ console, Date, URLSearchParams });
   context.globalThis = context;
-  sources.forEach((source, index) => vm.runInContext(configured && index === 2
-    ? source.replace("scoringSchemaHash: null", `scoringSchemaHash: "${"b".repeat(64)}"`) : source, context));
+  sources.forEach((source) => vm.runInContext(source, context));
   const first = [9,6,5,1,7,10,12,3,2,8,11,4].map(String);
   const teams = Array.from({ length:19 }, (_, round) => round % 2 ? [...first].reverse() : first).flat()
     .map((id) => ({ getAttribute:() => id, textContent:id === "3" ? "You" : `Team ${id}` }));
@@ -49,10 +36,10 @@ function fixture({ path = "/draftclient/f1/542830/3", bridge = "ok", filled = 0,
   const sessionStorage = storage();
   const helpers = context.SKRODZKaiYahooMockExtension._test;
   const settingsDoc = { body:{ innerText:"League Name:\tLeague Two\nDraft Type:\tLive Standard Draft\nMax Teams:\t12\nLive Draft Pick Time:\t1 Minute\nPassing Touchdowns\t4\nReceptions Yahoo Default\t1\t0.5\nRoster Positions:\tQB, WR, WR, WR, RB, RB, TE, W/R/T, W/R/T, K, DEF, D, D, BN, BN, BN, BN, BN, BN, IR, IR, IR" } };
-  localStorage.setItem("skrodzkai-yahoo-test-settings-v1", JSON.stringify(helpers.makeTestSettingsReceipt(helpers.parseTestSettings(settingsDoc, { pathname:"/f1/542830/settings" }))));
+  localStorage.setItem("skrodzkai-yahoo-test-settings-v1", JSON.stringify(helpers.makeTestSettingsReceipt(helpers.parseTestSettings(withScoringTable(settingsDoc), { pathname:"/f1/542830/settings" }))));
   const attestation = { ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"synthetic-boot-1234", bootedAt:1 };
   const now = Date.now() - (stale ? 25 * 3600_000 : 1000);
-  const board = { leagueId:"542830", scoringModel:"league-two-2026", scoringSchemaHash:"b".repeat(64), generatedAt:new Date(now).toISOString(),
+  const board = { leagueId:"542830", scoringModel:"league-two-2026", scoringSchemaHash:configured ? context.SKRODZKaiYahooMockRunner.configs.test_league_19_idp.expectedScoring.scoringSchemaHash : "b".repeat(64), generatedAt:new Date(now).toISOString(),
     marketAdpReceipt:{ observedAt:new Date(now).toISOString(), rows:218 },
     injuryCoverage:{ complete:true, checkedPlayers:6, expectedPlayers:6 }, byeCoverage:{ complete:true, playersWithBye:6, playersTotal:6 }, players:[] };
   if (startable) {
@@ -89,7 +76,7 @@ test("production boot exposes TEST scoring refusal before ARM, not a false ready
   assert.equal(f.state.mode, "TEST");
   assert.equal(f.state.context.seat, 8);
   assert.equal(f.state.label, "TEST PREFLIGHT LOCKED");
-  assert.match(f.state.detail, /test_scoring_schema_unverified/);
+  assert.match(f.state.detail, /test_board_scoring_identity_mismatch/);
   assert.equal(f.rail.controls.arm.disabled, true);
 });
 
@@ -98,7 +85,7 @@ test("draft-home cannot advertise ARM while TEST scoring is unverified", async (
   f.environment.document.body.innerText = "SKRODZKai\nLeague Two · 12 Teams · 19 Rounds · 1 minute\nYour Draft Position: 8th";
   await f.boot();
   assert.equal(f.state.label, "TEST PREFLIGHT LOCKED");
-  assert.match(f.state.detail, /test_scoring_schema_unverified/);
+  assert.match(f.state.detail, /test_board_scoring_identity_mismatch/);
   assert.equal(f.rail.controls.arm.disabled, true);
 });
 
@@ -124,6 +111,10 @@ test("synthetic configured startup traverses production bridge, ARM, preparation
     assert.equal(runner.getStatus().urlSeat, 3);
     assert.equal(runner.getStatus().picks.length, 0);
     assert.equal(f.state.label, "RUNNING");
+    runner.stop("synthetic_status_check");
+    // Exercise the production status timer after terminal state, not a regex.
+    for (const callback of [...f.timers.values()]) await callback();
+    assert.equal(f.state.context.armed, false);
   } finally { runner?.stop("synthetic_startup_complete"); }
 });
 

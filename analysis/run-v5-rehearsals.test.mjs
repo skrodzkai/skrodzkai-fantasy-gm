@@ -32,6 +32,6 @@ test("offline runner-loop cannot promote a REAL board into TEST-scored execution
   assert.equal(replay.yahooTestLeagueCleanAutomationPass, false);
   assert.equal(replay.accepted, false);
   assert.equal(replay.status, "LOCKED");
-  assert.equal(replay.failure, "test_scoring_schema_unverified");
+  assert.equal(replay.failure, "test_board_scoring_identity_mismatch");
   assert.equal(replay.completion, null);
 });

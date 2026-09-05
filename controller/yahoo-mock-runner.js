@@ -27,6 +27,44 @@
     );
   }
 
+  // Complete enabled scoring rows observed at Yahoo /f1/542830/settings on
+  // 2026-09-05. Unlisted categories score zero. K/DEF require bucket evidence.
+  const TEST_SCORING_ROWS = Object.freeze({
+    Offense: [
+      ["Passing Yards", "25 yards per point", "passingYards", 0.04], ["Passing Touchdowns", "4", "passingTouchdowns", 4],
+      ["Interceptions", "-1", "interceptions", -1], ["Rushing Yards", "10 yards per point", "rushingYards", 0.1],
+      ["Rushing Touchdowns", "6", "rushingTouchdowns", 6], ["Receptions", "0.5", "receptions", 0.5],
+      ["Receiving Yards", "10 yards per point", "receivingYards", 0.1], ["Receiving Touchdowns", "6", "receivingTouchdowns", 6],
+      ["Return Touchdowns", "6", "returnTouchdowns", 6], ["2-Point Conversions", "2", "twoPointConversions", 2],
+      ["Fumbles Lost", "-2", "fumblesLost", -2], ["Offensive Fumble Return TD", "6", "offensiveFumbleReturnTouchdowns", 6],
+    ],
+    Kickers: [
+      ["Field Goals 0-19 Yards", "3", "fieldGoals0To19", 3], ["Field Goals 20-29 Yards", "3", "fieldGoals20To29", 3],
+      ["Field Goals 30-39 Yards", "3", "fieldGoals30To39", 3], ["Field Goals 40-49 Yards", "4", "fieldGoals40To49", 4],
+      ["Field Goals 50+ Yards", "5", "fieldGoals50Plus", 5], ["Point After Attempt Made", "1", "extraPointsMade", 1],
+    ],
+    "Defense/Special Teams": [
+      ["Sack", "1", "sacks", 1], ["Interception", "2", "interceptions", 2], ["Fumble Recovery", "2", "fumbleRecoveries", 2],
+      ["Touchdown", "6", "touchdowns", 6], ["Safety", "2", "safeties", 2], ["Block Kick", "2", "blockedKicks", 2],
+      ["Kickoff and Punt Return Touchdowns", "6", "returnTouchdowns", 6], ["Points Allowed 0 points", "10", "pointsAllowed0", 10],
+      ["Points Allowed 1-6 points", "7", "pointsAllowed1To6", 7], ["Points Allowed 7-13 points", "4", "pointsAllowed7To13", 4],
+      ["Points Allowed 14-20 points", "1", "pointsAllowed14To20", 1], ["Points Allowed 21-27 points", "0", "pointsAllowed21To27", 0],
+      ["Points Allowed 28-34 points", "-1", "pointsAllowed28To34", -1], ["Points Allowed 35+ points", "-4", "pointsAllowed35Plus", -4],
+      ["Extra Point Returned", "2", "extraPointReturns", 2],
+    ],
+    "Defensive Players": [
+      ["Tackle Solo", "0.5", "soloTackles", 0.5], ["Tackle Assist", "0.25", "assistedTackles", 0.25],
+      ["Sack", "2", "sacks", 2], ["Interception", "3", "interceptions", 3], ["Fumble Force", "2", "forcedFumbles", 2],
+      ["Fumble Recovery", "2", "fumbleRecoveries", 2], ["Defensive Touchdown", "6", "touchdowns", 6], ["Safety", "2", "safeties", 2],
+      ["Pass Defended", "0.25", "passesDefended", 0.25], ["Block Kick", "2", "blockedKicks", 2],
+      ["Tackles for Loss", ".25", "tacklesForLoss", 0.25], ["Turnover Return Yards", "25 yards per point", "turnoverReturnYards", 0.04],
+      ["Extra Point Returned", "2", "extraPointReturns", 2],
+    ],
+  });
+  const TEST_SCORING_RULES = Object.freeze(Object.fromEntries([
+    ["offense", "Offense"], ["idp", "Defensive Players"], ["kicker", "Kickers"], ["teamDefense", "Defense/Special Teams"],
+  ].map(([kind, section]) => [kind, Object.freeze(Object.fromEntries(TEST_SCORING_ROWS[section].map(([, , field, points]) => [field, points])))])));
+
   const CONFIGS = Object.freeze({
     public_mock_15: Object.freeze({
       name: "public_mock_15",
@@ -45,7 +83,9 @@
       name: "test_league_19_idp",
       leagueId: "542830",
       urlTeamId: 3,
-      expectedScoring: Object.freeze({ leagueId: "542830", scoringModel: "league-two-2026", scoringSchemaHash: null }),
+      expectedScoring: Object.freeze({ leagueId: "542830", scoringModel: "league-two-2026", scoringSchemaHash: "ff36e6eb4846e46ccc390343ed1c77e281c26bb028a0cedd3d3b7c313e260a8b" }),
+      scoringRules: TEST_SCORING_RULES,
+      scoringSettingsRows: TEST_SCORING_ROWS,
       minimumTeams: 10,
       maximumTeams: 12,
       rounds: 19,
@@ -1573,12 +1613,21 @@
       const clockAtDecision = assertOwnedClock("at_detection");
       let fallbackReason = null;
       if (executionMode === "TEST") {
-        if (discoveryRound !== turn.round || !discovery || discovery.failure) fallbackReason = discovery?.failure ?? "view_discovery_incomplete_for_current_round";
+        // At a snake endpoint there is no opponent turn in which to rediscover.
+        // Reuse only the immediately preceding round's view hint, after our pick
+        // is confirmed; targets and buttons are still read fresh below.
+        const previous = picks.at(-1);
+        const adjacent = previous && turn.round > 1 && discoveryRound === turn.round - 1 &&
+          previous.turn === `R${turn.round - 1}P${turn.pick - 1}` &&
+          overallPick(turn.round - 1, expectedSeat, config.teams) + 1 === turn.pick;
+        if ((discoveryRound !== turn.round && !adjacent) || !discovery || discovery.failure) fallbackReason = discovery?.failure ?? "view_discovery_incomplete_for_current_round";
         else {
-          const unique = [...new Map(discovery.players.map((player) => [player.yahooId, player])).values()];
+          const drafted = new Set(picks.map((player) => String(player.yahooId)));
+          const unique = [...new Map(discovery.players.filter((player) => !drafted.has(String(player.yahooId))).map((player) => [player.yahooId, player])).values()];
           const hint = buildDecisionLadder({ round:turn.round, seat:expectedSeat, picks, board, availablePlayers:unique,
             minimum:minimumFallbacks, config, replacementBySlot, runPressureByPosition:configuredRunPressure, survivalCalibration });
           filterLabel = playerView(hint.targets[0]);
+          if (adjacent) receipt("adjacent_turn_view_hint", { turn:turn.label, fromRound:discoveryRound, previousTurn:previous.turn, filterLabel, freshTargetsRequired:true });
         }
       }
       let resolved;

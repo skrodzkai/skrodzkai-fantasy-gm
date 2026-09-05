@@ -5,6 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { sourceRuntimeAttestation } from "../analysis/runtime-attestation.mjs";
+import { withScoringTable, scoringRows } from "../tests/fixtures/league-two-settings.mjs";
 
 const source = await readFile(new URL("./yahoo-mock-extension.js", import.meta.url), "utf8");
 const boardSource = await readFile(new URL("./yahoo-mock-board.js", import.meta.url), "utf8");
@@ -27,6 +28,25 @@ vm.runInContext(runnerSource, context);
 vm.runInContext(source, context);
 vm.runInContext(boardSource, context);
 const helpers = context.SKRODZKaiYahooMockExtension._test;
+
+test("TEST preflight checks every scoring row, rejects added/missing rows, and ignores Yahoo-default values", () => {
+  const doc = { body:{ innerText:"League Name:\tLeague Two\nDraft Type:\tLive Standard Draft\nMax Teams:\t12\nLive Draft Pick Time:\t1 Minute\nPassing Touchdowns\t4\nReceptions\t0.5\nRoster Positions:\tQB, WR, WR, WR, RB, RB, TE, W/R/T, W/R/T, K, DEF, D, D, BN, BN, BN, BN, BN, BN, IR, IR, IR" } };
+  const parse = (rows) => helpers.parseTestSettings(withScoringTable(doc, rows), { pathname:"/f1/542830/settings" });
+  assert.equal(parse(scoringRows).ready, true);
+  for (let index = 0; index < scoringRows.length; index++) {
+    if (scoringRows[index][1] === "League Value") continue;
+    const changed = structuredClone(scoringRows);
+    changed[index][1] = "999";
+    assert.equal(parse(changed).ready, false, scoringRows[index][0]);
+    assert.equal(parse(scoringRows.filter((_, offset) => offset !== index)).ready, false);
+  }
+  assert.equal(parse([...scoringRows, ["Unexpected scoring", "1"]]).ready, false);
+  const defaults = scoringRows.map((row) => row.length === 3 && row[1] !== "League Value" ? [row[0], row[1], "999"] : row);
+  assert.equal(parse(defaults).ready, true, "only the league-value column is authoritative");
+  const receipt = helpers.makeTestSettingsReceipt(parse(scoringRows), 1000);
+  assert.equal(helpers.validTestSettingsReceipt({ ...receipt, scoringSchemaHash:null }, 1001), false);
+  assert.equal(helpers.validTestSettingsReceipt({ ...receipt, scoringSchemaHash:"a".repeat(64) }, 1001), false);
+});
 const backgroundContext = { Date, TextEncoder, URL };
 backgroundContext.globalThis = backgroundContext;
 vm.createContext(backgroundContext);
@@ -182,7 +202,7 @@ test("binds League Two team 3 while keeping its live field size and snake slot s
       innerText: "League Name:\tLeague Two\nDraft Type:\tLive Standard Draft\nMax Teams:\t12\nLive Draft Pick Time:\t1 Minute\nPassing Touchdowns\t4\nReceptions Yahoo Default\t1\t0.5\nRoster\u00a0Positions:\tQB, WR, WR, WR, RB, RB, TE, W/R/T, W/R/T, K, DEF, D, D, BN, BN, BN, BN, BN, BN, IR, IR, IR",
     },
   };
-  const settingsSnapshot = helpers.parseTestSettings(settingsDocument, { pathname: "/f1/542830/settings" });
+  const settingsSnapshot = helpers.parseTestSettings(withScoringTable(settingsDocument), { pathname: "/f1/542830/settings" });
   assert.equal(settingsSnapshot.ready, true);
   assert.equal(
     helpers.parseTestSettings({ body: { innerText: settingsDocument.body.innerText.replace("1 Minute\n", "1 Minute, 15 Seconds\n") } }, { pathname: "/f1/542830/settings" }).errors.includes("verified_test_clock_mismatch"),
@@ -208,9 +228,9 @@ test("binds League Two team 3 while keeping its live field size and snake slot s
   assert.equal(helpers.parseTestDraftHome({ body: { innerText: document.body.innerText.replace("SKRODZKai", "Chef Joe") } }, location, settingsReceipt, 1_001).ready, false);
   assert.deepEqual([...snapshot.rosterSlots], [...helpers.testRosterSlots]);
   const board = healthyBoard();
-  assert.throws(() => helpers.makeTestPreflight(snapshot, 1_000, board), /test_scoring_schema_unverified/);
+  assert.throws(() => helpers.makeTestPreflight(snapshot, 1_000, board), /test_board_scoring_identity_mismatch/);
   const preflight = { version:context.SKRODZKaiYahooMockExtension.version, mode:"test_league_19_idp", roomId:"542830", urlSeat:3, seat:4, observedTeamCount:10, observedRosterSlots:snapshot.rosterSlots, expiresAt:14_401_000 };
-  assert.equal(helpers.validateDraftPreflight(preflight, { roomId: "542830", seat: 3 }, 1_001, board), "test_scoring_schema_unverified");
+  assert.equal(helpers.validateDraftPreflight(preflight, { roomId: "542830", seat: 3 }, 1_001, board), "test_board_scoring_identity_mismatch");
   assert.equal(helpers.validateDraftPreflight(preflight, { roomId: "542830", seat: 4 }, 1_001, board), "draft_room_or_url_team_changed");
   assert.equal(
     helpers.parseTestDraftHome({ body: { innerText: document.body.innerText.replace("Your Draft Position: 4th", "Draft position pending") } }, location, settingsReceipt, 1_001).ready,
@@ -234,7 +254,7 @@ test("qualifies the actual TEST prestart snake strip, not Yahoo team number as d
     querySelectorAll:(selector) => selector === '.ys-team[data-id]' ? teams : selector === "select" ? filters : selector === "button" ? buttons : [] };
   // Build the exact existing settings receipt, retaining its validation fields.
   const settingsDocument = { body:{ innerText:"League Name:\tLeague Two\nDraft Type:\tLive Standard Draft\nMax Teams:\t12\nLive Draft Pick Time:\t1 Minute\nPassing Touchdowns\t4\nReceptions Yahoo Default\t1\t0.5\nRoster Positions:\tQB, WR, WR, WR, RB, RB, TE, W/R/T, W/R/T, K, DEF, D, D, BN, BN, BN, BN, BN, BN, IR, IR, IR" } };
-  const receipt = helpers.makeTestSettingsReceipt(helpers.parseTestSettings(settingsDocument, { pathname:"/f1/542830/settings" }), 1_000);
+  const receipt = helpers.makeTestSettingsReceipt(helpers.parseTestSettings(withScoringTable(settingsDocument), { pathname:"/f1/542830/settings" }), 1_000);
   const location = { pathname:"/draftclient/f1/542830/3" };
   const parse = (doc = document, loc = location, r = receipt) => helpers.parseTestDraftClient(doc, loc, r, 1_001);
   assert.deepEqual([...helpers.requiredTestFilterLabels()], ["All Positions", "Kickers", "Team Defenses", "Defensive Players"]);
@@ -242,7 +262,7 @@ test("qualifies the actual TEST prestart snake strip, not Yahoo team number as d
   assert.equal(parse().seat, 8);
   assert.equal(parse().urlSeat, 3);
   assert.equal(parse().teamCount, 12);
-  assert.throws(() => helpers.makeTestPreflight(parse(), 1_001, healthyBoard()), /test_scoring_schema_unverified/);
+  assert.throws(() => helpers.makeTestPreflight(parse(), 1_001, healthyBoard()), /test_board_scoring_identity_mismatch/);
   assert.equal(parse(document, { pathname:"/draftclient/f1/420010/3" }).ready, false);
   assert.equal(parse(document, { pathname:"/draftclient/f1/542830/8" }).ready, false);
   assert.equal(parse(document, location, null).ready, false);

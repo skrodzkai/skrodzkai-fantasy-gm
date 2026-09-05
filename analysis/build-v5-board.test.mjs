@@ -1,7 +1,52 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { scoreOffenseStatLine, scoreIdpStatLine, scoreKickerStatLine } from "./player-intelligence.mjs";
 
 import { assembleV5Board } from "./build-v5-board.mjs";
+
+const testContract = globalThis.SKRODZKaiYahooMockRunner.configs.test_league_19_idp;
+
+test("observed TEST scoring is fingerprinted and never inherits REAL QB, IDP, or kicker rules", () => {
+  const rules = testContract.scoringRules;
+  assert.equal(createHash("sha256").update(JSON.stringify(rules)).digest("hex"), testContract.expectedScoring.scoringSchemaHash);
+  const qb = { passingCompletions:300, passingYards:4000, passingTouchdowns:30, interceptions:10 };
+  assert.equal(scoreOffenseStatLine(qb, rules.offense), 270);
+  assert.equal(scoreOffenseStatLine(qb), 350);
+  const receiver = { receptions:100, receivingYards:1200, receivingTouchdowns:8, receivingHundredYardGames:5 };
+  assert.equal(scoreOffenseStatLine(receiver, rules.offense), 218);
+  assert.equal(scoreOffenseStatLine(receiver), 203);
+  const defender = { soloTackles:100, assistedTackles:40, passesDefended:12, tacklesForLoss:8, turnoverReturnYards:50 };
+  assert.equal(scoreIdpStatLine(defender, rules.idp), 67);
+  assert.equal(scoreIdpStatLine(defender), 85);
+  assert.ok(Number.isNaN(scoreKickerStatLine({ fieldGoalsMade:30, extraPointsMade:40 }, rules.kicker)), "aggregate FG counts cannot invent distance buckets");
+  assert.equal(scoreKickerStatLine({ fieldGoals0To19:0, fieldGoals20To29:10, fieldGoals30To39:10, fieldGoals40To49:5, fieldGoals50Plus:5, extraPointsMade:40 }, rules.kicker), 145);
+});
+
+test("TEST builder rejects REAL snapshots and rescores independent raw statistics under TEST rules", () => {
+  assert.throws(() => fixture({ leagueId:"542830" }), /projection scoring identity mismatch/);
+  const identity = testContract.expectedScoring;
+  const inputs = {
+    leagueId:"542830",
+    offenseSnapshot:{ ...identity, observedAt:"2026-08-22T10:00:00Z", players:[{ yahooId:"1", name:"Quarterback", team:"BUF", position:"QB", yahooProjectedPoints:250, yahooPreseasonRank:4, injuryStatus:null, bye:7 }] },
+    specialistSnapshot:{ ...identity, observedAt:"2026-08-22T10:01:00Z", positions:{} },
+    projectionSnapshots:[{
+      manifest:{ snapshotId:"test-espn", sourceId:"espn-mike-clay", sourceFamily:"espn-clay", sourceAsOf:"2026-08-22T11:00:00Z", retrievedAt:"2026-08-22T11:10:00Z", contentSha256:"a".repeat(64), gamesBasis:"17", projectionPeriod:"2026", licenseUseNote:"synthetic regression" },
+      rows:[{ playerId:"1", name:"Quarterback", position:"QB", team:"BUF", projectionGames:17, scoringKind:"offense", leaguePoints:9999, perGamePoints:9999, stats:{ passingCompletions:300, passingYards:4000, passingTouchdowns:30, interceptions:10 } }],
+    }],
+  };
+  const board = fixture(inputs);
+  assert.equal(board.leagueId, "542830");
+  assert.equal(board.scoringSchemaHash, identity.scoringSchemaHash);
+  assert.equal(board.players[0].consensusPoints, 260);
+  assert.equal(board.players[0].automaticEligible, true);
+  assert.equal(board.survivalCalibration, null);
+  assert.equal(board.projectionModel.idpRanking.globalGate.pass, false);
+  for (const key of Object.keys(identity)) {
+    assert.throws(() => fixture({ ...inputs, specialistSnapshot:{ ...inputs.specialistSnapshot, [key]:"wrong" } }), /projection scoring identity mismatch/);
+  }
+  assert.equal(fixture({ ...inputs, asOf:"2026-08-23T12:00:00Z" }).players[0].automaticEligible, false, "stale TEST data is not executable");
+});
 
 function fixture(overrides = {}) {
   return assembleV5Board({

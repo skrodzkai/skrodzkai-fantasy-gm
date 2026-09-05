@@ -9,14 +9,15 @@ This is a dependency-free, page-resident controller for Yahoo NFL live draft roo
 This repair is not a live-draft qualification. The last TEST draft included a user-confirmed Round 1 Yahoo autopick, manual recovery, and no untouched completed extension export. Do not describe its roster as a clean automated result.
 
 - The compact dock displays the lifecycle label and failure detail directly. Clock verification and identity remain on the compact line; recommendation updates cannot erase failures. ARM (on arm-owner surfaces) and EXPORT are visible without opening the large center.
-- TEST `542830`, Yahoo team `3`, requires its own league/model/schema identity. Its expected schema hash is explicitly **unverified/null**. The bundled board is still REAL `420010` data, not relabeled TEST data. Until a verified TEST schema and matching scored board exist, ARM and acceptance remain blocked. Public mocks rehearse execution, not TEST scoring calibration. Real execution remains disabled.
+- TEST `542830`, Yahoo team `3`, requires its own league/model/schema identity. Its complete enabled scoring rows were observed on 2026-09-05 and fingerprinted in the runner contract. The bundled board is still REAL `420010` data, not relabeled TEST data: TEST ARM remains blocked until a fresh, matching TEST board is built and separately deployed. Public mocks rehearse execution, not TEST scoring calibration. Real execution remains disabled.
 - After initial board preparation, the runner alone controls off-turn view discovery. It reads All Positions, Kickers, Team Defenses, and Defensive Players; the latter requires the observed Proj Pts column in verified descending numeric order. Missing projections remain missing. Coverage means rendered rows, not the complete Yahoo player database. Discovery cancels before another filter write when our turn starts.
 - Off-turn rows only choose a view hint. The owned-turn ladder is rebuilt from fresh, visible, clickable rows in that single view. A failed specialist discovery permits **one** visible, receipted All Positions fallback before any Draft click, requiring five fresh legal targets. The 1.2-second panel and 2-second detection-to-click budgets never restart. This fallback forfeits clean acceptance. Failed All Positions reads, safety failures, or ambiguous/post-click actions stop; they are not retried.
+- At an actual snake endpoint, the immediately preceding round's complete discovery may supply a view hint only after the preceding pick is confirmed and the overall picks are consecutive. Already-picked IDs are removed; no rows or buttons are reused. Non-adjacent or older discovery still fails the freshness gate. Every adjacent hint is receipted.
 - Disappearing rows are not opponent-pick evidence. The extension supplies no live run-pressure inference; only explicitly supplied calibrated pressure may affect survival estimates. No ranking weights changed here.
 - Nonempty initial rosters display RECOVERY REQUIRED. ARM failure is terminal: leave the room, correct preflight, and enter using Yahoo's own draft link under new execution authority. No automatic resume, in-room reload, or retry of ambiguous picks.
 - Failure exports preserve exact room and URL team even if the snake slot or extension attestation is unknown. Unknown values stay null; these exports cannot pass acceptance. Acceptance also checks same-turn view coverage and runtime receipts.
 
-Verification is deliberately separated: startup tests use the existing `_controlApi` seam to exercise production boot/bridge/arm gates, static assertions check dock ownership (not browser rendering), and a synthetic-scoring 19-round fixture exercises production readers/runner/controller at a 30-second clock with adjacent snake turns and a 100-row All Positions limit. None substitutes for an authorized live rehearsal. Merge, deployment, activation, and Yahoo actions are separate gates.
+Verification is deliberately separated: synthetic-page fixtures exercise production boot/bridge/ARM/preparation/runner/controller from slots 1, 6, and 12 at a 30-second clock, with genuine adjacent snake turns and a 100-row All Positions limit. Valid and rejected pre-staged pins use production command handlers. Synthetic final-roster and runtime evidence do not establish a live Yahoo PASS, browser rendering, or installed-extension readiness. Merge, deployment, activation, and Yahoo actions remain separate gates.
 
 - Run only on `/draftclient/f1/<room>/<seat>` after dismissing Yahoo tutorials or dialogs.
 - Prefer Yahoo player IDs. The fallback identity requires the exact displayed Yahoo name, position, and team abbreviation.
@@ -74,9 +75,19 @@ The runner exposes a one-way `halt()` kill switch. A halted runner cannot resume
 
 ## Local Chrome extension
 
-The repository root is also a dependency-free Manifest V3 extension. Load the repository directory as an unpacked extension in Chrome. It requests no general extension permissions and runs MOCK/TEST execution only on Yahoo's public mock waiting room and exact League Two surfaces. Version `0.16.1` keeps an isolated read-only observer on exact real-league 420010 / team 7 surfaces; that content-script set contains no runner, controller, or mutation path. **Reload & Verify** is available only on idle, off-clock TEST/MOCK setup surfaces and is disabled inside the live draft client. It reloads the unpacked extension, refreshes the same Yahoo tab, and requires a new extension-session boot ID plus a healthy manifest-version/runtime-digest handshake before restoring controls. A missing rail after reload means Chrome could not inject the extension and requires manual inspection. Stale, missing, or mismatched attestations remain visibly locked.
+The repository root is also a dependency-free Manifest V3 extension. Load the repository directory as an unpacked extension in Chrome. It requests no general extension permissions and runs MOCK/TEST execution only on Yahoo's public mock waiting room and exact League Two surfaces. Version `0.16.3` keeps an isolated read-only observer on exact real-league 420010 / team 7 surfaces; that content-script set contains no runner, controller, or mutation path. **Reload & Verify** is available only on idle, off-clock TEST/MOCK setup surfaces and is disabled inside the live draft client. It reloads the unpacked extension, refreshes the same Yahoo tab, and requires a new extension-session boot ID plus a healthy manifest-version/runtime-digest handshake before restoring controls. A missing rail after reload means Chrome could not inject the extension and requires manual inspection. Stale, missing, or mismatched attestations remain visibly locked.
 
-The compact `SKRODZKai` command center arms public mocks from `/f1/mock_waiting`. The TEST lane first parses `/f1/542830/settings` for the exact 19-active-slot plus three-IR roster, 12-team maximum, half-PPR scoring, and 60-second clock. These partial settings do not establish a full scoring schema. Subject to all scoring and board-health gates, TEST may be explicitly armed from `/f1/542830/draft` or the exact prestart draftclient with its verified full snake strip, empty roster, and team 3 at the independently observed snake slot. Each token binds the room, URL team, snake slot, actual team count, and roster shape. An arm failure is terminal; league 420010 is excluded at manifest and runtime layers.
+The compact `SKRODZKai` command center arms public mocks from `/f1/mock_waiting`. The TEST lane parses `/f1/542830/settings` for the exact roster, 12-team maximum, 60-second clock, and every enabled scoring row in each section. It reads the league-value column, not Yahoo defaults; missing, added, changed, or duplicate rows fail closed. The settings receipt binds the verified scoring hash. Subject to all scoring and board-health gates, TEST may be explicitly armed from `/f1/542830/draft` or the exact prestart draftclient with its verified full snake strip, empty roster, and team 3 at the independently observed snake slot. Each token binds the room, URL team, snake slot, actual team count, and roster shape. An arm failure is terminal; league 420010 is excluded at manifest and runtime layers.
+
+For a separate TEST board, use the existing `analysis/build-v5-board.mjs` CLI
+with `--league-id=542830` and its existing required input paths. Both Yahoo
+projection snapshots must carry the TEST league/model/schema identity; REAL
+snapshots are rejected, never relabeled. Independent raw statistics are rescored
+using TEST coefficients. Aggregate kicker totals cannot invent distance buckets;
+the REAL-trained IDP calibration is withheld. Freshness, injury, identity,
+multi-source, and export-coverage gates remain in force. The default build and
+`refresh-draft-prep.mjs` remain REAL-only; the TEST builder does not replace the
+bundled board or deploy it.
 
 On the matching draftclient page the extension:
 
@@ -141,8 +152,9 @@ click path:
   rehearsal: stage one valid next-pick pin and, on a different round, one player
   Yahoo has already drafted. The latter must be visibly rejected while the
   unchanged five-target baseline completes the pick. Do not invoke Reload &
-  Verify inside the draft client, and prove the kill switch only in the separate
-  offline rehearsal because a live halt intentionally invalidates a clean run.
+  Verify inside the draft client. The kill-switch regression is in
+  `controller/yahoo-mock-runner.test.mjs`; a live halt intentionally invalidates
+  a clean run.
 - `build-v5-readiness-report.mjs` and `run-v5-rehearsals.mjs` produce the
   sanitized history, specialist-survival, 12-seat roster, concentration, and
   chaos receipts stored outside the repository.

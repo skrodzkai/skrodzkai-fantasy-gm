@@ -83,29 +83,7 @@ function median(values) {
 }
 
 export function scoreOffenseStatLine(stats, scoring = OFFENSE_SCORING) {
-  const rushingYards = finite(stats.rushingYards);
-  const receivingYards = finite(stats.receivingYards);
-  const rushingHundredYardGames = finite(stats.rushingHundredYardGames);
-  const receivingHundredYardGames = finite(stats.receivingHundredYardGames);
-  return (
-    finite(stats.passingCompletions) * scoring.passingCompletions +
-    finite(stats.passingYards) * scoring.passingYards +
-    finite(stats.passingTouchdowns) * scoring.passingTouchdowns +
-    finite(stats.interceptions) * scoring.interceptions +
-    rushingYards * scoring.rushingYards +
-    finite(stats.rushingTouchdowns) * scoring.rushingTouchdowns +
-    rushingHundredYardGames * scoring.rushingHundredYardGames +
-    finite(stats.receptions) * scoring.receptions +
-    receivingYards * scoring.receivingYards +
-    finite(stats.receivingTouchdowns) * scoring.receivingTouchdowns +
-    receivingHundredYardGames * scoring.receivingHundredYardGames +
-    finite(stats.returnYards) * scoring.returnYards +
-    finite(stats.returnTouchdowns) * scoring.returnTouchdowns +
-    finite(stats.twoPointConversions) * scoring.twoPointConversions +
-    finite(stats.fumblesLost) * scoring.fumblesLost +
-    finite(stats.offensiveFumbleReturnTouchdowns) *
-      scoring.offensiveFumbleReturnTouchdowns
-  );
+  return Object.entries(scoring).reduce((points, [field, value]) => points + finite(stats?.[field]) * value, 0);
 }
 
 export function scoreWeeklyOffenseStatLines(weeks, scoring = OFFENSE_SCORING) {
@@ -121,6 +99,10 @@ export function scoreIdpStatLine(stats, scoring = IDP_SCORING) {
 }
 
 export function scoreKickerStatLine(stats, scoring = KICKER_SCORING) {
+  if (!("fieldGoalsMade" in scoring)) {
+    if (Object.keys(scoring).some((field) => !hasFinite(stats?.[field]))) return NaN;
+    return Object.entries(scoring).reduce((points, [field, value]) => points + Number(stats[field]) * value, 0);
+  }
   const missedExtraPoints = finite(stats?.extraPointsMissed, Math.max(0, finite(stats?.extraPointsAttempted) - finite(stats?.extraPointsMade)));
   return finite(stats?.fieldGoalsMade) * scoring.fieldGoalsMade +
     finite(stats?.extraPointsMade) * scoring.extraPointsMade +
@@ -246,21 +228,21 @@ export function deriveJointReplacementLevels({ players, teamCount, rosterSlots, 
   return Object.freeze({ replacementBySlot, assignments, slotCounts });
 }
 
-function projectionPoints(row) {
+function projectionPoints(row, rules) {
   const scoringKind = String(row?.scoringKind ?? "offense").toLowerCase();
   if (!["offense", "idp", "kicker"].includes(scoringKind)) return null;
   if (row?.leaguePoints !== null && row?.leaguePoints !== undefined && row?.leaguePoints !== "" && Number.isFinite(Number(row.leaguePoints))) {
     return Number(row.leaguePoints);
   }
   const stats = row?.stats;
-  if (Array.isArray(row?.weeklyStats)) return scoringKind === "offense" ? scoreWeeklyOffenseStatLines(row.weeklyStats) : null;
+  if (Array.isArray(row?.weeklyStats)) return scoringKind === "offense" ? scoreWeeklyOffenseStatLines(row.weeklyStats, rules.offense) : null;
   if (!stats || typeof stats !== "object") return null;
-  const scoring = scoringKind === "idp" ? IDP_SCORING : scoringKind === "kicker" ? KICKER_SCORING : OFFENSE_SCORING;
+  const scoring = rules[scoringKind];
   const hasScoredStat = Object.keys(scoring).some(
     (key) => stats[key] !== null && stats[key] !== undefined && stats[key] !== "" && Number.isFinite(Number(stats[key])),
   );
   return hasScoredStat
-    ? scoringKind === "idp" ? scoreIdpStatLine(stats) : scoringKind === "kicker" ? scoreKickerStatLine(stats) : scoreOffenseStatLine(stats)
+    ? scoringKind === "idp" ? scoreIdpStatLine(stats, scoring) : scoringKind === "kicker" ? scoreKickerStatLine(stats, scoring) : scoreOffenseStatLine(stats, scoring)
     : null;
 }
 
@@ -268,9 +250,9 @@ function hasFinite(value) {
   return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
 }
 
-function projectionPerGame(row, source) {
+function projectionPerGame(row, source, scoring) {
   if (hasFinite(row?.perGamePoints)) return Number(row.perGamePoints);
-  const seasonPoints = projectionPoints(row);
+  const seasonPoints = projectionPoints(row, scoring);
   if (!Number.isFinite(seasonPoints)) return null;
   const games = hasFinite(row?.projectionGames)
     ? Number(row.projectionGames)
@@ -323,6 +305,7 @@ export function buildPlayerBoard({
   evidencePolicy = null,
   replacementRoster = null,
   idpCalibration = null,
+  scoring = { offense:OFFENSE_SCORING, idp:IDP_SCORING, kicker:KICKER_SCORING },
 }) {
   const now = assertIsoDate(asOf, "asOf");
   if (!Array.isArray(players) || players.length === 0) {
@@ -384,7 +367,7 @@ export function buildPlayerBoard({
     for (const row of rows) {
       const playerId = String(row.playerId ?? "");
       if (!playerById.has(playerId)) continue;
-      const perGamePoints = projectionPerGame(row, source);
+      const perGamePoints = projectionPerGame(row, source, scoring);
       if (!Number.isFinite(perGamePoints)) continue;
       const evidence = evidenceByPlayer.get(playerId) ?? [];
       const omissions = Array.isArray(row.omittedScoringCategories)
@@ -406,7 +389,7 @@ export function buildPlayerBoard({
         idpProfile: String(row?.scoringKind ?? "").toLowerCase() === "idp"
           ? buildIdpSourceProfile({
               stats: row.stats,
-              scoring: IDP_SCORING,
+              scoring: scoring.idp,
               omittedScoringCategories: omissions,
               sourceId,
               projectionGames: row.projectionGames ?? source.projectionGames ?? null,
@@ -591,7 +574,7 @@ export function buildPlayerBoard({
 
   return Object.freeze({
     asOf,
-    scoring: OFFENSE_SCORING,
+    scoring: scoring.offense,
     replacementRanks: { ...replacementRanks },
     replacementByPosition,
     rawReplacementByPosition,

@@ -28,9 +28,9 @@ function addCoverage(receipts) {
   }
 }
 
-function assertOnlyUnverifiedScoring(result) {
-  assert.equal(result.status, "LOCKED");
-  assert.deepEqual(result.errors, ["test_scoring_schema_unverified"]);
+function assertCleanSynthetic(result) {
+  assert.equal(result.status, "PASS");
+  assert.deepEqual(result.errors, []);
 }
 
 test("same-turn view coverage and the visible view-fallback receipt are acceptance gates", () => {
@@ -60,6 +60,7 @@ function validPayload() {
     at: iso(0), runId: runnerRunId, roomId, seat: draftSlot, urlSeat, kind: "runner_started",
     configName: "test_league_19_idp", expectedRoomId: roomId, expectedSeat: draftSlot, expectedUrlSeat: urlSeat,
     observedTeamCount: teamCount, observedRosterSlots: rosterSlots, runtimeAttestation:RUNTIME_ATTESTATION,
+    scoringIdentity:TEST_CONFIG.expectedScoring,
     autodraftState:"INACTIVE", queueState:"EMPTY",
   }];
   const controllerReceipts = [];
@@ -188,7 +189,7 @@ test("intentional on-clock choice outside the baseline is joined to its click", 
   payload.runnerReceipts.push(choice);
   addCoverage(payload.runnerReceipts);
   const result = evaluateTestDraftExport(payload);
-  assertOnlyUnverifiedScoring(result);
+  assertCleanSynthetic(result);
   assert.equal(result.picks[0].replayMode, "ON_CLOCK_OVERRIDE");
   assert.equal(result.picks[0].targetIndex, -1);
   choice.at = iso(950);
@@ -250,7 +251,7 @@ function runtimeFallbackDecision() {
 
 test("otherwise exact completed TEST remains locked until its scoring schema is verified", () => {
   const result = evaluateTestDraftExport(validPayload());
-  assertOnlyUnverifiedScoring(result);
+  assertCleanSynthetic(result);
   assert.equal(result.confirmedPicks, 19);
   assert.equal(result.maxObservedLatencyMs, 200);
   assert.equal(result.counterfactualScoring, "not_available_from_compact_receipts");
@@ -378,7 +379,7 @@ test("acceptance replays an applied manual pin against its receipted Yahoo ID", 
     { at:iso(200), version:"0.16.3", roomId:payload.roomId, seat:payload.seat, kind:"manual_pin_applied", expectedRound:1, chosenYahooId:pinnedId, failure:null },
   );
   const result = evaluateTestDraftExport(payload);
-  assertOnlyUnverifiedScoring(result);
+  assertCleanSynthetic(result);
   assert.equal(result.picks[0].decisionReplay, "MATCH");
 });
 
@@ -390,7 +391,7 @@ test("TEST acceptance requires one rejected pre-staged player to retain the base
     { at:iso(1_800), version:"0.16.3", roomId:payload.roomId, seat:payload.seat, kind:"manual_pin_rejected", expectedRound:2, chosenYahooId:null, failure:"manual_pin_unavailable_or_ineligible", baselineRetained:true },
   );
   const accepted = evaluateTestDraftExport(payload, { requireRejectedOverride:true });
-  assertOnlyUnverifiedScoring(accepted);
+  assertCleanSynthetic(accepted);
   assert.equal(accepted.manualOverride.rejectedReceipts, 1);
 
   payload.extensionReceipts.at(-1).baselineRetained = false;

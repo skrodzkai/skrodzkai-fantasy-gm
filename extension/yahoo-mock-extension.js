@@ -156,7 +156,29 @@
     if (!/Receptions(?:\s+Yahoo Default)?(?:\s+1)?\s+0\.5(?:\s|$)/i.test(body)) errors.push("verified_test_ppr_mismatch");
     if (maximumTeams !== TEST_MAXIMUM_TEAMS) errors.push("test_maximum_team_count_not_12");
     if (!sameSlots(rosterSlots, TEST_SETTINGS_ROSTER_SLOTS)) errors.push("test_roster_shape_mismatch");
-    return { roomId: TEST_LEAGUE_ID, maximumTeams, rosterSlots, activeRosterSlots: rosterSlots.slice(0, TEST_ROSTER_SLOTS.length), errors, ready: errors.length === 0 };
+    const contract = root.SKRODZKaiYahooMockRunner.configs.test_league_19_idp;
+    const expectedRows = contract.scoringSettingsRows;
+    const observedRows = {};
+    let section = null;
+    for (const table of documentRef.querySelectorAll?.("table") ?? []) {
+      for (const row of table.querySelectorAll("tr")) {
+        const cells = Array.from(row.querySelectorAll("th,td"), (cell) => String(cell.innerText ?? "").replace(/\s+/g, " ").trim());
+        const label = cells[0]?.replace(/\s*Yahoo Default$/, "").trim();
+        if (Object.hasOwn(expectedRows, label)) {
+          if (Object.hasOwn(observedRows, label)) errors.push("test_scoring_duplicate_section");
+          section = label;
+          observedRows[section] = [];
+        } else if (section && cells.length >= 2) observedRows[section].push([label, cells[1]]);
+      }
+      section = null;
+    }
+    const valueKey = (value) => String(value).trim() !== "" && Number.isFinite(Number(value)) ? String(Number(value)) : String(value);
+    for (const [name, rows] of Object.entries(expectedRows)) {
+      const observed = observedRows[name] ?? [];
+      if (observed.length !== rows.length || rows.some(([label, value], index) =>
+        observed[index]?.[0] !== label || valueKey(observed[index]?.[1]) !== valueKey(value))) errors.push(`test_scoring_rows_mismatch:${name}`);
+    }
+    return { roomId: TEST_LEAGUE_ID, maximumTeams, rosterSlots, activeRosterSlots: rosterSlots.slice(0, TEST_ROSTER_SLOTS.length), scoringSchemaHash:contract.expectedScoring.scoringSchemaHash, errors, ready: errors.length === 0 };
   }
 
   function makeTestSettingsReceipt(snapshot, now = Date.now()) {
@@ -167,6 +189,7 @@
       observedMaximumTeams: snapshot.maximumTeams,
       observedRosterSlots: [...snapshot.activeRosterSlots],
       observedFullRosterSlots: [...snapshot.rosterSlots],
+      scoringSchemaHash: snapshot.scoringSchemaHash,
       verifiedAt: now,
       expiresAt: now + 4 * 60 * 60 * 1000,
     };
@@ -176,6 +199,8 @@
     return Boolean(
       receipt &&
       receipt.roomId === TEST_LEAGUE_ID &&
+      receipt.version === VERSION &&
+      receipt.scoringSchemaHash === root.SKRODZKaiYahooMockRunner.configs.test_league_19_idp.expectedScoring.scoringSchemaHash &&
       Number(receipt.observedMaximumTeams) === TEST_MAXIMUM_TEAMS &&
       Number(receipt.expiresAt) > now &&
       sameSlots(receipt.observedRosterSlots, TEST_ROSTER_SLOTS) &&
@@ -1645,7 +1670,7 @@
       const kind = status.state === "completed" ? "complete" : status.state === "running" ? "ok" : "bad";
       const roster = controllerApi.runtime.parseRosterCount(environment.document.body?.innerText);
       const decision = runner.exportReceipts().filter((entry) => entry.kind === "runner_turn_resolved").at(-1)?.decision ?? null;
-      rail.setContext({ roomId: room.roomId, seat: draftSeat, league: leagueLabel, round: turn?.round, pick: turn?.pick, clock, clockVerified, ownedTurn: ownedTurnFromRunnerStatus(status), armed: true, autodraftState, queueState, kill: ["halted", "failed"].includes(status.state) });
+      rail.setContext({ roomId: room.roomId, seat: draftSeat, league: leagueLabel, round: turn?.round, pick: turn?.pick, clock, clockVerified, ownedTurn: ownedTurnFromRunnerStatus(status), armed: status.state === "running", autodraftState, queueState, kill: ["halted", "failed"].includes(status.state) });
       rail.setRoster(buildUiRoster(status.picks, rosterSlots), status.picks.at(-1));
       rail.setRecommendations(buildUiRecommendations(board, decision), { fullBoard: board, disagreement: status.failure?.code?.includes("mismatch") });
       rail.setBetweenTurns(buildUiOpponentWindow(decision, executionMode));

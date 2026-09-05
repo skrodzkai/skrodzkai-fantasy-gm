@@ -9,7 +9,7 @@ const replacementBySlot = Object.freeze({
   K: 80, DEF: 75, D: 70, DB: 65, LB: 68, CB: 65, S: 65,
 });
 
-function loadRunner(controllerApi = {}, clock = Date, syntheticScoring = false) {
+function loadRunner(controllerApi = {}, clock = Date) {
   const context = {
     clearInterval,
     console,
@@ -23,7 +23,7 @@ function loadRunner(controllerApi = {}, clock = Date, syntheticScoring = false) 
   };
   context.globalThis = context;
   vm.createContext(context);
-  vm.runInContext(syntheticScoring ? source.replace("scoringSchemaHash: null", `scoringSchemaHash: "${"b".repeat(64)}"`) : source, context);
+  vm.runInContext(source, context);
   return context.SKRODZKaiYahooMockRunner;
 }
 
@@ -420,7 +420,8 @@ test("position runs change acquisition probability, never football projection or
 
 test("filtered rows are not opponent-pick evidence; TEST requires a verified scoring schema", () => {
   assert.equal(helpers.runPressureFromAvailability, undefined);
-  assert.equal(helpers.scoringFailure(testConfig, {}), "test_scoring_schema_unverified");
+  assert.equal(helpers.scoringFailure(testConfig, {}), "test_board_scoring_identity_mismatch");
+  assert.equal(helpers.scoringFailure({ ...testConfig, expectedScoring:{ ...testConfig.expectedScoring, scoringSchemaHash:null } }, {}), "test_scoring_schema_unverified");
   const expectedScoring = { leagueId:"542830", scoringModel:"league-two-2026", scoringSchemaHash:"b".repeat(64) };
   const fixture = { ...testConfig, expectedScoring };
   assert.equal(helpers.scoringFailure(fixture, expectedScoring), null);
@@ -448,7 +449,7 @@ function discoveryFixture({ owned = false, missingFilter = false, allUnavailable
   const controller = { runtime, create() { controllerCreated++; return {
     start() { return this; }, stop() {}, getStatus:() => ({ state:"running", confirmedPicks:0 }), exportReceipts:() => [],
   }; } };
-  const api = loadRunner(controller, Date, true);
+  const api = loadRunner(controller);
   const environment = { document:{ querySelectorAll:() => [select] }, location:{ pathname:"/draftclient/f1/542830/3" },
     localStorage:storageFixture(), crypto, setTimeout, clearTimeout, setInterval, clearInterval,
     Event:class Event { constructor(type) { this.type = type; } }, SKRODZKaiYahooDraftController:controller,
