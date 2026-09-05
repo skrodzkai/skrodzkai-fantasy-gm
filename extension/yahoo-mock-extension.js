@@ -876,9 +876,9 @@
     const urlSeat = draft ? Number(draft[2]) : home && /^\d+$/.test(home[2]) ? Number(home[2]) : roomId === TEST_LEAGUE_ID ? TEST_TEAM_ID : null;
     const activeToken = environment[GLOBAL_KEY]?.token;
     const activeMatches = activeToken && String(activeToken.roomId) === roomId && Number(activeToken.urlSeat ?? activeToken.seat) === urlSeat;
-    const token = activeMatches ? activeToken : readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
-    const tokenMatches = token && String(token.roomId) === roomId && Number(token.urlSeat ?? token.seat) === urlSeat;
-    return { roomId, urlSeat, seat: tokenMatches ? Number(token.seat) : roomId === TEST_LEAGUE_ID ? null : draft ? urlSeat : null };
+    const preflightRecord = activeMatches ? activeToken : readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
+    const tokenMatches = preflightRecord && String(preflightRecord.roomId) === roomId && Number(preflightRecord.urlSeat ?? preflightRecord.seat) === urlSeat;
+    return { roomId, urlSeat, seat: tokenMatches ? Number(preflightRecord.seat) : roomId === TEST_LEAGUE_ID ? null : draft ? urlSeat : null };
   }
 
   function lockExtensionContext(environment, rail, error = null) {
