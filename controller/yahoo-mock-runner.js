@@ -368,15 +368,6 @@
     return Array.from(config?.rosterSlots ?? [], normalize).filter((slot) => !["BN", "IR"].includes(slot));
   }
 
-  function baselineForSlot(slot, replacementBySlot = {}) {
-    const direct = Number(replacementBySlot?.[slot]);
-    if (Number.isFinite(direct)) return direct;
-    const accepted = Object.entries(replacementBySlot ?? {})
-      .filter(([position, value]) => Number.isFinite(Number(value)) && rosterSlotAccepts([position], slot))
-      .map(([, value]) => Number(value));
-    return accepted.length ? Math.max(...accepted) : 0;
-  }
-
   function maximumAssignment(picks, slots, edgeValue) {
     const players = Array.from(picks ?? []).filter((player) => playerEligibility(player).length);
     const source = 0;
@@ -536,18 +527,18 @@
     };
   }
 
-  function optimalRosterUtility(picks, config, replacementBySlot = {}) {
+  function optimalRosterUtility(picks, config) {
     const slots = starterSlots(config);
     const weekly = Array.from(picks ?? []).length > 0 && Array.from(picks ?? []).every((player) => Array.isArray(player.weeklyPoints) && player.weeklyPoints.length === 17);
     if (weekly) {
-      return Array.from({ length: 17 }, (_, weekIndex) => maximumAssignment(picks, slots, (player, slot) => {
+      return Array.from({ length: 17 }, (_, weekIndex) => maximumAssignment(picks, slots, (player) => {
         const projection = Number(player.weeklyPoints[weekIndex]);
-        return Number.isFinite(projection) ? Math.max(0, projection - baselineForSlot(slot, replacementBySlot) / 17) : 0;
+        return Number.isFinite(projection) ? Math.max(0, projection) : 0;
       }).value).reduce((sum, value) => sum + value, 0);
     }
-    return maximumAssignment(picks, slots, (player, slot) => {
+    return maximumAssignment(picks, slots, (player) => {
       const projection = Number(player.projection);
-      return Number.isFinite(projection) ? Math.max(0, projection - baselineForSlot(slot, replacementBySlot)) : 0;
+      return Number.isFinite(projection) ? Math.max(0, projection) : 0;
     }).value;
   }
 
@@ -758,7 +749,7 @@
     };
   }
 
-  function scoreCandidates({ round, seat, picks, pool, config, replacementBySlot, runPressureByPosition = {}, survivalCalibration = null }) {
+  function scoreCandidates({ round, seat, picks, pool, config, runPressureByPosition = {}, survivalCalibration = null }) {
     const startedAt = Date.now();
     const window = turnWindow(round, seat, config.teams, config.rounds);
     const slots = starterSlots(config);
@@ -775,10 +766,11 @@
     }
     const periodContexts = [...groupedPeriods.values()].map((contextPeriods) => {
       const representativePeriod = contextPeriods[0];
-      const valueForProjection = (projection, slot) => {
-        const baseline = baselineForSlot(slot, replacementBySlot) / (representativePeriod == null ? 1 : 17);
-        return Number.isFinite(projection) ? Math.max(0, projection - baseline) : 0;
-      };
+      // Empty slots score zero, not a free replacement starter. Clipping every
+      // below-baseline player to zero let tiny bench bonuses beat filling QB.
+      // Opportunity cost is compared using actual next-turn candidates below;
+      // VOR remains a separate, bounded bench-depth input.
+      const valueForProjection = (projection) => Number.isFinite(projection) ? Math.max(0, projection) : 0;
       const valueForSlot = (player, slot) => {
         const projection = Number(representativePeriod == null ? player.projection : player.weeklyPoints[representativePeriod]);
         return valueForProjection(projection, slot);

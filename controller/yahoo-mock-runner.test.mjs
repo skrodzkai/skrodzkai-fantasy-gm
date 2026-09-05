@@ -32,6 +32,28 @@ const helpers = api._test;
 const mockConfig = api.configs.public_mock_15;
 const testConfig = api.configs.test_league_19_idp;
 
+for (const weekly of [false, true]) test(`sub-replacement QB starter beats extra TE bench depth (${weekly ? "weekly" : "season"})`, () => {
+  const config = api.configs.real_league_19_idp;
+  const make = (position, number, projection, overrides = {}) => player(position, number, number, {
+    projection, perGamePoints:projection / 17, vor:projection - replacementBySlot[position],
+    ...(weekly ? { weeklyPoints:Array(17).fill(projection / 17) } : {}), ...overrides,
+  });
+  // The failed fresh-board path had six RBs and one TE before its last QB
+  // disappeared. A below-baseline starter is not a zero-point empty slot.
+  const picks = [...Array.from({ length:6 }, (_, i) => make("RB", i + 1, 200)), make("TE", 1, 150)];
+  const qb = make("QB", 1, 290);
+  const pool = [qb, make("TE", 2, 139), ...Array.from({ length:5 }, (_, i) => make("WR", i + 1, 160 - i))];
+  const scored = helpers.scoreCandidates({ round:8, seat:1, picks, pool, config, replacementBySlot });
+  const qbEntry = scored.ranked.find(e => e.player === qb);
+  assert.ok(qbEntry.marginalUtility > 289);
+  assert.equal(scored.ranked[0].player.yahooId, qb.yahooId);
+  const baseline = helpers.optimalRosterUtility(picks, config, replacementBySlot);
+  assert.ok(Math.abs(helpers.optimalRosterUtility([...picks, qb], config, replacementBySlot) - baseline - 290) < 1e-8);
+  const reviewedOnly = { ...qb, automaticEligible:false, manualEligible:true };
+  assert.ok(helpers.scoreCandidates({ round:8, seat:1, picks, pool:[reviewedOnly, ...pool.slice(1)], config, replacementBySlot })
+    .ranked.every(e => e.player.yahooId !== reviewedOnly.yahooId));
+});
+
 function player(position, number, rank, overrides = {}) {
   const eligible = position === "LB" ? ["LB", "D"]
     : position === "CB" ? ["CB", "DB", "D"]
@@ -147,7 +169,7 @@ test("keeps one visible position pool while containing autonomous specialists to
   assert.equal(helpers.automaticCandidateAllowed({ player:player("K", 1, 1), round:1, picks:[], config:mockConfig }), true);
 });
 
-test("joint roster utility allocates flex and IDP eligibility instead of comparing raw points", () => {
+test("joint roster utility counts points only in legal flex and IDP slots", () => {
   const config = { ...testConfig, rosterSlots: ["WR", "W/R/T", "D", "DB", "LB", "BN"] };
   const picks = [
     player("WR", 1, 1, { projection: 220, eligible: ["WR"] }),
@@ -155,7 +177,7 @@ test("joint roster utility allocates flex and IDP eligibility instead of compari
     player("LB", 1, 3, { projection: 130, eligible: ["LB", "D"] }),
   ];
   const utility = helpers.optimalRosterUtility(picks, config, replacementBySlot);
-  assert.equal(utility, (220 - 170) + (120 - 65) + (130 - 68));
+  assert.equal(utility, 220 + 120 + 130);
   assert.equal(helpers.maximumFilledStarterSlots(picks, config), 3);
 });
 
@@ -383,7 +405,7 @@ test("lookahead respects next-round specialist policy, including newly unlocked 
   assert.ok(withSpecialists.ranked.every((entry) => ["RB", "WR"].includes(entry.player.position)), "no early specialist pick");
   const kSurvival = helpers.survivalProbability(k, withSpecialists.window.nextPick, 0, null, withSpecialists.window.currentPick);
   const defSurvival = helpers.survivalProbability(def, withSpecialists.window.nextPick, 0, null, withSpecialists.window.currentPick);
-  const expected = kSurvival * 20 + (1 - kSurvival) * defSurvival * 15;
+  const expected = kSurvival * k.projection + (1 - kSurvival) * defSurvival * def.projection;
   assert.ok(withSpecialists.ranked.every((entry) => Math.abs(entry.expectedNextUtility - expected) < 1e-9));
 });
 
