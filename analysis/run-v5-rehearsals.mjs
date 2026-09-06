@@ -66,34 +66,44 @@ function thinnedSpecialistIds(board, seed) {
   return unavailable;
 }
 
-function pressureFromRecentPicks(recentPicks) {
-  const counts = rosterShape(recentPicks);
-  return Object.fromEntries(Object.entries(counts).map(([position, count]) => [position, Math.min(2, Math.max(-2, (count - 1) / 2))]));
+export function chooseOpponentPlayer({ marketOrder, drafted, picks, config, helpers }) {
+  return marketOrder.find((player) => player.manualEligible === true &&
+    !drafted.some((pick) => pick.yahooId === player.yahooId || helpers.sameRosterIdentity(pick, player)) &&
+    helpers.canCompleteRoster({ player, picks, config })) ?? null;
 }
 
-function simulateOne({ board, helpers, config, replacementBySlot, survivalCalibration, seat, seed }) {
+export function simulateOne({ board, helpers, config, replacementBySlot, survivalCalibration, seat, seed }) {
   const validated = helpers.validateBoard(board);
   const unavailableSpecialists = thinnedSpecialistIds(validated, seed);
   const picks = [];
   const opponentPicks = [];
   const draftedByOpponents = new Set();
+  const opponentRosters = new Map(Array.from({ length:config.teams }, (_, index) => [index + 1, []]).filter(([otherSeat]) => otherSeat !== seat));
+  const marketOrder = validated.filter((player) => !unavailableSpecialists.has(player.yahooId))
+    .sort((left, right) => sampledMarketPick(left, seed) - sampledMarketPick(right, seed) || left.rank - right.rank);
+  let lastOverallPick = 0;
+  const draftOpponentsThrough = (lastPick) => {
+    for (let overall = lastOverallPick + 1; overall <= lastPick; overall += 1) {
+      const otherRound = Math.floor((overall - 1) / config.teams) + 1;
+      const offset = (overall - 1) % config.teams;
+      const otherSeat = otherRound % 2 ? offset + 1 : config.teams - offset;
+      const roster = opponentRosters.get(otherSeat);
+      if (!roster) throw new Error(`opponent_simulation_crossed_owned_pick:${overall}`);
+      const player = chooseOpponentPlayer({ marketOrder, drafted:[...picks, ...opponentPicks], picks:roster, config, helpers });
+      if (!player) throw new Error(`opponent_roster_cannot_complete:seat_${otherSeat}:pick_${overall}`);
+      roster.push(player);
+      draftedByOpponents.add(player.yahooId);
+      opponentPicks.push({ ...player, seat:otherSeat, round:otherRound, overallPick:overall });
+    }
+    lastOverallPick = lastPick;
+  };
   for (let round = 1; round <= config.rounds; round += 1) {
     const currentPick = helpers.overallPick(round, seat, config.teams);
-    const opponentPicksBeforeTurn = Math.max(0, currentPick - round);
-    const requiredOpponentPicks = opponentPicksBeforeTurn - opponentPicks.length;
-    const opponentPool = validated
-      .filter((player) => player.automaticEligible === true)
-      .filter((player) => !picks.some((pick) => pick.yahooId === player.yahooId))
-      .filter((player) => !draftedByOpponents.has(player.yahooId))
-      .filter((player) => !unavailableSpecialists.has(player.yahooId))
-      .sort((left, right) => sampledMarketPick(left, seed) - sampledMarketPick(right, seed) || left.rank - right.rank);
-    for (const player of opponentPool.slice(0, requiredOpponentPicks)) {
-      draftedByOpponents.add(player.yahooId);
-      opponentPicks.push(player);
-    }
+    draftOpponentsThrough(currentPick - 1);
     const availablePlayers = validated
       .filter((player) => !picks.some((pick) => pick.yahooId === player.yahooId))
       .filter((player) => !draftedByOpponents.has(player.yahooId))
+      .filter((player) => !opponentPicks.some((pick) => helpers.sameRosterIdentity(pick, player)))
       .filter((player) => !unavailableSpecialists.has(player.yahooId))
       .map((player) => ({ yahooId: player.yahooId, name: player.name, position: player.position, team: player.team }));
     let decision;
@@ -108,7 +118,8 @@ function simulateOne({ board, helpers, config, replacementBySlot, survivalCalibr
         config,
         replacementBySlot,
         survivalCalibration,
-        runPressureByPosition: pressureFromRecentPicks(opponentPicks.slice(-12)),
+        // Match the shipped runner: no observed live run-pressure input exists.
+        runPressureByPosition: {},
       });
     } catch (error) {
       const allowed = helpers.allowedPositions(round, picks, config, seat);
@@ -134,7 +145,9 @@ function simulateOne({ board, helpers, config, replacementBySlot, survivalCalibr
         pAvailableNext: decision.decision.positionLeaders[index]?.pAvailableNext ?? null,
       })),
     });
+    lastOverallPick = currentPick;
   }
+  draftOpponentsThrough(config.teams * config.rounds);
   return {
     simulationId: `seat-${seat}-seed-${seed}`,
     teamCount: config.teams,
@@ -144,6 +157,11 @@ function simulateOne({ board, helpers, config, replacementBySlot, survivalCalibr
     specialistUnavailableCount: unavailableSpecialists.size,
     counts: rosterShape(picks),
     picks,
+    opponents: [...opponentRosters].map(([opponentSeat, roster]) => ({
+      seat:opponentSeat,
+      validRoster:helpers.maximumFilledStarterSlots(roster, config) === config.rosterSlots.filter((slot) => !["BN", "IR"].includes(slot)).length && roster.length === config.rounds,
+      picks:opponentPicks.filter((pick) => pick.seat === opponentSeat).map(({ yahooId, name, position, eligible, automaticEligible, round, overallPick }) => ({ yahooId, name, position, eligible, automaticEligible, round, overallPick })),
+    })),
   };
 }
 
@@ -237,6 +255,7 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     minimumThreeRunningBacks: simulations.every((simulation) => Number(simulation.counts.RB ?? 0) >= 3),
     rosterConstructionVaries: new Set(simulations.map((simulation) => JSON.stringify(simulation.counts))).size > 1,
     thirdTightEndNotDeterministic: simulations.some((simulation) => Number(simulation.counts.TE ?? 0) < 3),
+    opponentRostersValid: simulations.every((simulation) => simulation.opponents.every((opponent) => opponent.validRoster)),
   };
   const chaos = {
     wrongTeamIdentity: { pass: identityChaos.status === "LOCKED", observed: identityChaos },
@@ -260,7 +279,7 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
   return {
     schemaVersion: 4,
     generatedAt,
-    basis: "actual 2 Minute Drillers 19-round roster shape over the current executable unified board, with deterministic observed-ADP removals, explicitly uncalibrated Yahoo-rank fallback where ADP is absent, and 10% deterministic specialist stress thinning; this is offline policy, feasibility, and latency evidence only and does not enable real league 420010",
+    basis: "2 Minute Drillers roster-shape feasibility and compute latency, not predictive draft quality or live proof. Opponents select in deterministic market order from manual-eligible identities, independent of our automatic injury/validation policy; per-seat legal completion uses explicit modelling caps, not observed Yahoo position limits. No opponent round script. Includes uncalibrated rank fallback and 10% specialist stress thinning; live run pressure is zero as deployed. REAL execution remains disabled.",
     accepted,
     simulations: simulations.length,
     seats: 12,
@@ -275,6 +294,7 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     lateRoundDistribution: lateRoundDistribution(simulations),
     openingDistribution: openingDistribution(simulations),
     teamCountContingencies: {
+      evidenceClass:"TEST_ROSTER_SHAPE_ONLY_NOT_REAL_SCORING_QUALIFICATION",
       simulations:contingencies.length,
       byTeams:Object.fromEntries([10, 11, 12].map((teams) => [teams, {
         simulations:contingencies.filter((simulation) => simulation.teamCount === teams).length,
@@ -286,6 +306,7 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     teams: simulations.map((simulation) => ({
       simulationId: simulation.simulationId,
       seat: simulation.seat,
+      opponents: simulation.opponents,
       seed: simulation.seed,
       specialistUnavailableCount: simulation.specialistUnavailableCount,
       counts: simulation.counts,

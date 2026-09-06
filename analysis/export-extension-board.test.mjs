@@ -7,6 +7,17 @@ import { extensionBoardFromV5, renderExtensionBoard, renderOfflineBoardCsv } fro
 
 const controllerSource = await readFile(new URL("../controller/yahoo-mock-runner.js", import.meta.url), "utf8");
 
+test("REAL export is explicitly isolated from the TEST global", () => {
+  const board = { leagueId:"420010", scoringModel:"2-minute-drillers-2026", players:[] };
+  const context = {};
+  vm.createContext(context);
+  vm.runInContext(renderExtensionBoard(board, {mode:"REAL"}), context);
+  assert.equal(context.SKRODZKaiYahooRealBoard.leagueId, "420010");
+  assert.equal(context.SKRODZKaiYahooMockBoard, undefined);
+  assert.throws(() => renderExtensionBoard({...board,leagueId:"542830"}, {mode:"REAL"}), /exact REAL board/);
+  assert.throws(() => renderExtensionBoard(board, {mode:"OTHER"}), /mode/);
+});
+
 function validateWithController(players) {
   const context = { clearInterval, console, crypto, Date, Math, setInterval, setTimeout, SKRODZKaiYahooDraftController: {} };
   context.globalThis = context;

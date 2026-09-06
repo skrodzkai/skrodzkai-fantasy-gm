@@ -414,7 +414,10 @@ export function assembleV5Board({
     const reviewedAvailabilityAssumption = injury.draftAction === "REVIEW" && manualHealthEligible ? 16 : null;
     const injuryGames = expectedGamesFromInjury(injury) ?? reviewedAvailabilityAssumption;
     const expectedGamesThroughWeek17 = injuryGames == null ? null : Math.min(injuryGames, player.yahooProjectedGames ?? 16);
-    const projectedGamesReview = player.yahooProjectedGames != null && player.yahooProjectedGames < 16 && injury.availabilityStatus !== "EXPLICIT";
+    // A valid reduced-games estimate discounts availability; it is not injury
+    // evidence. Affirmative injury restrictions and projection validation remain.
+    const projectedGamesReview = player.yahooProjectedGames != null && player.yahooProjectedGames < 16 &&
+      injury.draftAction !== "CLEAR" && injury.availabilityStatus !== "EXPLICIT";
     const projectionGames = Number(player.expectedGames);
     const hasOutcomeRate = Number.isFinite(projectionGames) && projectionGames > 0;
     const rawWeeklyProfile = Number.isFinite(Number(player.perGamePoints)) && expectedGamesThroughWeek17 != null

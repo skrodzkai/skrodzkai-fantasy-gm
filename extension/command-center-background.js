@@ -16,6 +16,7 @@
     "extension/command-center.js",
     "extension/yahoo-mock-board.js",
     "extension/yahoo-mock-extension.js",
+    "extension/yahoo-real-board.js",
     "extension/yahoo-real-shadow.js",
   ]);
 

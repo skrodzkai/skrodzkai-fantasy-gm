@@ -310,7 +310,7 @@ test("a confirmed target preserves its weekly profile for the following round", 
 });
 
 test("grouped weekly scoring matches the ungrouped exact lineup reference", () => {
-  const weekly = (points, byeIndex = null) => Array.from({ length: 17 }, (_, index) => index === byeIndex ? 0 : points);
+  const weekly = (points, byeIndex = null) => Array.from({ length: 17 }, (_, index) => index === byeIndex ? 0 : points === 1 ? 1 : points + (index * points % 7));
   const config = {
     ...testConfig,
     rounds: 5,
@@ -335,9 +335,6 @@ test("grouped weekly scoring matches the ungrouped exact lineup reference", () =
     marginalUtility: helpers.optimalRosterUtility([...picks, candidate], config, replacementBySlot) - baseUtility,
     pAvailableNext: helpers.survivalProbability(candidate, scored.window.nextPick, 0, null, scored.window.currentPick),
   }));
-  const nextCandidates = reference.slice().sort((left, right) =>
-    right.marginalUtility - left.marginalUtility || left.player.rank - right.player.rank
-  ).slice(0, 6);
   const referenceMarginal = (candidate, roster) => {
     const raw = helpers.optimalRosterUtility([...roster, candidate], config, replacementBySlot) -
       helpers.optimalRosterUtility(roster, config, replacementBySlot);
@@ -350,7 +347,7 @@ test("grouped weekly scoring matches the ungrouped exact lineup reference", () =
     return raw * lineup + Math.max(0, candidate.vor) * depth + Number(candidate.perGamePoints) * depth * 0.1;
   };
   for (const entry of reference) {
-    const alternatives = nextCandidates
+    const alternatives = reference
       .filter((candidate) => candidate !== entry)
       .map((candidate) => ({
         ...candidate,
@@ -367,6 +364,31 @@ test("grouped weekly scoring matches the ungrouped exact lineup reference", () =
     assert.ok(Math.abs(actual.marginalUtility - entry.marginalUtility) < 1e-9);
     assert.ok(Math.abs(actual.expectedNextUtility - expectedNextUtility) < 1e-9);
     assert.ok(Math.abs(actual.decisionScore - (entry.marginalUtility + expectedNextUtility)) < 1e-9);
+  }
+});
+
+for (const weekly of [false, true]) test(`conditional lookahead retains complementary starters and full survival tail (${weekly ? "weekly" : "season"})`, () => {
+  const config = { ...mockConfig, rounds:15, rosterSlots:["QB", "WR", ...Array(13).fill("BN")], positionLimits:{ QB:2, WR:14 } };
+  const make = (position, n, points) => player(position, n, n, {
+    projection:points, perGamePoints:points / 16, vor:0, adpLow:1, adpHigh:12,
+    ...(weekly ? { weeklyPoints:Array.from({length:17}, (_, i) => i === n % 17 ? 0 : points / 16) } : {}),
+  });
+  const pool = helpers.validateBoard([...Array.from({ length:9 }, (_, i) => make("QB", i + 1, 450 - i)),
+    ...Array.from({ length:8 }, (_, i) => make("WR", i + 1, 240 - i))]);
+  for (const seat of [1, 6, 12]) {
+    const scored = helpers.scoreCandidates({ round:1, seat, picks:[], pool, config });
+    const qb = scored.ranked.find((entry) => entry.player.yahooId === pool[0].yahooId);
+    const alternatives = pool.filter((p) => p !== qb.player).map((p) => {
+      const raw = helpers.optimalRosterUtility([qb.player, p], config) - helpers.optimalRosterUtility([qb.player], config);
+      const fills = p.position === "WR";
+      return { value:fills ? raw : raw * 0.35 + p.perGamePoints * 0.06 * 0.1,
+        probability:helpers.survivalProbability(p, scored.window.nextPick, 0, null, scored.window.currentPick), rank:p.rank };
+    }).sort((a, b) => b.value - a.value || a.rank - b.rank);
+    let remaining = 1;
+    const expected = alternatives.reduce((sum, p) => { const value = remaining * p.probability * p.value; remaining *= 1 - p.probability; return sum + value; }, 0);
+    assert.ok(Math.abs(qb.expectedNextUtility - expected) < 1e-7, `seat ${seat}: full conditional reference`);
+    assert.ok(alternatives[0].value > 200, "complementary WR is evaluated despite nine higher pre-pick QB values");
+    if (seat === 12) assert.ok(qb.expectedNextUtility > 200, "adjacent snake picks retain the complementary starter");
   }
 });
 
@@ -479,7 +501,7 @@ function discoveryFixture({ owned = false, missingFilter = false, allUnavailable
   const runner = api.create({ configName:"test_league_19_idp", executionMode:"TEST", expectedRoomId:"542830", expectedSeat:6, expectedUrlSeat:3,
     observedTeamCount:12, observedRosterSlots:testConfig.rosterSlots, board, replacementBySlot, scoringIdentity:api.configs.test_league_19_idp.expectedScoring,
     replacementRoster:{teamCount:12,rosterSlots:testConfig.rosterSlots.filter(s=>s!=="BN")},
-    assertRunnerLease:() => true, runtimeAttestation:{ ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"synthetic-12345678", bootedAt:1 },
+    assertRunnerLease:() => true, runtimeAttestation:{ ok:true, version:"0.16.4", digest:"a".repeat(64), bootId:"synthetic-12345678", bootedAt:1 },
     selectionHoldMs:0, filterDeadlineMs:500,
   }, environment);
   return { runner, calls, select, enterTurn:() => { ownedTurn = true; }, changeQueue:() => { queue = "NONEMPTY_OR_UNKNOWN"; },
@@ -733,7 +755,7 @@ function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE",
     observedTeamCount:12, observedRosterSlots:mockConfig.rosterSlots, minimumFallbacks:5, pollMs:25,
     filterDeadlineMs:500, selectionHoldMs, replacementBySlot, board,
     assertRunnerLease:() => leaseState.current === true,
-    runtimeAttestation:{ ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
+    runtimeAttestation:{ ok:true, version:"0.16.4", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
   }, environment);
   return { runner, board, getControllerTargets:() => controllerTargets, getControllerOptions:() => controllerOptions, getClearedTimeouts:() => clearedTimeouts, getRowReads:() => rowReads,
     setSignals(values) { ownedSignalState = values.owned ?? ownedSignalState; autodraftState = values.autodraft ?? autodraftState; queueState = values.queue ?? queueState; } };

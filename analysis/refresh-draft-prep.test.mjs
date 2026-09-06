@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -302,6 +302,16 @@ test("health fails closed when the draft-signal overlay is absent", () => {
   assert.ok(health.reasons.includes("draft_signal_overlay_missing"));
 });
 
+test("health exposes excluded Yahoo top-100 offense instead of hiding eligibility loss", () => {
+  const health = buildHealth({ generatedAt:"2026-09-05T23:00:00Z", board:{players:[
+    {yahooId:"1",name:"Excluded",position:"QB",yahooPreseasonRank:4,automaticEligible:false,validationStatus:"INJURY_REVIEW",injury:{draftAction:"REVIEW"}},
+    {yahooId:"2",name:"Eligible",position:"WR",yahooPreseasonRank:5,automaticEligible:true},
+    {yahooId:"3",name:"Deep",position:"WR",yahooPreseasonRank:101,automaticEligible:false},
+  ]} });
+  assert.equal(health.eligibility.top100YahooOffenseExclusions.length, 1);
+  assert.equal(health.eligibility.top100YahooOffenseExclusions[0].name, "Excluded");
+});
+
 test("stale caller-supplied Yahoo inputs publish a health-only failure atomically", async () => {
   const now = new Date();
   const allowedRoot = await mkdtemp(join(tmpdir(), "draft-prep-v13-test-"));
@@ -418,6 +428,10 @@ test("a short parsed ESPN snapshot leaves only a health receipt", async () => {
   const runnerPath = join(allowedRoot, "runner.js");
   const baselinePath = await writeJson("baseline.json", []);
   const adpPath = await writeJson("adp.json", adpSnapshot());
+  // This case tests ESPN coverage, not filesystem timestamp precision. The
+  // observed fixture mtime could lead Date.now() by 1ms and fail the ADP gate.
+  const fixtureObservedAt = new Date(Date.parse(generatedAt) - 1000);
+  await utimes(adpPath, fixtureObservedAt, fixtureObservedAt);
   const yahooOffensePath = await writeJson("offense.json", yahoo);
   const yahooSpecialistsPath = await writeJson("specialists.json", yahoo);
   const yahooEligibilityPath = await writeJson("eligibility.json", yahoo);

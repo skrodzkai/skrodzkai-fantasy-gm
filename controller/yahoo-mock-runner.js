@@ -11,7 +11,6 @@
   const PANEL_BUDGET_MS = 1200;
   const TURN_TO_CLICK_BUDGET_MS = 2000;
   const MINIMUM_OWNED_CLOCK_SECONDS = 5;
-  const NEXT_TURN_COMPARISON_POOL = 6;
   const BYE_CONCENTRATION_LIMIT = 2;
   const QB2_SURVIVAL_CLIFF = 0.35;
   const NORMALIZED_VALUE_CACHE = new Map();
@@ -636,14 +635,15 @@
   }
 
   function marginalDraftUtility(player, picks, config, starterMarginalUtility, fillsStarter) {
+    if (fillsStarter) return {marginalUtility:starterMarginalUtility, starterMarginalUtility, benchOpportunityValue:0};
     const benchMultiplier = benchDepthMultiplier(player, picks, config);
     const perGamePoints = Number.isFinite(Number(player.perGamePoints))
       ? Number(player.perGamePoints)
       : Number(player.projection) / Math.max(1, Number(player.expectedGamesThroughWeek17) || 17);
-    const benchOpportunityValue = !fillsStarter && OFFENSE.includes(normalize(player.position))
+    const benchOpportunityValue = OFFENSE.includes(normalize(player.position))
       ? Math.max(0, Number(player.vor) || 0) * benchMultiplier + Math.max(0, perGamePoints) * benchMultiplier * 0.1
       : 0;
-    const lineupUtility = fillsStarter ? starterMarginalUtility : starterMarginalUtility * benchLineupMultiplier(player, picks);
+    const lineupUtility = starterMarginalUtility * benchLineupMultiplier(player, picks);
     return { marginalUtility: lineupUtility + benchOpportunityValue, starterMarginalUtility: lineupUtility, benchOpportunityValue };
   }
 
@@ -776,12 +776,13 @@
         return valueForProjection(projection, slot);
       };
       const profile = assignmentExclusionProfile(picks, slots, valueForSlot);
+      const pairValues = slots.flatMap((_, left) => slots.map((_, right) => profile.utilityWithoutPair(left, right)));
       return {
         periods: contextPeriods,
         valueForProjection,
         baseUtility: profile.baseUtility,
         utilityWithoutSlot: profile.utilityWithoutSlot,
-        utilityWithoutPair: profile.utilityWithoutPair,
+        utilityWithoutPair: (left, right) => pairValues[left * slots.length + right],
       };
     });
     const baseUtility = periodContexts.reduce((sum, context) => sum + context.baseUtility * context.periods.length, 0);
@@ -819,21 +820,19 @@
               group = {
                 projection,
                 count: 0,
-                slotValues: slotIndexes.map((slotIndex) => context.valueForProjection(projection, slots[slotIndex])),
+                periodMask: 0,
+                value: context.valueForProjection(projection),
               };
               byProjection.set(key, group);
             }
             group.count += 1;
+            group.periodMask |= 1 << (period ?? 0);
           }
-          return { groups: [...byProjection.values()], byProjection };
+          return { groups:[...byProjection.values()], withoutCandidate:Math.max(...slotIndexes.map((slotIndex) => context.utilityWithoutSlot[slotIndex])) };
         });
         const withCandidate = periodContexts.reduce((total, context, contextIndex) => {
           for (const group of contextValueGroups[contextIndex].groups) {
-            let periodUtility = context.baseUtility;
-            for (let eligibleIndex = 0; eligibleIndex < slotIndexes.length; eligibleIndex += 1) {
-              const slotIndex = slotIndexes[eligibleIndex];
-              periodUtility = Math.max(periodUtility, context.utilityWithoutSlot[slotIndex] + group.slotValues[eligibleIndex]);
-            }
+            const periodUtility = Math.max(context.baseUtility, contextValueGroups[contextIndex].withoutCandidate + group.value);
             total += periodUtility * group.count;
           }
           return total;
@@ -856,9 +855,6 @@
             : player.marketStatus,
         };
       });
-    const nextCandidateOrder = entries
-      .slice()
-      .sort((left, right) => right.marginalUtility - left.marginalUtility || left.player.rank - right.player.rank);
     const assignmentWithPair = (leftPlayer, rightPlayer, excludedValues, baseline) => {
       let result = baseline;
       const leftEligible = playerEligibility(leftPlayer);
@@ -872,40 +868,41 @@
       }
       return result;
     };
+    // Slot values are actual player points, independent of the eligible slot.
+    // Therefore max(baseWithoutSlots + A + B) equals
+    // max(baseWithoutSlots) + A + B. Cache only the role-pair exclusion maximum,
+    // not every player pair. This removes the repeated slot loops that exceeded
+    // 1s in the full fresh-board rehearsal, without removing any alternative.
+    const pairExclusions = new Map();
     const utilityWithPair = (leftEntry, rightEntry) => {
+      const key = `${leftEntry.feasibilityKey}|${rightEntry.feasibilityKey}`;
+      let exclusions = pairExclusions.get(key);
+      if (!exclusions) {
+        exclusions = periodContexts.map((context) => {
+          let best = Number.NEGATIVE_INFINITY;
+          for (const left of leftEntry.slotIndexes) for (const right of rightEntry.slotIndexes) {
+            if (left !== right) best = Math.max(best, context.utilityWithoutPair(left, right));
+          }
+          return best;
+        });
+        pairExclusions.set(key, exclusions);
+      }
       return periodContexts.reduce((total, context, contextIndex) => {
-        const combinations = new Map();
-        for (const period of context.periods) {
-          const leftProjection = Number(period == null ? leftEntry.player.projection : leftEntry.player.weeklyPoints[period]);
-          const rightProjection = Number(period == null ? rightEntry.player.projection : rightEntry.player.weeklyPoints[period]);
-          const key = `${leftProjection}:${rightProjection}`;
-          let combination = combinations.get(key);
-          if (!combination) {
-            combination = {
-              count: 0,
-              leftValues: leftEntry.contextValueGroups[contextIndex].byProjection.get(String(leftProjection)).slotValues,
-              rightValues: rightEntry.contextValueGroups[contextIndex].byProjection.get(String(rightProjection)).slotValues,
-            };
-            combinations.set(key, combination);
+        // Intersect the already-grouped week sets instead of allocating and
+        // string-keying a new 17-week Map for every pair. This is exact even
+        // when the two players have different byes or weekly point profiles.
+        for (const leftGroup of leftEntry.contextValueGroups[contextIndex].groups) {
+          for (const rightGroup of rightEntry.contextValueGroups[contextIndex].groups) {
+            let mask = leftGroup.periodMask & rightGroup.periodMask;
+            if (!mask) continue;
+            let count = 0;
+            for (; mask; mask &= mask - 1) count += 1;
+            const periodUtility = Math.max(context.baseUtility,
+              leftEntry.contextValueGroups[contextIndex].withoutCandidate + leftGroup.value,
+              rightEntry.contextValueGroups[contextIndex].withoutCandidate + rightGroup.value,
+              exclusions[contextIndex] + leftGroup.value + rightGroup.value);
+            total += periodUtility * count;
           }
-          combination.count += 1;
-        }
-        for (const combination of combinations.values()) {
-          let periodUtility = context.baseUtility;
-          for (let leftIndex = 0; leftIndex < leftEntry.slotIndexes.length; leftIndex += 1) {
-            const left = leftEntry.slotIndexes[leftIndex];
-            periodUtility = Math.max(periodUtility, context.utilityWithoutSlot[left] + combination.leftValues[leftIndex]);
-            for (let rightIndex = 0; rightIndex < rightEntry.slotIndexes.length; rightIndex += 1) {
-              const right = rightEntry.slotIndexes[rightIndex];
-              if (left === right) continue;
-              periodUtility = Math.max(periodUtility, context.utilityWithoutPair(left, right) + combination.leftValues[leftIndex] + combination.rightValues[rightIndex]);
-            }
-          }
-          for (let rightIndex = 0; rightIndex < rightEntry.slotIndexes.length; rightIndex += 1) {
-            const right = rightEntry.slotIndexes[rightIndex];
-            periodUtility = Math.max(periodUtility, context.utilityWithoutSlot[right] + combination.rightValues[rightIndex]);
-          }
-          total += periodUtility * combination.count;
         }
         return total;
       }, 0);
@@ -922,7 +919,7 @@
       if (!nextOptions) {
         nextOptions = [];
         const candidateFeasibility = new Map();
-        if (Number.isFinite(window.nextPick)) for (const candidate of nextCandidateOrder) {
+        if (Number.isFinite(window.nextPick)) for (const candidate of entries) {
           let feasibility = candidateFeasibility.get(candidate.feasibilityKey);
           if (feasibility === undefined) {
             const legal = automaticCandidateAllowed({ player: candidate.player, round: round + 1, picks: picksAfterEntry, config }) &&
@@ -933,21 +930,25 @@
             feasibility = { legal:legal && slots.length - filledAfterPair <= remainingAfterPair, fillsStarter:filledAfterPair > filledAfterEntry };
             candidateFeasibility.set(candidate.feasibilityKey, feasibility);
           }
-          if (feasibility.legal) nextOptions.push({ candidate, fillsStarter:feasibility.fillsStarter });
+          if (feasibility.legal) {
+            // These coefficients depend on the roster's role counts, not the
+            // first player's points. Reusing them avoids repeated full-roster
+            // scans for every pair (the reproduced late-IDP >1s case).
+            const value = marginalDraftUtility(candidate.player, picksAfterEntry, config, 1, feasibility.fillsStarter);
+            nextOptions.push({ candidate, lineupMultiplier:value.starterMarginalUtility, benchOpportunityValue:value.benchOpportunityValue });
+          }
         }
         nextOptionsByEligibility.set(entry.feasibilityKey, nextOptions);
       }
-      const nextCandidates = [];
-      for (const option of nextOptions) {
-        if (option.candidate === entry || sameRosterIdentity(option.candidate.player, entry.player)) continue;
-        nextCandidates.push(option);
-        if (nextCandidates.length === NEXT_TURN_COMPARISON_POOL) break;
-      }
-      const alternatives = nextCandidates
-        .map(({ candidate, fillsStarter }) => ({
-          ...candidate,
-          marginalAfterEntry: marginalDraftUtility(candidate.player, picksAfterEntry, config,
-            Math.max(0, utilityWithPair(entry, candidate) - entry.utilityAfter), fillsStarter).marginalUtility,
+      // Value every legal alternative AFTER this pick. Pre-pick truncation
+      // let same-position leaders hide complementary starters. Keep the full
+      // survival chain: low-survival leaders must not discard the remaining mass.
+      const alternatives = nextOptions
+        .filter(({ candidate }) => candidate !== entry && !sameRosterIdentity(candidate.player, entry.player))
+        .map(({ candidate, lineupMultiplier, benchOpportunityValue }) => ({
+          player:candidate.player,
+          pAvailableNext:candidate.pAvailableNext,
+          marginalAfterEntry: Math.max(0, utilityWithPair(entry, candidate) - entry.utilityAfter) * lineupMultiplier + benchOpportunityValue,
         }))
         .sort((left, right) => right.marginalAfterEntry - left.marginalAfterEntry || left.player.rank - right.player.rank);
       let noneBetter = 1;

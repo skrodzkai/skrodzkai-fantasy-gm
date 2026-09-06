@@ -7,7 +7,7 @@ import "../controller/yahoo-mock-runner.js";
 const TEST_ALLOCATOR = globalThis.SKRODZKaiYahooMockRunner._test.allocateRosterSlots;
 const RUNNER_HELPERS = globalThis.SKRODZKaiYahooMockRunner._test;
 const TEST_CONFIG = globalThis.SKRODZKaiYahooMockRunner.configs.test_league_19_idp;
-const RUNTIME_ATTESTATION = Object.freeze({ ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 });
+const RUNTIME_ATTESTATION = Object.freeze({ ok:true, version:"0.16.4", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 });
 
 const POSITIONS = ["QB", "QB", "RB", "RB", "RB", "RB", "RB", "WR", "WR", "WR", "WR", "WR", "WR", "TE", "K", "DEF", "TE", "D", "LB"];
 const PUBLIC_POSITIONS = ["RB", "WR", "QB", "WR", "RB", "DEF", "TE", "WR", "K", "RB", "WR", "WR", "WR", "RB", "RB"];
@@ -32,6 +32,19 @@ function assertCleanSynthetic(result) {
   assert.equal(result.status, "PASS");
   assert.deepEqual(result.errors, []);
 }
+
+test("decision replay uses the runner's marginal-utility tie-break before static rank", () => {
+  const payload = validPayload();
+  const decision = payload.runnerReceipts.find((row) => row.kind === "runner_turn_resolved").decision;
+  const chosen = decision.chosenYahooId;
+  decision.positionLeaders = [
+    {player:{yahooId:chosen,rank:2},eligible:true,adjustedScore:100,marginalUtility:60},
+    {player:{yahooId:decision.targetYahooIds[1],rank:1},eligible:true,adjustedScore:100,marginalUtility:50},
+  ];
+  assertCleanSynthetic(evaluateTestDraftExport(payload));
+  decision.chosenYahooId = decision.targetYahooIds[1];
+  assert.ok(evaluateTestDraftExport(payload).errors.includes("round_1_decision_replay_mismatch"));
+});
 
 test("same-turn view coverage and the visible view-fallback receipt are acceptance gates", () => {
   for (const mutate of [
@@ -101,7 +114,7 @@ function validPayload() {
     empty:!entry.player,
   }));
   return {
-    extensionVersion: "0.16.3",
+    extensionVersion: "0.16.4",
     runtimeAttestation:RUNTIME_ATTESTATION,
     roomId,
     seat: draftSlot,
@@ -110,7 +123,7 @@ function validPayload() {
     status: { runId: runnerRunId, roomId, seat: draftSlot, urlSeat, state: "completed", picks: picks.map((pick) => ({ ...pick })) },
     runnerReceipts,
     controllerReceipts,
-    extensionReceipts: [{ at:iso(20_500), version:"0.16.3", roomId, seat:draftSlot, urlSeat, runId:runnerRunId, kind:"final_roster_readback", valid:true, finalRosterSlots }],
+    extensionReceipts: [{ at:iso(20_500), version:"0.16.4", roomId, seat:draftSlot, urlSeat, runId:runnerRunId, kind:"final_roster_readback", valid:true, finalRosterSlots }],
   };
 }
 
@@ -158,7 +171,7 @@ function validPublicPayload() {
   addCoverage(runnerReceipts);
   runnerReceipts.push({ at:iso(16_000), runId, roomId, seat, urlSeat:seat, kind:"runner_completed", picks:15, counts });
   return {
-    extensionVersion:"0.16.3",
+    extensionVersion:"0.16.4",
     runtimeAttestation:RUNTIME_ATTESTATION,
     roomId,
     seat,
@@ -168,8 +181,8 @@ function validPublicPayload() {
     runnerReceipts,
     controllerReceipts,
     extensionReceipts:[
-      { at:iso(1_000), version:"0.16.3", roomId, seat, kind:"manual_pin_staged", expectedRound:2, targetYahooIds:[picks[1].yahooId] },
-      { at:iso(2_000), version:"0.16.3", roomId, seat, kind:"manual_pin_applied", expectedRound:2, chosenYahooId:picks[1].yahooId, failure:null },
+      { at:iso(1_000), version:"0.16.4", roomId, seat, kind:"manual_pin_staged", expectedRound:2, targetYahooIds:[picks[1].yahooId] },
+      { at:iso(2_000), version:"0.16.4", roomId, seat, kind:"manual_pin_applied", expectedRound:2, chosenYahooId:picks[1].yahooId, failure:null },
     ],
   };
 }
@@ -304,7 +317,7 @@ test("public mock acceptance does not bind stale manual receipts to the selected
 test("public mock acceptance rejects fabricated final-roster readback evidence", () => {
   const payload = validPublicPayload();
   payload.extensionReceipts.push({
-    at:iso(16_500), version:"0.16.3", roomId:payload.roomId, seat:payload.seat,
+    at:iso(16_500), version:"0.16.4", roomId:payload.roomId, seat:payload.seat,
     runId:"different-run", kind:"final_roster_readback", valid:true, finalRosterSlots:[],
   });
   const result = evaluatePublicMockExport(payload, { requireManualOverride:true });
@@ -375,8 +388,8 @@ test("acceptance replays an applied manual pin against its receipted Yahoo ID", 
   rosterEntry.name = "Pinned Player";
   addCoverage(payload.runnerReceipts);
   payload.extensionReceipts.push(
-    { at:iso(100), version:"0.16.3", roomId:payload.roomId, seat:payload.seat, kind:"manual_pin_staged", expectedRound:1, targetYahooIds:[pinnedId] },
-    { at:iso(200), version:"0.16.3", roomId:payload.roomId, seat:payload.seat, kind:"manual_pin_applied", expectedRound:1, chosenYahooId:pinnedId, failure:null },
+    { at:iso(100), version:"0.16.4", roomId:payload.roomId, seat:payload.seat, kind:"manual_pin_staged", expectedRound:1, targetYahooIds:[pinnedId] },
+    { at:iso(200), version:"0.16.4", roomId:payload.roomId, seat:payload.seat, kind:"manual_pin_applied", expectedRound:1, chosenYahooId:pinnedId, failure:null },
   );
   const result = evaluateTestDraftExport(payload);
   assertCleanSynthetic(result);
@@ -387,8 +400,8 @@ test("TEST acceptance requires one rejected pre-staged player to retain the base
   const payload = validPayload();
   const alreadyDrafted = payload.status.picks[0].yahooId;
   payload.extensionReceipts.push(
-    { at:iso(1_100), version:"0.16.3", roomId:payload.roomId, seat:payload.seat, kind:"manual_pin_staged", expectedRound:2, targetYahooIds:[alreadyDrafted] },
-    { at:iso(1_800), version:"0.16.3", roomId:payload.roomId, seat:payload.seat, kind:"manual_pin_rejected", expectedRound:2, chosenYahooId:null, failure:"manual_pin_unavailable_or_ineligible", baselineRetained:true },
+    { at:iso(1_100), version:"0.16.4", roomId:payload.roomId, seat:payload.seat, kind:"manual_pin_staged", expectedRound:2, targetYahooIds:[alreadyDrafted] },
+    { at:iso(1_800), version:"0.16.4", roomId:payload.roomId, seat:payload.seat, kind:"manual_pin_rejected", expectedRound:2, chosenYahooId:null, failure:"manual_pin_unavailable_or_ineligible", baselineRetained:true },
   );
   const accepted = evaluateTestDraftExport(payload, { requireRejectedOverride:true });
   assertCleanSynthetic(accepted);
