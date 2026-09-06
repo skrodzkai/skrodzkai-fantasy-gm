@@ -1,4 +1,5 @@
-// Offline bookkeeping only. No Yahoo adapter, execution queue, or network access.
+// Offline reference only. No pick log, Yahoo adapter, execution queue, or network.
+export const SCOUT_POSITIONS = ['QB','RB','WR','TE','DEF','IDP','K'];
 export function opponentSummary(card) {
   const entries = Object.entries(card.recentRound1).sort((a,b) => b[1]-a[1] || a[0].localeCompare(b[0]));
   const total = entries.reduce((n,[,count]) => n+count,0);
@@ -17,28 +18,40 @@ export function nextTurns(seat, pick, teams = 12, rounds = 19) {
   return Array.from({length: teams * rounds}, (_, i) => i + 1)
     .filter(n => n >= pick && seatAt(n, teams) === seat);
 }
-export function validateState(value, packet) {
-  if (value?.version !== 1 || value.boardId !== packet.boardId || !Array.isArray(value.picks)) throw Error('This log belongs to a different board or format.');
-  if (value.seat !== null && (!Number.isInteger(value.seat) || value.seat < 1 || value.seat > packet.teams)) throw Error('Invalid snake seat.');
-  const ids = new Set(packet.players.map(p => p.yahooId)), seen = new Set();
-  if (value.picks.length > packet.teams * packet.rounds) throw Error('Too many picks.');
-  for (const id of value.picks) {
-    if (typeof id !== 'string' || !ids.has(id) || seen.has(id)) throw Error('Unknown or duplicate player in log.');
-    seen.add(id);
+export function validateOrder(value, packet) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('Invalid draft order.');
+  const allowed = new Set(['ours', ...(packet.opponents||[]).map(c=>c.managerId)]), seen = new Set(), result = {};
+  for (const [owner,seat] of Object.entries(value)) {
+    if (!allowed.has(owner) || !Number.isInteger(seat) || seat < 1 || seat > packet.teams || seen.has(seat)) throw Error('Each assigned owner needs a unique snake seat, 1–12.');
+    result[owner]=seat; seen.add(seat);
   }
-  return {version:1, boardId:packet.boardId, seat:value.seat, picks:[...value.picks]};
+  return result;
 }
-export function recordPick(state, id, packet) {
-  return validateState({...state, picks:[...state.picks, id]}, packet);
+export function opponentBetween(card, order, round, packet) {
+  const ours=order.ours, theirs=order[card.managerId];
+  if (!ours || !theirs || round < 1 || round >= packet.rounds) return [];
+  const turns=nextTurns(ours,1,packet.teams,packet.rounds);
+  return nextTurns(theirs,turns[round-1]+1,packet.teams,packet.rounds).filter(pick=>pick<turns[round]);
+}
+// First selection per season; undrafted seasons are null and excluded from the median.
+export function firstPickTiming(rows, managerId, seasons, position) {
+  const sample=seasons.filter(year=>year>=2011 && year<=2025);
+  const first=sample.map(season=>{
+    const picks=rows.filter(r=>r.owner_id===managerId && Number(r.season)===season && (r.position===position || (position==='IDP' && ['LB','DB','DL'].includes(r.position)))).map(r=>Number(r.round));
+    if (picks.some(n=>!Number.isInteger(n)||n<1||n>19)) throw Error('Invalid historical pick round.');
+    return {season,round:picks.length?Math.min(...picks):null};
+  });
+  const values=first.map(x=>x.round).filter(n=>n!==null).sort((a,b)=>a-b), mid=Math.floor(values.length/2);
+  return {medianRound:values.length?(values.length%2?values[mid]:(values[mid-1]+values[mid])/2):null,draftedSeasons:values.length,totalSeasons:sample.length,recent:first.filter(x=>x.season>=2021)};
 }
 export function boardReady(packet, now = Date.now()) {
   return packet.health === 'PASS' && Number.isFinite(Date.parse(packet.expiresAt)) && now < Date.parse(packet.expiresAt);
 }
-export function availablePlayers(packet, state, {position='ALL', search='', sort='value'} = {}) {
-  const taken = new Set(state.picks), query = search.trim().toLowerCase();
+export function rankedPlayers(packet, {position='ALL', search='', sort='value'} = {}) {
+  const query = search.trim().toLowerCase();
   const number = (p, key) => typeof p[key] === 'number' && Number.isFinite(p[key]) ? p[key] : -Infinity;
-  return packet.players.filter(p => !taken.has(p.yahooId) &&
-    (position === 'ALL' || p.eligible.includes(position) || p.position === position || (position === 'DL' && p.eligible.some(x => ['DE','DT'].includes(x))) || (position === 'IDP' && p.eligible.some(x => ['D','DL','DE','DT','LB','DB','CB','S'].includes(x)))) &&
+  return packet.players.filter(p =>
+    (position === 'ALL' || p.eligible.includes(position) || p.position === position || (position === 'FLEX' && [...p.eligible,p.position].some(x=>['WR','RB','TE'].includes(x))) || (position === 'DL' && p.eligible.some(x => ['DE','DT'].includes(x))) || (position === 'IDP' && p.eligible.some(x => ['D','DL','DE','DT','LB','DB','CB','S'].includes(x)))) &&
     `${p.name} ${p.team??''}`.toLowerCase().includes(query))
     .sort((a,b) => number(b, sort === 'points' ? 'projection' : 'vor') - number(a, sort === 'points' ? 'projection' : 'vor') || number(b,'projection') - number(a,'projection') || a.yahooId.localeCompare(b.yahooId));
 }
