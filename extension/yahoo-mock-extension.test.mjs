@@ -29,6 +29,44 @@ vm.runInContext(source, context);
 vm.runInContext(boardSource, context);
 const helpers = context.SKRODZKaiYahooMockExtension._test;
 
+test("REAL settings reuse exact identity and remove only the single IR slot", async () => {
+  const isolated = vm.createContext({ console, Date, URLSearchParams });
+  isolated.globalThis = isolated;
+  vm.runInContext(readersSource, isolated);
+  vm.runInContext(runnerSource, isolated);
+  vm.runInContext(await readFile(new URL("./yahoo-real-shadow.js", import.meta.url), "utf8"), isolated);
+  vm.runInContext(source, isolated);
+  const shadow = isolated.SKRODZKaiYahooRealShadow._test;
+  const config = isolated.SKRODZKaiYahooMockRunner.configs.real_league_19_idp;
+  assert.deepEqual(JSON.parse(JSON.stringify(config.expectedScoring)), JSON.parse(JSON.stringify(shadow.scoringIdentity)));
+  const receipt = shadow.settingsReceipt({ ready:true, rosterSlots:shadow.expectedRoster }, 1_000);
+  const valid = value => isolated.SKRODZKaiYahooMockExtension._test.validRealSettingsReceipt(value, 1_001);
+  assert.equal(valid(receipt), true);
+  assert.equal(receipt.rosterSlots.length, 20);
+  assert.equal(receipt.rosterSlots.filter(slot => slot !== "IR").length, 19);
+  for (const bad of [{ ...receipt, teamId:3 }, { ...receipt, scoringSchemaHash:"0".repeat(64) },
+    { ...receipt, rosterSlots:receipt.rosterSlots.filter(slot => slot !== "IR") },
+    { ...receipt, rosterSlots:[...receipt.rosterSlots, "IR"] },
+    { ...receipt, rosterSlots:[...receipt.rosterSlots].reverse() }, { ...receipt, verifiedAt:2_000 }]) {
+    assert.equal(valid(bad), false);
+  }
+});
+
+test("manifest REAL boundaries cover query URLs without admitting team 70 or bare-room execution", async () => {
+  const manifest = JSON.parse(await readFile(new URL("../manifest.json", import.meta.url), "utf8"));
+  const matches = (pattern, url) => new RegExp("^" + pattern.split("*").map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$").test(url);
+  const scripts = url => manifest.content_scripts.filter(entry => entry.matches.some(pattern => matches(pattern, url)) &&
+    !entry.exclude_matches?.some(pattern => matches(pattern, url))).flatMap(entry => entry.js);
+  const base = "https://football.fantasysports.yahoo.com";
+  for (const path of ["/draftclient/f1/420010", "/draftclient/f1/420010?view=test", "/draftclient/f1/420010/7", "/draftclient/f1/420010/7?view=test", "/draftclient/f1/420010/70"]) {
+    assert.equal(scripts(base + path).includes("controller/yahoo-draft-controller.js"), false, path);
+  }
+  for (const path of ["/draftclient/f1/420010/7?view=test", "/f1/420010/7?view=test"]) {
+    assert.equal(scripts(base + path).includes("extension/yahoo-real-shadow.js"), true, path);
+  }
+  for (const path of ["/draftclient/f1/420010/70", "/f1/420010/70"]) assert.deepEqual(scripts(base + path), []);
+});
+
 test("REAL command-center handlers cannot route commands to any TEST runner", async () => {
   const nodes = new Map();
   const node = (key) => {
@@ -290,7 +328,7 @@ test("qualifies the actual TEST prestart snake strip, not Yahoo team number as d
   const receipt = helpers.makeTestSettingsReceipt(helpers.parseTestSettings(withScoringTable(settingsDocument), { pathname:"/f1/542830/settings" }), 1_000);
   const location = { pathname:"/draftclient/f1/542830/3" };
   const parse = (doc = document, loc = location, r = receipt) => helpers.parseTestDraftClient(doc, loc, r, 1_001);
-  assert.deepEqual([...helpers.requiredTestFilterLabels()], ["All Positions", "Kickers", "Team Defenses", "Defensive Players"]);
+  assert.deepEqual([...helpers.requiredFilterLabels()], ["All Positions", "Kickers", "Team Defenses", "Defensive Players"]);
   assert.equal(parse().ready, true);
   assert.equal(parse().seat, 8);
   assert.equal(parse().urlSeat, 3);
@@ -396,6 +434,8 @@ test("manifest has only the two public-mock surfaces plus the exact verified tes
     "https://football.fantasysports.yahoo.com/draftclient/f1/*",
   ]);
   assert.deepEqual(manifest.content_scripts[0].exclude_matches, [
+    "https://football.fantasysports.yahoo.com/draftclient/f1/420010",
+    "https://football.fantasysports.yahoo.com/draftclient/f1/420010?*",
     "https://football.fantasysports.yahoo.com/draftclient/f1/420010/*",
   ]);
   assert.equal(manifest.content_scripts[0].world, undefined);
@@ -410,8 +450,10 @@ test("manifest has only the two public-mock surfaces plus the exact verified tes
     "https://football.fantasysports.yahoo.com/f1/420010/settings*",
     "https://football.fantasysports.yahoo.com/f1/420010/draft*",
     "https://football.fantasysports.yahoo.com/f1/420010/7",
+    "https://football.fantasysports.yahoo.com/f1/420010/7?*",
     "https://football.fantasysports.yahoo.com/f1/420010/7/*",
     "https://football.fantasysports.yahoo.com/draftclient/f1/420010/7",
+    "https://football.fantasysports.yahoo.com/draftclient/f1/420010/7?*",
     "https://football.fantasysports.yahoo.com/draftclient/f1/420010/7/*",
   ]);
   assert.deepEqual(manifest.content_scripts[1].js, [

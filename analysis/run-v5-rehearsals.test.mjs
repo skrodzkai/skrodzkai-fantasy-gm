@@ -1,14 +1,23 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import vm from "node:vm";
+import {createHash} from "node:crypto";
+import {renderExtensionBoard} from "./export-extension-board.mjs";
+import {LEAGUE_STARTER_SLOTS} from "./build-v5-board.mjs";
 
 import { buildRehearsalReport, chooseOpponentPlayer, loadRuntime, replayRunnerLoop } from "./run-v5-rehearsals.mjs";
 
-const boardSource = await readFile(new URL("../extension/yahoo-mock-board.js", import.meta.url), "utf8");
+// Historical committed fixture predates separate globals. Explicitly migrate it
+// in this test only; production refuses the old mixed binding.
+const fixture=vm.createContext({});
+vm.runInContext(await readFile(new URL("../extension/yahoo-mock-board.js", import.meta.url), "utf8"),fixture);
+const boardSource=renderExtensionBoard({...fixture.SKRODZKaiYahooMockBoard,
+  replacementRoster:{teamCount:12,rosterSlots:LEAGUE_STARTER_SLOTS}}, {mode:"REAL"});
 const runnerSource = await readFile(new URL("../controller/yahoo-mock-runner.js", import.meta.url), "utf8");
 
 test("opponents can select our manual-only stars but obey their own roster completion", () => {
-  const { runner } = loadRuntime(boardSource, runnerSource);
+  const { runner } = loadRuntime(boardSource, runnerSource,"REAL");
   const config = { ...runner.configs.public_mock_15, rounds:2, rosterSlots:["QB", "WR"], positionLimits:{QB:2,WR:2} };
   const make = (id, position, automaticEligible) => ({ yahooId:id, name:`Player ${id}`, team:"BUF", position, eligible:[position], rank:Number(id), projection:100, manualEligible:true, automaticEligible });
   const [qb, manual, wr] = runner.decision.validateBoard([make("1","QB",true), make("2","QB",false), make("3","WR",true)]);
@@ -18,7 +27,7 @@ test("opponents can select our manual-only stars but obey their own roster compl
   assert.ok(ourDecision.targets.every((p) => p.yahooId !== manual.yahooId));
 });
 
-test("current bundled board completes the 30-second rehearsal with two fresh families", () => {
+test("historical fixture completes roster-policy rehearsal, not fresh-data or live qualification", () => {
   const report = buildRehearsalReport({ boardSource, runnerSource, generatedAt: "2026-08-27T03:37:20Z" });
   assert.equal(report.accepted, true);
   assert.equal(report.policyChecks.realLeagueExecutionDisabled, true);
@@ -32,14 +41,18 @@ test("current bundled board completes the 30-second rehearsal with two fresh fam
 });
 
 test("offline runtime exposes no browser or network globals and receipts runner hash", () => {
-  const runtime = loadRuntime(boardSource, runnerSource);
+  const runtime = loadRuntime(boardSource, runnerSource,"REAL");
   assert.deepEqual(runtime.forbiddenVmGlobals, []);
   assert.match(runtime.runnerSourceSha256, /^[a-f0-9]{64}$/);
+  assert.equal(runtime.boardSourceSha256,createHash("sha256").update(boardSource).digest("hex"));
+  assert.equal(runtime.realExecutionEnabled,false);
+  assert.throws(()=>loadRuntime(boardSource,runnerSource),/explicit/);
+  assert.throws(()=>loadRuntime(boardSource,runnerSource,"TEST"),/global_mismatch/);
   assert.equal(runtime.runner.configs.real_league_19_idp.qualification, "unverified-real-room");
 });
 
 test("offline runner-loop cannot promote a REAL board into TEST-scored execution", async () => {
-  const replay = await replayRunnerLoop({ boardSource, runnerSource, seat: 6 });
+  const replay = await replayRunnerLoop({ boardSource, runnerSource, mode:"REAL", seat: 6 });
   assert.equal(replay.evidenceClass, "OFFLINE_RUNNER_LOOP_REPLAY");
   assert.equal(replay.yahooLiveDraft, false);
   assert.equal(replay.yahooTestLeagueCleanAutomationPass, false);

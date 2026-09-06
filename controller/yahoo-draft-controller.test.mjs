@@ -10,6 +10,7 @@ const source = await readFile(new URL("./yahoo-draft-controller.js", import.meta
 const readerSource = await readFile(new URL("./yahoo-page-readers.js", import.meta.url), "utf8");
 const runnerSource = await readFile(new URL("./yahoo-mock-runner.js", import.meta.url), "utf8");
 const extensionSource = await readFile(new URL("../extension/yahoo-mock-extension.js", import.meta.url), "utf8");
+const shadowSource = await readFile(new URL("../extension/yahoo-real-shadow.js", import.meta.url), "utf8");
 const context = {
   clearInterval,
   console,
@@ -141,13 +142,16 @@ async function waitFor(predicate, timeoutMs = 500) {
   assert.fail("condition was not reached before timeout");
 }
 
-for (const { seat, onClock = false, skipDiscovery = false, sparseDiscovery = false, lateSparse = false } of [{ seat:1 }, { seat:6 }, { seat:12 }, { seat:6, onClock:true }, { seat:6, skipDiscovery:true }, { seat:6, sparseDiscovery:true }, { seat:12, sparseDiscovery:true }, { seat:6, lateSparse:true }]) test(`production ${lateSparse ? "forced IDP fallback exhaustion stops without a click" : sparseDiscovery ? "sparse hint uses one receipted fresh fallback" : skipDiscovery ? "non-adjacent stale discovery refuses clean acceptance" : "19-round zero-fallback acceptance"}, slot ${seat}, on-clock choice ${onClock}, 30-second clock (synthetic DOM, not live proof)`, async (t) => {
+for (const { seat, real = false, disabled = false, missingFilter = false, onClock = false, skipDiscovery = false, sparseDiscovery = false, lateSparse = false } of [{seat:6,real:true,disabled:true},{seat:1,real:true},{seat:6,real:true},{seat:12,real:true},{seat:6,real:true,missingFilter:true},{seat:6,real:true,skipDiscovery:true},{seat:6,real:true,onClock:true},{seat:6,real:true,lateSparse:true}, { seat:1 }, { seat:6 }, { seat:12 }, { seat:6, onClock:true }, { seat:6, skipDiscovery:true }, { seat:6, sparseDiscovery:true }, { seat:12, sparseDiscovery:true }, { seat:6, lateSparse:true }]) test(`${disabled ? "shipped-false REAL" : real ? "enabled-candidate REAL" : "production TEST"} ${missingFilter ? "missing filter preflight" : lateSparse ? "forced IDP pool exhaustion stops without a click" : sparseDiscovery ? "sparse hint uses one receipted fresh fallback" : skipDiscovery ? "non-adjacent stale discovery refuses clean acceptance" : "19-round zero-fallback acceptance"}, slot ${seat}, on-clock choice ${onClock}, 30-second clock (synthetic DOM, not live proof)`, async (t) => {
   const fixtureContext = vm.createContext({ ...context });
   fixtureContext.globalThis = fixtureContext;
-  vm.runInContext(runnerSource, fixtureContext);
+  assert.equal(runnerSource.split("const REAL_EXECUTION_ENABLED = false;").length,2,"unique release switch mutation only in an in-memory candidate");
+  vm.runInContext(real && !disabled ? runnerSource.replace("const REAL_EXECUTION_ENABLED = false;","const REAL_EXECUTION_ENABLED = true;") : runnerSource, fixtureContext);
+  vm.runInContext(shadowSource, fixtureContext);
   vm.runInContext(extensionSource, fixtureContext);
   const runnerApi = fixtureContext.SKRODZKaiYahooMockRunner;
-  const config = runnerApi.configs.test_league_19_idp;
+  const config = runnerApi.configs[real ? "real_league_19_idp" : "test_league_19_idp"];
+  const fixtureTeamId = config.urlTeamId;
   const board = ["QB", "RB", "WR", "TE", "K", "DEF", "LB", "CB"].flatMap((position, positionIndex) =>
     Array.from({ length:20 }, (_, index) => ({
       yahooId:String(50000 + positionIndex * 100 + index), name:`${position} Player ${index}`,
@@ -198,7 +202,7 @@ for (const { seat, onClock = false, skipDiscovery = false, sparseDiscovery = fal
     parentElement:null,
   };
   const heading = { get innerText() { return rosterPanel.innerText; }, querySelectorAll:() => [], parentElement:rosterPanel };
-  const labels = runnerApi._test.requiredTestFilterLabels();
+  const labels = runnerApi._test.requiredFilterLabels(config).filter(label => !missingFilter || label !== "Defensive Players");
   const select = { value:"All Positions", options:Array.from(labels, (label) => ({ value:label, textContent:label })), dispatchEvent() {} };
   const header = { innerText:"Proj Pts", click() { projectionDescending = true; if (document.title.startsWith("YOUR TURN")) ownedSortClicks++; } };
   header.parentElement = { querySelectorAll:() => [header] };
@@ -206,15 +210,15 @@ for (const { seat, onClock = false, skipDiscovery = false, sparseDiscovery = fal
   document.querySelectorAll = (selector) => {
     if (selector === '.ys-team[data-id]') {
       const first = Array.from({ length:12 }, (_, index) => String(index + 1));
-      [first[2], first[seat - 1]] = [first[seat - 1], first[2]];
+      [first[fixtureTeamId-1], first[seat - 1]] = [first[seat - 1], first[fixtureTeamId-1]];
       return Array.from({ length:19 }, (_, index) => index % 2 ? [...first].reverse() : first).flat()
-        .map((id) => ({ getAttribute:() => id, textContent:id === "3" ? "You" : `Team ${id}` }));
+        .map((id) => ({ getAttribute:() => id, textContent:id === String(fixtureTeamId) ? "You" : `Team ${id}` }));
     }
     if (selector === "button") return [button("Autodraft")];
     if (selector === "tr") {
       if (lateSparse && rosterIds.length === 17 && document.title.startsWith("YOUR TURN") && select.value === "Defensive Players") return [];
       let visible = rows.filter((row) => !rosterIds.includes(row.entry.yahooId) &&
-      (select.value === "All Positions" || (select.value === "Kickers" ? row.entry.position === "K" : select.value === "Team Defenses" ? row.entry.position === "DEF" : ["LB", "CB"].includes(row.entry.position)))).slice(0, 100);
+      (select.value === "All Positions" ? (!real || !["LB","CB"].includes(row.entry.position)) : (select.value === "Kickers" ? row.entry.position === "K" : select.value === "Team Defenses" ? row.entry.position === "DEF" : ["LB", "CB"].includes(row.entry.position)))).slice(0, 100);
       if (lateSparse && rosterIds.length === 17 && document.title.startsWith("YOUR TURN")) visible = visible.filter((row) => !["LB", "CB"].includes(row.entry.position));
       if (sparseDiscovery && environment.__skrodzkaiYahooMockExtensionV1?.runner && !document.title.startsWith("YOUR TURN")) {
         visible = visible.filter((row) => ["K", "DEF", "LB", "CB"].includes(row.entry.position) || (row.entry.position === "QB" && row.entry.rank <= 4));
@@ -227,7 +231,7 @@ for (const { seat, onClock = false, skipDiscovery = false, sparseDiscovery = fal
   };
   document.getElementById = (id) => id === "skrodzkai-yahoo-mock-control" ? { _controlApi:rail } : null;
   document.title = `You pick ${seat}th | Live NFL Draft | Yahoo Fantasy Sports`;
-  document.body.innerText = "League Two\nDraft Starting Soon\nYOUR TEAM (0/19)\nYour queue is empty.";
+  document.body.innerText = `${real ? "2 minute Drillers" : "League Two"}\nDraft Starting Soon\nYOUR TEAM (0/19)\nYour queue is empty.`;
   const storage = storageFixture();
   const sessionStorage = storageFixture();
   const activeTimers = new Set();
@@ -241,7 +245,7 @@ for (const { seat, onClock = false, skipDiscovery = false, sparseDiscovery = fal
     byeCoverage:{ complete:true, playersWithBye:board.length, playersTotal:board.length },
     replacementBySlot:{ QB:300, RB:180, WR:170, TE:140, "W/R/T":175, K:80, DEF:75, D:70 },
   };
-  const environment = { document, location:{ pathname:"/draftclient/f1/542830/3" }, localStorage:storage,
+  const environment = { document, location:{ pathname:`/draftclient/f1/${config.leagueId}/${fixtureTeamId}` }, localStorage:storage,
     crypto, sessionStorage, clearTimeout, setTimeout, SKRODZKaiYahooMockBoard:boardData,
     setInterval(fn, ms) { const id = setInterval(fn, ms); activeTimers.add(id); return id; },
     clearInterval(id) { clearInterval(id); activeTimers.delete(id); },
@@ -250,18 +254,49 @@ for (const { seat, onClock = false, skipDiscovery = false, sparseDiscovery = fal
     SKRODZKaiYahooDraftController:controllerApi,
     SKRODZKaiYahooPageReaders:context.SKRODZKaiYahooPageReaders,
     SKRODZKaiYahooMockRunner:runnerApi,
+    SKRODZKaiYahooRealShadow:fixtureContext.SKRODZKaiYahooRealShadow,
     chrome:{ runtime:{ onMessage:{ addListener() {}, removeListener() {} }, async sendMessage(message) { return message.type === "version_handshake" ? runtimeAttestation : { ok:true }; } } },
   };
   fixtureContext.SKRODZKaiYahooMockBoard = boardData;
+  if(real) {
+    fixtureContext.SKRODZKaiYahooRealBoard = environment.SKRODZKaiYahooRealBoard = boardData;
+    fixtureContext.SKRODZKaiYahooMockBoard = environment.SKRODZKaiYahooMockBoard = null;
+    const helper=fixtureContext.SKRODZKaiYahooRealShadow._test;
+    const receipt=helper.settingsReceipt({ready:true,rosterSlots:helper.expectedRoster});
+    environment.chrome.storage={session:{get:async key => ({[key]:receipt})}};
+  }
   t.after(() => { environment.__skrodzkaiYahooMockExtensionV1?.runner?.stop("test_cleanup"); for (const id of activeTimers) clearInterval(id); });
   const ext = fixtureContext.SKRODZKaiYahooMockExtension;
   const settings = withScoringTable({ body:{ innerText:"League Name:\tLeague Two\nDraft Type:\tLive Standard Draft\nMax Teams:\t12\nLive Draft Pick Time:\t1 Minute\nPassing Touchdowns\t4\nReceptions\t0.5\nRoster Positions:\tQB, WR, WR, WR, RB, RB, TE, W/R/T, W/R/T, K, DEF, D, D, BN, BN, BN, BN, BN, BN, IR, IR, IR" } });
   storage.setItem("skrodzkai-yahoo-test-settings-v1", JSON.stringify(ext._test.makeTestSettingsReceipt(ext._test.parseTestSettings(settings, { pathname:"/f1/542830/settings" }))));
   await ext.boot(environment);
-  assert.equal(railState.label, "TEST READY TO ARM", railState.detail);
+  if(disabled) {
+    assert.equal(railState.label,"LOCKED"); assert.equal(rail.controls.arm.disabled,true);
+    assert.throws(()=>runnerApi.create({configName:config.name,executionMode:"REAL",expectedRoomId:config.leagueId,
+      expectedSeat:seat,expectedUrlSeat:fixtureTeamId,observedTeamCount:12,observedRosterSlots:config.rosterSlots,
+      board,replacementBySlot:boardData.replacementBySlot,replacementRoster:boardData.replacementRoster,
+      scoringIdentity:config.expectedScoring,runtimeAttestation,assertRunnerLease:()=>true},environment),/not qualified/);
+    assert.equal(clickedIds.length,0); return;
+  }
+  if(missingFilter) {
+    assert.equal(railState.label,"REAL PREFLIGHT LOCKED");
+    assert.equal(rail.controls.arm.disabled,true); assert.equal(clickedIds.length,0);
+    assert.match(railState.detail,/real_filters_missing/); return;
+  }
+  assert.equal(railState.label, `${real ? "REAL" : "TEST"} READY TO ARM`, railState.detail);
   await rail.controls.arm.handler();
   const runner = environment.__skrodzkaiYahooMockExtensionV1?.runner;
   assert.ok(runner, railState.detail);
+  if(real) {
+    const preflightRecord=environment.__skrodzkaiYahooMockExtensionV1.token;
+    assert.equal(preflightRecord.settingsReceipt.rosterSlots.length,20);
+    assert.equal(preflightRecord.observedRosterSlots.length,19);
+    assert.ok(railState.board.some(p=>p.position==="CB"),"REAL prepareBoard retains IDP");
+    const options={configName:config.name,executionMode:"TEST",expectedRoomId:"420010",expectedSeat:seat,
+      expectedUrlSeat:7,observedTeamCount:12,observedRosterSlots:config.rosterSlots,board};
+    const isolated={...environment,__skrodzkaiYahooMockRunnerV1:null};
+    assert.throws(()=>runnerApi.create(options,isolated),/not qualified/);
+  }
   let rejectedStaged = false;
   const opponentTimer = setInterval(() => {
     if (pendingRound && runner.exportReceipts().some((entry) => entry.kind === "view_discovered" && entry.round === pendingRound && entry.filterLabel === "Defensive Players") && !runner.getStatus().busy) {
@@ -298,6 +333,12 @@ for (const { seat, onClock = false, skipDiscovery = false, sparseDiscovery = fal
       assert.equal(rail.manual([override], { mode:"ON_CLOCK", round:1, turnLabel:`R1P${seat}` }), true);
     }
     if (skipDiscovery) {
+      if(real) {
+        await waitFor(() => runner.getStatus().state === "failed",5000);
+        assert.equal(clickedIds.length,1);
+        assert.match(runner.getStatus().failure.code,/real_discovery_halt/);
+        assert.ok(!runner.exportReceipts().some(row=>row.kind==="view_fallback_all_positions")); return;
+      }
       await waitFor(() => runner.getStatus().picks.length >= 2 || runner.getStatus().state === "failed", 5000);
       assert.equal(runner.getStatus().picks.length, 2, JSON.stringify(runner.getStatus().failure));
       assert.ok(!runner.exportReceipts().some((row) => row.kind === "adjacent_turn_view_hint"));
@@ -313,6 +354,13 @@ for (const { seat, onClock = false, skipDiscovery = false, sparseDiscovery = fal
       assert.equal(status.state, "failed", JSON.stringify(status.failure));
       assert.equal(clickedIds.length, 17, "no round-18 click after specialist discovery and fallback fail");
       assert.equal(status.picks.length, 17);
+      if (real) {
+        assert.equal(status.picks.filter(pick => ["LB", "CB"].includes(pick.position)).length, 1);
+        assert.match(status.failure.code, /real_discovery_halt/);
+        assert.ok(!runner.exportReceipts().some(row => row.kind === "view_fallback_all_positions"));
+        assert.ok(!runner.exportReceipts().some(row => row.kind === "runner_completed"));
+        return;
+      }
       assert.equal(status.picks.filter((pick) => ["LB", "CB"].includes(pick.position)).length, 0, "both D slots must be forced in the final two rounds");
       const fallbacks = runner.exportReceipts().filter((row) => row.kind === "view_fallback_all_positions");
       assert.equal(fallbacks.length, 1);
@@ -339,6 +387,13 @@ for (const { seat, onClock = false, skipDiscovery = false, sparseDiscovery = fal
       assert.equal(row.freshTargetsRequired, true);
     }
     if (override) assert.equal(clickedIds[0], override.yahooId);
+    if(real) {
+      assert.equal(runnerApi.decision.validateCompletedRoster(status.picks,config),true);
+      assert.equal(status.picks.filter(p=>["LB","CB"].includes(p.position)).length,3);
+      assert.ok(status.picks.slice(16).every(p=>["LB","CB"].includes(p.position)),"REAL R17-R19 use defensive-only rows");
+      assert.equal(status.roomId,"420010"); assert.equal(status.urlSeat,7); assert.equal(status.seat,seat);
+      return; // This is not TEST acceptance or live REAL qualification.
+    }
     // Only the final Yahoo roster/attestation envelope is synthetic. Runner and
     // click-controller receipts are consumed untouched, as the extension exports them.
     const finalRosterSlots = runnerApi._test.allocateRosterSlots(status.picks, config.rosterSlots).map((entry) => ({

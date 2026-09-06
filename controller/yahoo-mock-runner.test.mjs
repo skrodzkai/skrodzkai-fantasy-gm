@@ -120,6 +120,12 @@ test("keeps the real league unqualified and hard-separate from TEST", () => {
   }).targets.length, 5);
 });
 
+test("qualified TEST configuration cannot target the REAL league", () => {
+  assert.throws(() => api.create({configName:"test_league_19_idp", executionMode:"TEST", expectedRoomId:"420010"}, {
+    SKRODZKaiYahooDraftController:{}, document:{}, location:{}, localStorage:storageFixture(),
+  }), /league_420010_wrong_execution_mode/);
+});
+
 test("preserves exact Yahoo multi-position eligibility without requiring market ADP", () => {
   const [hunter] = helpers.validateBoard([player("WR", 1, 24, {
     yahooId: "41787",
@@ -161,7 +167,9 @@ test("keeps one visible position pool while containing autonomous specialists to
   assert.deepEqual(Array.from(helpers.allowedPositions(14, [], testConfig, 1)), ["QB", "RB", "WR", "TE", "K", "DEF", "D", "LB", "CB", "S"]);
   assert.equal(helpers.filterLabelForRound(1, [], testConfig, 1), "All Positions");
   assert.equal(helpers.filterLabelForRound(19, [], testConfig, 12), "All Positions");
-  assert.deepEqual(Array.from(helpers.requiredTestFilterLabels()), ["All Positions", "Kickers", "Team Defenses", "Defensive Players"]);
+  assert.deepEqual(Array.from(helpers.requiredFilterLabels(testConfig)), ["All Positions", "Kickers", "Team Defenses", "Defensive Players"]);
+  assert.deepEqual(Array.from(helpers.requiredFilterLabels(mockConfig)), ["All Positions", "Team Defenses", "Kickers"]);
+  assert.equal(api.realExecutionEnabled,false);
   assert.equal(helpers.automaticCandidateAllowed({ player:player("K", 1, 1), round:14, picks:[], config:testConfig }), false);
   assert.equal(helpers.automaticCandidateAllowed({ player:player("K", 1, 1), round:15, picks:[], config:testConfig }), true);
   assert.equal(helpers.automaticCandidateAllowed({ player:player("LB", 1, 1), round:16, picks:[], config:testConfig }), false);
@@ -479,7 +487,7 @@ function discoveryFixture({ owned = false, missingFilter = false, allUnavailable
   let queue = "EMPTY";
   let roster = 0;
   let controllerCreated = 0;
-  const select = { value:"All Positions", options:helpers.requiredTestFilterLabels().filter((label) => !missingFilter || label !== "Kickers")
+  const select = { value:"All Positions", options:helpers.requiredFilterLabels(testConfig).filter((label) => !missingFilter || label !== "Kickers")
     .map((label) => ({ value:label, textContent:label })), dispatchEvent(event) { if (event.type === "change") calls.push({ label:this.value, owned:ownedTurn }); } };
   const players = () => board.filter((player) => select.value === "All Positions" ? !allUnavailable
     : select.value === "Kickers" ? player.position === "K" : select.value === "Team Defenses" ? player.position === "DEF" : ["D", "LB", "CB", "S"].includes(player.position));

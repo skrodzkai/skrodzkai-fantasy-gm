@@ -5,8 +5,10 @@ import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 
 import { reconcileSettingsAndYahoo } from "./draft-readiness.mjs";
+import { validateBoardBinding } from "./export-extension-board.mjs";
 
-export function loadRuntime(boardSource, runnerSource) {
+export function loadRuntime(boardSource, runnerSource, mode) {
+  if (!["REAL","TEST"].includes(mode)) throw new Error("runtime board mode must be explicit");
   const startedAt = performance.now();
   const context = { console, crypto, Date, Math, setInterval, setTimeout, clearInterval };
   context.globalThis = context;
@@ -15,11 +17,16 @@ export function loadRuntime(boardSource, runnerSource) {
   vm.runInContext(runnerSource, context);
   const forbiddenGlobals = ["fetch", "document", "window", "XMLHttpRequest", "WebSocket", "process", "require", "module", "Buffer"]
     .filter((key) => key in context);
-  const boardData = context.SKRODZKaiYahooMockBoard;
+  const boardData = mode === "REAL" ? context.SKRODZKaiYahooRealBoard : context.SKRODZKaiYahooMockBoard;
+  if (!boardData || (mode === "REAL" ? context.SKRODZKaiYahooMockBoard : context.SKRODZKaiYahooRealBoard)) throw new Error("runtime_board_global_mismatch");
+  validateBoardBinding(boardData,mode);
   const source = Array.isArray(boardData.players)
     ? boardData.players
     : [...boardData.offense, ...boardData.kickers, ...boardData.defenses, ...boardData.idp];
   return {
+    boardData,
+    boardSourceSha256:createHash("sha256").update(boardSource).digest("hex"),
+    realExecutionEnabled:typeof context.SKRODZKaiYahooMockRunner.realExecutionEnabled === "boolean" ? context.SKRODZKaiYahooMockRunner.realExecutionEnabled : null,
     board: [...new Map(source.map((player) => [String(player.yahooId), player])).values()],
     replacementBySlot: boardData.replacementBySlot,
     survivalCalibration: boardData.survivalCalibration ?? null,
@@ -199,7 +206,7 @@ function specialistTimingPass(simulation, config) {
 }
 
 export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, seeds = [2026, 2027, 2028, 2029, 2030] }) {
-  const { board, replacementBySlot, survivalCalibration, scoringSchemaHash, runnerSourceSha256, coldStartMs, forbiddenVmGlobals, runner } = loadRuntime(boardSource, runnerSource);
+  const { board, boardSourceSha256, realExecutionEnabled, replacementBySlot, survivalCalibration, scoringSchemaHash, runnerSourceSha256, coldStartMs, forbiddenVmGlobals, runner } = loadRuntime(boardSource, runnerSource, "REAL");
   const config = runner.configs.real_league_19_idp;
   const helpers = runner._test;
   if (!replacementBySlot || !Object.keys(replacementBySlot).length) throw new Error("extension board is missing joint replacement baselines");
@@ -249,7 +256,7 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     weeklyUtilityEveryRound: simulations.every((simulation) => simulation.picks.every((pick) => pick.utilityModel === "WEEKLY_OPTIMAL_LINEUP_W1_17")),
     jointReplacementBaselinesPresent: Object.keys(replacementBySlot).length >= 10,
     dualRoleNeverAutoSelected: simulations.every((simulation) => simulation.picks.every((pick) => pick.name !== "Travis Hunter" && !["41787", "99001", "99002"].includes(String(pick.yahooId)))),
-    realLeagueExecutionDisabled: config.qualification === "unverified-real-room",
+    realLeagueExecutionDisabled: realExecutionEnabled === false,
     vmExecutionGlobalsAbsent: forbiddenVmGlobals.length === 0,
     scoringSchemaReceipted: /^[a-f0-9]{64}$/.test(String(scoringSchemaHash ?? "")),
     minimumThreeRunningBacks: simulations.every((simulation) => Number(simulation.counts.RB ?? 0) >= 3),
@@ -287,6 +294,8 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
     nodeVersion: process.version,
     scoringSchemaHash,
     runnerSourceSha256,
+    boardSourceSha256,
+    realExecutionEnabled,
     validRosters,
     latency,
     acceptanceGates,
@@ -318,8 +327,8 @@ export function buildRehearsalReport({ boardSource, runnerSource, generatedAt, s
 // The old replay used a fake click controller and treated disappearing rows as
 // opponent picks. Production runner/controller and kill-switch tests now own
 // that proof; this CLI must not turn an unverified TEST schema into readiness.
-export async function replayRunnerLoop({ boardSource, runnerSource }) {
-  const runtime = loadRuntime(boardSource, runnerSource);
+export async function replayRunnerLoop({ boardSource, runnerSource, mode }) {
+  const runtime = loadRuntime(boardSource, runnerSource, mode);
   const failure = runtime.runner.decision.scoringFailure(runtime.runner.configs.test_league_19_idp, runtime.scoringIdentity);
   return { evidenceClass:"OFFLINE_RUNNER_LOOP_REPLAY", yahooLiveDraft:false, yahooTestLeagueCleanAutomationPass:false,
     accepted:false, status:failure ? "LOCKED" : "NOT_RUN",
@@ -335,7 +344,7 @@ async function main() {
     if (!args[required]) throw new Error(`missing --${required}=...`);
   }
   const [boardSource, runnerSource] = await Promise.all([readFile(args.board, "utf8"), readFile(args.runner, "utf8")]);
-  const runnerLoopEvidence = await replayRunnerLoop({ boardSource, runnerSource });
+  const runnerLoopEvidence = await replayRunnerLoop({ boardSource, runnerSource, mode:"REAL" });
   const report = buildRehearsalReport({ boardSource, runnerSource, generatedAt: args["generated-at"] });
   report.runnerLoopEvidence = runnerLoopEvidence;
   await writeFile(args.output, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });

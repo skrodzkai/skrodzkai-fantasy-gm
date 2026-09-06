@@ -2,6 +2,8 @@
   "use strict";
 
   const VERSION = "2.3.0";
+  // Release-owned gate. Never read activation from page, storage or operator input.
+  const REAL_EXECUTION_ENABLED = false;
   const GLOBAL_KEY = "__skrodzkaiYahooMockRunnerV1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-runner-receipts-v1";
   const OFFENSE = ["QB", "RB", "WR", "TE"];
@@ -101,6 +103,10 @@
     }),
     real_league_19_idp: Object.freeze({
       name: "real_league_19_idp",
+      leagueId: "420010",
+      urlTeamId: 7,
+      expectedScoring: Object.freeze({ leagueId:"420010", scoringModel:"2-minute-drillers-2026", scoringSchemaHash:"97aac9f122786f0ae3b9bfaaecb69cd097dfb6dd70f2b5b8e7190435b6eedad8" }),
+      filterEvidence: "UNOBSERVED_REAL_OPTIONS",
       teams: 12,
       rounds: 19,
       rosterTotal: 19,
@@ -226,7 +232,9 @@
     return "All Positions";
   }
 
-  function requiredTestFilterLabels() {
+  function requiredFilterLabels(config = CONFIGS.test_league_19_idp) {
+    if (config.name === "public_mock_15") return ["All Positions", "Team Defenses", "Kickers"];
+    if (!["test_league_19_idp", "real_league_19_idp"].includes(config.name)) throw new Error("unknown_filter_contract");
     // League Two exposes one generic D filter; exact row eligibility still
     // separates D/LB/CB/S in the decision ladder, which reads All Positions.
     return ["All Positions", "Kickers", "Team Defenses", "Defensive Players"];
@@ -710,7 +718,7 @@
   }
 
   function scoringFailure(config, boardData) {
-    if (config.qualification !== "verified-test-room") return null;
+    if (!config.expectedScoring) return null;
     const expected = config.expectedScoring;
     if (!/^[a-f0-9]{64}$/.test(String(expected?.scoringSchemaHash ?? ""))) return "test_scoring_schema_unverified";
     return ["leagueId", "scoringModel", "scoringSchemaHash"].every((key) =>
@@ -718,7 +726,7 @@
   }
 
   function replacementFailure(config, replacementRoster) {
-    if (config.qualification !== "verified-test-room") return null;
+    if (!config.expectedScoring) return null;
     return replacementRoster?.teamCount === config.teams &&
       sameSlots(replacementRoster.rosterSlots, config.rosterSlots.filter((slot) => slot !== "BN"))
       ? null : "test_replacement_room_mismatch";
@@ -1202,11 +1210,13 @@
     if (!baseConfig) throw new Error("unknown roster configuration");
     const executionMode = String(options.executionMode ?? "MOCK").toUpperCase();
     const qualified = baseConfig.qualification === "public-mock-only" && executionMode === "MOCK" ||
-      baseConfig.qualification === "verified-test-room" && executionMode === "TEST";
+      baseConfig.qualification === "verified-test-room" && executionMode === "TEST" ||
+      baseConfig.qualification === "unverified-real-room" && executionMode === "REAL" && REAL_EXECUTION_ENABLED;
     if (!qualified) {
       throw new Error("draft configuration is not qualified for this execution mode");
     }
     const expectedRoomId = String(options.expectedRoomId ?? "");
+    if (expectedRoomId === "420010" && executionMode !== "REAL") throw new Error("league_420010_wrong_execution_mode");
     const expectedSeat = Number(options.expectedSeat);
     const expectedUrlSeat = Number(options.expectedUrlSeat ?? expectedSeat);
     const observedTeamCount = Number(options.observedTeamCount);
@@ -1236,8 +1246,8 @@
       throw new Error("expected room and seat are required");
     }
     if (!Number.isInteger(expectedUrlSeat) || expectedUrlSeat < 1) throw new Error("expected URL seat is required");
-    if (config.leagueId && expectedRoomId !== config.leagueId) throw new Error("test league ID does not match verified configuration");
-    if (config.urlTeamId && expectedUrlSeat !== config.urlTeamId) throw new Error("test team ID does not match verified configuration");
+    if (config.leagueId && expectedRoomId !== config.leagueId) throw new Error("league ID does not match verified configuration");
+    if (config.urlTeamId && expectedUrlSeat !== config.urlTeamId) throw new Error("team ID does not match verified configuration");
     const scoringError = scoringFailure(config, options.scoringIdentity);
     if (scoringError) throw new Error(scoringError);
     const replacementError = replacementFailure(config, options.replacementRoster);
@@ -1333,11 +1343,12 @@
     // records a view hint, never a click-ready cross-view target cache.
     async function discoverViews() {
       const readers = environment.SKRODZKaiYahooPageReaders;
-      if (executionMode !== "TEST" || !readers?.readDiscoveryRows) return;
+      if (!["TEST", "REAL"].includes(executionMode)) return;
+      if (!readers?.readDiscoveryRows) throw new Error("discovery_reader_missing");
       const next = { players:[], failure:null, round:picks.length + 1 };
       const offTurn = () => state === "running" && controllerApi.runtime.readOwnedTurnState(documentRef)?.state === "OFF_TURN";
       const check = () => { assertDraftSafety("discovery"); assertEmptyOrConfirmedRoster("discovery"); return offTurn(); };
-      for (const label of requiredTestFilterLabels()) {
+      for (const label of requiredFilterLabels(config)) {
         if (!check()) return;
         try {
           const filter = setFilter(documentRef, environment, label);
@@ -1627,7 +1638,7 @@
       let filterLabel = filterLabelForRound(turn.round, picks, config, expectedSeat);
       const clockAtDecision = assertOwnedClock("at_detection");
       let fallbackReason = null;
-      if (executionMode === "TEST") {
+      if (["TEST", "REAL"].includes(executionMode)) {
         // At a snake endpoint there is no opponent turn in which to rediscover.
         // Reuse only the immediately preceding round's view hint, after our pick
         // is confirmed; targets and buttons are still read fresh below.
@@ -1658,6 +1669,7 @@
         fallbackReason = String(error.message);
       }
       if (fallbackReason) {
+        if (executionMode === "REAL") throw new Error(`real_discovery_halt:${fallbackReason}`);
         // Exactly one pre-click fallback. Neither the panel nor click clock restarts.
         assertDraftSafety("fallback"); assertEmptyOrConfirmedRoster("fallback"); assertOwnedClock("fallback");
         if (Date.now() - detectedAt >= PANEL_BUDGET_MS) throw new Error("panel_ready_budget_exhausted");
@@ -1728,7 +1740,7 @@
         const turn = turnSignal?.state === "OWNED" ? turnSignal.turn : null;
         if (!turn) {
           try {
-            if (executionMode === "TEST" && discoveryRound !== picks.length + 1) {
+            if (["TEST", "REAL"].includes(executionMode) && discoveryRound !== picks.length + 1) {
               busy = true;
               await discoverViews();
             }
@@ -1952,6 +1964,7 @@
 
   root.SKRODZKaiYahooMockRunner = {
     version: VERSION,
+    realExecutionEnabled: REAL_EXECUTION_ENABLED,
     configs: CONFIGS,
     create,
     receiptKey: RECEIPT_KEY,
@@ -1965,7 +1978,7 @@
       offenseComplete,
       allowedPositions,
       filterLabelForRound,
-      requiredTestFilterLabels,
+      requiredFilterLabels,
       validateBoard,
       positionForConfirmedPick,
       overallPick,

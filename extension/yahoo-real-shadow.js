@@ -141,7 +141,8 @@
     const ownedTurn = turnState?.turn ?? null;
     const autodraftState = draftClient ? readers.readAutodraftState(documentRef) : "UNKNOWN";
     const autodraft = autodraftState === "ACTIVE";
-    const players = draftClient ? availablePlayers(documentRef, environment) : [];
+    let players = draftClient ? availablePlayers(documentRef, environment) : [];
+    const quarantinedPlayers = [];
     const health = boardHealth(boardData, now);
     const verified = settingsPage ? parseSettings(documentRef, locationRef).ready : validSettingsReceipt(settings, now);
     const draftSlot = draftClient ? clientDraftSlot(documentRef) : parseDraftSlot(body);
@@ -179,14 +180,18 @@
         if (ownedTurn && (ownedTurn.round !== round || ownedTurn.pick !== engine.overallPick(round, draftSlot, 12))) throw new Error("real_turn_roster_mismatch");
         if (new Set(players.map((p) => p.yahooId)).size !== players.length) throw new Error("real_visible_identity_ambiguous");
         for (const row of players) {
+          if (identity.yahooIds.includes(row.yahooId)) throw new Error("real_roster_available_overlap");
           const player = board.find((candidate) => candidate.yahooId === row.yahooId);
           if (!player) { unmodelledVisibleRows += 1; continue; }
           // Yahoo IDs are canonical; draft rows abbreviate names and DEF rows
           // omit the team line. Neither observed format invents a new identity.
           if ((row.team && readers.normalize(player.team) !== readers.normalize(row.team)) ||
               (!row.team && row.position !== "DEF") ||
-              !player.eligible.some((position) => readers.normalize(position) === readers.normalize(row.position))) throw new Error(`real_visible_player_mismatch:${row.yahooId}`);
-          if (identity.yahooIds.includes(row.yahooId)) throw new Error("real_roster_available_overlap");
+              !player.eligible.some((position) => readers.normalize(position) === readers.normalize(row.position))) {
+            quarantinedPlayers.push({yahooId:row.yahooId, reason:"real_visible_player_mismatch"});
+            players = players.filter((candidate) => candidate.yahooId !== row.yahooId);
+            continue;
+          }
         }
         advice = engine.buildDecisionLadder({ round, seat:draftSlot, picks:observedPicks, board, availablePlayers:players, config,
           replacementBySlot:boardData.replacementBySlot, survivalCalibration:boardData.survivalCalibration, minimum:5 });
@@ -194,6 +199,7 @@
     }
     if (adviceError) warnings.unshift({ severity:adviceError === "draft_complete" ? "info" : "danger", text:`Advice withheld: ${adviceError}` });
     if (unmodelledVisibleRows) warnings.push({severity:"info",text:`${unmodelledVisibleRows} visible players lack a usable model and are not ranked.`});
+    for (const player of quarantinedPlayers) warnings.push({severity:"danger",text:`Quarantined Yahoo ${player.yahooId}: ${player.reason}; excluded from availability and advice.`});
     warnings.push({ severity:"info", text:"VISIBLE-POOL advice only: hidden/unloaded players are not evaluated. Roster names are observed; Yahoo slot assignments are not inferred. Manager cards and committee reviews are offline." });
     const recommendations = advice?.targets.map((player, index) => ({ ...player,
       reason:"VISIBLE POOL · league-scored lineup value + next-turn alternatives",
@@ -213,7 +219,7 @@
       events:[{ at:new Date(now).toISOString(), kind:"SHADOW", detail:`team ${TEAM_ID}; roster ${roster ? `${roster.filled}/${roster.total}` : "unreadable"}; available rows ${players.length}` }],
       latestText:"No Yahoo action taken. Listed roster is observed membership, not verified Yahoo slot placement.", ladderState:advice ? "VISIBLE POOL · READ ONLY" : "ADVICE WITHHELD", pinned:false, pinText:"Overrides are disabled in REAL SHADOW.", pinLabel:"DISABLED",
       controls:{ arm:{ disabled:true, text:"ARM DISABLED" }, halt:{ disabled:true, text:"NO EXECUTION" }, export:{ disabled:true, text:"EXPORT DISABLED" } },
-      shadow:{ settingsVerified:verified, boardHealth:health, roster, availablePlayerCount:players.length, unmodelledVisibleRows, urlTeamId:draftClient ? room.seat : TEAM_ID, draftSlot, adviceError, decision:advice?.decision ?? null },
+      shadow:{ settingsVerified:verified, boardHealth:health, roster, availablePlayerCount:players.length, unmodelledVisibleRows, quarantinedPlayers, urlTeamId:draftClient ? room.seat : TEAM_ID, draftSlot, adviceError, decision:advice?.decision ?? null },
     };
   }
 
@@ -252,6 +258,11 @@
       }
     };
     await refreshSettingsReceipt();
+    // Keep the settings writer active; only suppress competing draft-client advice.
+    const room = readers.parseRoom(environment.location.pathname);
+    if (environment.SKRODZKaiYahooMockRunner?.realExecutionEnabled === true && room?.roomId === LEAGUE_ID && room.seat === TEAM_ID) {
+      return { stop() {}, getSnapshot:() => null };
+    }
     let attestation = await readRuntimeAttestation(environment);
     let snapshot = buildSnapshot({ documentRef:environment.document, locationRef:environment.location, settings:receipt, boardData:environment.SKRODZKaiYahooRealBoard, attestation, environment });
     mount(snapshot, environment.document);
@@ -272,5 +283,6 @@
   }
 
   root.SKRODZKaiYahooRealShadow = { version:VERSION, boot, _test:{ parseSettings, parseDraftSlot, clientDraftSlot, availablePlayers, settingsReceipt, validSettingsReceipt, boardHealth, buildSnapshot, mount, validRuntimeAttestation, readRuntimeAttestation, scoringIdentity:SCORING_IDENTITY, scoringRows:SCORING_ROWS, expectedRoster:[...EXPECTED_ROSTER] } };
+  root.SKRODZKaiYahooRealShadow.settingsKey = SETTINGS_KEY;
   if (root.document && root.location && root.chrome) void boot(root);
 })(globalThis);

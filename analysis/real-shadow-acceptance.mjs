@@ -1,6 +1,8 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import vm from "node:vm";
+import { createHash } from "node:crypto";
+import { loadRuntime } from "./run-v5-rehearsals.mjs";
 
 export async function loadDecisionEngine(runnerPath) {
   const source = await readFile(runnerPath, "utf8");
@@ -8,7 +10,7 @@ export async function loadDecisionEngine(runnerPath) {
   context.globalThis = context;
   vm.createContext(context);
   vm.runInContext(source, context);
-  return context.SKRODZKaiYahooMockRunner;
+  return {runner:context.SKRODZKaiYahooMockRunner,source,runnerSourceSha256:createHash("sha256").update(source).digest("hex")};
 }
 
 function percentile(values, fraction) {
@@ -24,9 +26,12 @@ function counts(picks) {
   }, {});
 }
 
-export function runRealShadowAcceptance({ engine, boardData, settingsSnapshot, seats = [1, 6, 12], decisionBudgetMs = engine?.decision?.recomputeBudgetMs }) {
-  const decision = engine?.decision;
-  const config = engine?.configs?.real_league_19_idp;
+export function runRealShadowAcceptance({ engine, boardSource, settingsSnapshot, seats = [1, 6, 12], decisionBudgetMs = engine?.runner?.decision?.recomputeBudgetMs }) {
+  const runtime = loadRuntime(boardSource,engine.source,"REAL");
+  if (engine.runnerSourceSha256 !== runtime.runnerSourceSha256) throw new Error("real_acceptance_runner_source_mismatch");
+  const {boardData, boardSourceSha256, runnerSourceSha256, realExecutionEnabled} = runtime;
+  const decision = runtime.runner.decision;
+  const config = runtime.runner.configs.real_league_19_idp;
   if (!decision || !config) throw new Error("real shadow decision engine is unavailable");
   if (!Number.isFinite(decisionBudgetMs) || decisionBudgetMs <= 0) throw new Error("real shadow decision budget is unavailable");
   const idpPositions = Array.from(decision.IDP_POSITIONS ?? []);
@@ -103,11 +108,14 @@ export function runRealShadowAcceptance({ engine, boardData, settingsSnapshot, s
     });
   }
 
-  const pass = config.qualification === "unverified-real-room" && config.rounds === 19 && seatResults.every((result) => result.pass);
+  const pass = config.name === "real_league_19_idp" && config.leagueId === "420010" && realExecutionEnabled === false && config.rounds === 19 && seatResults.every((result) => result.pass);
   return {
     schemaVersion:1,
     generatedAt:new Date().toISOString(),
     mode:"REAL SHADOW",
+    realExecutionEnabled,
+    runnerSourceSha256,
+    boardSourceSha256,
     execution:false,
     clockSeconds:30,
     decisionBudgetMs,
@@ -122,18 +130,18 @@ export function runRealShadowAcceptance({ engine, boardData, settingsSnapshot, s
 function parseArgs(argv) {
   const args = {};
   for (let index = 0; index < argv.length; index += 2) args[argv[index].replace(/^--/, "")] = argv[index + 1];
-  if (!args.runner || !args.board || !args.settings || !args.output) throw new Error("usage: node analysis/real-shadow-acceptance.mjs --runner runner.js --board board.json --settings settings.json --output result.json");
+  if (!args.runner || !args.board || !args.settings || !args.output) throw new Error("usage: node analysis/real-shadow-acceptance.mjs --runner runner.js --board yahoo-real-board.js --settings settings.json --output result.json");
   return args;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const args = parseArgs(process.argv.slice(2));
-  const [engine, boardData, settingsSnapshot] = await Promise.all([
+  const [engine, boardSource, settingsSnapshot] = await Promise.all([
     loadDecisionEngine(args.runner),
-    readFile(args.board, "utf8").then(JSON.parse),
+    readFile(args.board, "utf8"),
     readFile(args.settings, "utf8").then(JSON.parse),
   ]);
-  const result = runRealShadowAcceptance({ engine, boardData, settingsSnapshot });
+  const result = runRealShadowAcceptance({ engine, boardSource, settingsSnapshot });
   await writeFile(args.output, `${JSON.stringify(result, null, 2)}\n`, { mode:0o600 });
   process.stdout.write(`${JSON.stringify({ output:args.output, status:result.status })}\n`);
   if (result.status !== "PASS") process.exitCode = 1;
