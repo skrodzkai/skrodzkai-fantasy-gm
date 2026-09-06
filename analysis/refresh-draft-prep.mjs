@@ -383,10 +383,14 @@ export function byeCoverage(players) {
   };
 }
 
-export function buildHealth({ generatedAt, clock, yahoo, adpHealth, espnHealth, sleeperHealth, sleeperReused, board, movement, rehearsal, packets, opponentWarRoom, realShadowAcceptance, identityReceipt, draftSignals = null, failure = null }) {
+export function buildHealth({ generatedAt, clock, yahoo, adpHealth, espnHealth, sleeperHealth, sleeperReused, board, movement, rehearsal, packets, opponentWarRoom, realShadowAcceptance, identityReceipt, runnerEvidence = null, draftSignals = null, failure = null }) {
   const automatic = (board?.players ?? []).filter((player) => player.automaticEligible === true);
   const byes = byeCoverage(board?.players);
+  const realExecutionEnabled = typeof runnerEvidence?.realExecutionEnabled === "boolean" && /^[a-f0-9]{64}$/.test(runnerEvidence?.runnerSourceSha256 ?? "") ? runnerEvidence.realExecutionEnabled : null;
   const reasons = [
+    ...(realExecutionEnabled === true ? ["real_execution_enabled"] : realExecutionEnabled === null ? ["real_execution_state_unverified"] : []),
+    ...([rehearsal,realShadowAcceptance].filter(Boolean).some((r) => r.realExecutionEnabled !== realExecutionEnabled || r.runnerSourceSha256 !== runnerEvidence?.runnerSourceSha256) ? ["runner_evidence_mismatch"] : []),
+    ...(rehearsal && realShadowAcceptance && (!/^[a-f0-9]{64}$/.test(rehearsal.boardSourceSha256 ?? "") || rehearsal.boardSourceSha256 !== realShadowAcceptance.boardSourceSha256) ? ["rendered_board_evidence_mismatch"] : []),
     ...Object.entries(yahoo ?? {}).filter(([, value]) => !value.fresh).map(([key]) => `stale_or_missing_yahoo_${key}`),
     ...(adpHealth && !adpHealth.fresh ? ["stale_or_missing_ffc_adp"] : []),
     ...(espnHealth && !espnHealth.fresh ? ["stale_espn_projection_family"] : []),
@@ -428,7 +432,15 @@ export function buildHealth({ generatedAt, clock, yahoo, adpHealth, espnHealth, 
         .sort((a, b) => a.yahooPreseasonRank - b.yahooPreseasonRank)
         .map((player) => ({ yahooId:player.yahooId, name:player.name, position:player.position,
           yahooRank:player.yahooPreseasonRank, status:player.validationStatus,
-          reason:player.blockReason, healthAction:player.injury?.draftAction ?? "UNKNOWN" })),
+          reason:player.blockReason, healthAction:player.injury?.draftAction ?? "UNKNOWN",
+          projectedPoints:player.consensusPoints ?? null, sourceFamilyCount:player.sourceFamilyCount ?? 0,
+          sourceIds:player.sourceIds ?? [], injuryEvidenceAsOf:player.injury?.freshestAt ?? null })),
+      unrankedProjectedExclusions:(board?.players ?? []).filter((p) => !p.automaticEligible &&
+        !(Number(p.yahooPreseasonRank)>0) && Number(p.consensusPoints)>0)
+        .sort((a,b)=>b.consensusPoints-a.consensusPoints)
+        .map((p)=>({yahooId:p.yahooId,name:p.name,position:p.position,projectedPoints:p.consensusPoints,
+          sourceFamilyCount:p.sourceFamilyCount ?? 0,sourceIds:p.sourceIds ?? [],reason:p.blockReason ?? p.validationStatus,
+          healthAction:p.injury?.draftAction ?? "UNKNOWN",injuryEvidenceAsOf:p.injury?.freshestAt ?? null})),
     },
     byes: { source: "caller-supplied Yahoo player snapshots", ...byes },
     boardMovement: movement ?? { changes:[], reason:"board-not-built" },
@@ -438,7 +450,10 @@ export function buildHealth({ generatedAt, clock, yahoo, adpHealth, espnHealth, 
     seatPackets: packets ? { count: packets.packets?.length ?? 0, executionInput: packets.executionInput } : null,
     opponentWarRoom: opponentWarRoom ? { cardCount:opponentWarRoom.cards?.length ?? 0, policy:opponentWarRoom.policy } : null,
     realShadowAcceptance: realShadowAcceptance ? { status:realShadowAcceptance.status, seats:realShadowAcceptance.seats?.map((seat) => ({ seat:seat.seat, pass:seat.pass, latencyMs:seat.latencyMs })) } : null,
-    realLeagueExecutionDisabled: rehearsal?.policyChecks?.realLeagueExecutionDisabled === true,
+    realExecutionEnabled,
+    realLeagueExecutionDisabled: realExecutionEnabled === null ? null : !realExecutionEnabled,
+    runnerSourceSha256:runnerEvidence?.runnerSourceSha256 ?? null,
+    boardSourceSha256:rehearsal?.boardSourceSha256 ?? null,
   };
 }
 
@@ -453,14 +468,12 @@ async function ensureOutputParent(outputParent, allowedOutputRoot) {
 }
 
 export async function publishSuccessfulRun({ staging, finalPath, board, extensionSource, offlineBoardCsv, readiness, rehearsal, packets, opponentWarRoom, movementMarkdown, realShadowAcceptance, health }) {
-  if (String(board?.leagueId) === "420010") {
-    await writeFile(join(staging, "yahoo-real-board-v15.js"), renderExtensionBoard(extensionBoardFromV5(board), {mode:"REAL"}), {mode:0o600});
-  }
+  if (String(board?.leagueId) !== "420010") throw new Error("REAL refresh cannot publish TEST data");
   await Promise.all([
     writeFile(join(staging, "player-board-v15.json"), `${JSON.stringify(board, null, 2)}\n`, { mode: 0o600 }),
     writeFile(join(staging, "draft-signals-v15.json"), `${JSON.stringify(board.draftSignalOverlay ?? null, null, 2)}\n`, { mode: 0o600 }),
-    writeFile(join(staging, "yahoo-mock-board-v15.js"), extensionSource, { mode: 0o600 }),
-    writeFile(join(staging, "yahoo-mock-board-v15.csv"), offlineBoardCsv, { mode: 0o600 }),
+    writeFile(join(staging, "yahoo-real-board-v15.js"), extensionSource, { mode: 0o600 }),
+    writeFile(join(staging, "yahoo-real-board-v15.csv"), offlineBoardCsv, { mode: 0o600 }),
     writeFile(join(staging, "draft-readiness-v15.json"), `${JSON.stringify(readiness, null, 2)}\n`, { mode: 0o600 }),
     writeFile(join(staging, "rehearsal-30s-v15.json"), `${JSON.stringify(rehearsal, null, 2)}\n`, { mode: 0o600 }),
     writeFile(join(staging, "opponent-war-room-v15.json"), `${JSON.stringify({ ...opponentWarRoom, seatPackets:packets.packets }, null, 2)}\n`, { mode: 0o600 }),
@@ -484,10 +497,14 @@ export async function refreshDraftPrep(options) {
   }
   const staging = await mkdtemp(join(outputParent, `.draft-prep-v15-${randomUUID()}-`));
   let health;
+  let runnerEvidence = null;
   try {
     if (!clock.fresh) throw new Error(`generatedAt differs from wall clock by ${clock.generatedAtSkewMinutes.toFixed(2)} minutes`);
+    const engine = await loadDecisionEngine(options.runnerPath);
+    runnerEvidence = {realExecutionEnabled:engine.runner?.realExecutionEnabled ?? null,runnerSourceSha256:engine.runnerSourceSha256};
+    const runnerSource = engine.source;
     const prior = await discoverPreviousPassingBoard(outputParent, finalPath);
-    const [baseline, adp, adpFile, yahooOffense, yahooSpecialists, yahooEligibility, historyText, opponentCalibration, externalInjuries, survivalCalibration, runnerSource] = await Promise.all([
+    const [baseline, adp, adpFile, yahooOffense, yahooSpecialists, yahooEligibility, historyText, opponentCalibration, externalInjuries, survivalCalibration] = await Promise.all([
       readJsonReceipt(options.baselinePath),
       readJsonReceipt(options.adpPath),
       stat(options.adpPath),
@@ -498,7 +515,6 @@ export async function refreshDraftPrep(options) {
       readFile(options.opponentCalibrationPath, "utf8").then(JSON.parse),
       options.externalInjuriesPath ? readFile(options.externalInjuriesPath, "utf8").then(JSON.parse) : [],
       options.survivalCalibrationPath ? readFile(options.survivalCalibrationPath, "utf8").then(JSON.parse) : null,
-      readFile(options.runnerPath, "utf8"),
     ]);
     const yahoo = {
       offense: yahooSourceHealth(yahooOffense, clock.wallClockAt, "Yahoo offense snapshot"),
@@ -580,7 +596,7 @@ export async function refreshDraftPrep(options) {
       });
     }
     const extensionBoard = extensionBoardFromV5(board);
-    const extensionSource = renderExtensionBoard(extensionBoard);
+    const extensionSource = renderExtensionBoard(extensionBoard, {mode:"REAL"});
     const offlineBoardCsv = renderOfflineBoardCsv(extensionBoard);
     const historyRows = parseHistory(historyText);
     const readiness = buildV5ReadinessReport({
@@ -600,9 +616,8 @@ export async function refreshDraftPrep(options) {
     const opponentWarRoom = buildOpponentWarRoom({ teams, calibration:opponentCalibration, managerMap:managerMapPacket.managerMap, historyRows, joeManagerIds:["joe"] });
     const movement = boardMovers(board, prior.board, prior.receipt);
     const movementMarkdown = renderBoardMovementMarkdown(board, movement);
-    const engine = await loadDecisionEngine(options.runnerPath);
-    const realShadowAcceptance = runRealShadowAcceptance({ engine, boardData:extensionBoard, settingsSnapshot:realSettings });
-    health = buildHealth({ generatedAt: clock.wallClockAt, clock, yahoo, adpHealth, espnHealth, sleeperHealth, sleeperReused: sleeper.reused, board, movement, rehearsal, packets, opponentWarRoom, realShadowAcceptance, identityReceipt: joined.receipt, draftSignals: board.draftSignalOverlay ?? null });
+    const realShadowAcceptance = runRealShadowAcceptance({ engine, boardSource:extensionSource, settingsSnapshot:realSettings });
+    health = buildHealth({ generatedAt: clock.wallClockAt, clock, yahoo, adpHealth, espnHealth, sleeperHealth, sleeperReused: sleeper.reused, board, movement, rehearsal, packets, opponentWarRoom, realShadowAcceptance, runnerEvidence, identityReceipt: joined.receipt, draftSignals: board.draftSignalOverlay ?? null });
     if (health.status !== "PASS") throw new Error(health.reasons.join("; "));
     if (!sleeper.reused) await writeSleeperCache(options.sleeperCachePath, sleeper.snapshot);
 
@@ -611,7 +626,8 @@ export async function refreshDraftPrep(options) {
   } catch (error) {
     await rm(staging, { recursive: true, force: true });
     const failedStaging = await mkdtemp(join(outputParent, `.draft-prep-v15-failed-${randomUUID()}-`));
-    health = buildHealth({ generatedAt, clock, failure: String(error?.message ?? error) });
+    health = health ? {...health,status:"FAIL",reasons:[...new Set([...health.reasons,String(error?.message ?? error)])]}
+      : buildHealth({ generatedAt, clock, runnerEvidence, failure: String(error?.message ?? error) });
     await writeFile(join(failedStaging, "nightly-health.json"), `${JSON.stringify(health, null, 2)}\n`, { mode: 0o600 });
     try {
       await rename(failedStaging, finalPath);

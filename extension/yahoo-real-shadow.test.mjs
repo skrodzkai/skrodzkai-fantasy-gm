@@ -115,7 +115,6 @@ test("REAL advisory clears recommendations on every missing or conflicting input
     (f) => {f.teams[0].getAttribute = () => "7";},
     (f) => {f.document.title = "Waiting";},
     (f) => {f.document.body.innerText = f.document.body.innerText.replace("(0/19)", "(1/19)");},
-    (f) => {f.rows[0].node.innerText = "Player 0\nWR\nSEA";},
     (f) => {f.rows[1].node.getAttribute = () => "101";},
     (f) => {f.rows.forEach((row) => {row.button.disabled = true;});},
     (f) => {f.input.now += 7 * 3600000;},
@@ -126,6 +125,40 @@ test("REAL advisory clears recommendations on every missing or conflicting input
     assert.equal(snapshot.recommendations.length, 0, change.toString());
     assert.equal(snapshot.controls.arm.disabled, true);
   }
+});
+
+test("REAL row mismatches quarantine only exact IDs and subtract availability before ranking", () => {
+  for(const text of ["Player 0\nWR\nSEA","Player 0\nDB\nBUF","Player 0\nWR"]) {
+    const f=advisoryFixture(); f.rows[0].node.innerText=text;
+    const result=helpers.buildSnapshot(f.input);
+    assert.equal(result.recommendations.length,5,text);
+    assert.ok(!result.recommendations.some(p=>p.yahooId==="101"));
+    assert.equal(result.shadow.availablePlayerCount,5);
+    assert.equal(result.shadow.quarantinedPlayers[0]?.yahooId,"101",text);
+  }
+  const f=advisoryFixture();
+  f.rows[0].node.innerText="Player 0\nWR\nSEA";
+  f.rows[1].node.innerText="Player 1\nWR\nSEA";
+  assert.equal(helpers.buildSnapshot(f.input).recommendations.length,0,"fewer than five legal IDs still halts advice");
+});
+
+test("REAL roster overlap halts even when that row also mismatches identity", () => {
+  const f = advisoryFixture({ownedIds:["101"]});
+  f.rows[0].node.innerText = "Player 0\nWR\nSEA";
+  const result = helpers.buildSnapshot(f.input);
+  assert.equal(result.shadow.adviceError, "real_roster_available_overlap");
+  assert.equal(result.recommendations.length, 0);
+  assert.equal(result.shadow.quarantinedPlayers.length, 0);
+});
+
+test("REAL quarantine count survives a later roster-overlap halt", () => {
+  const f = advisoryFixture({ownedIds:["102"]});
+  f.rows[0].node.innerText = "Player 0\nWR\nSEA";
+  const result = helpers.buildSnapshot(f.input);
+  assert.equal(result.shadow.adviceError, "real_roster_available_overlap");
+  assert.equal(result.recommendations.length, 0);
+  assert.equal(result.shadow.availablePlayerCount, 5);
+  assert.deepEqual(Array.from(result.shadow.quarantinedPlayers, row => row.yahooId), ["101"]);
 });
 
 test("REAL visible-pool advice labels unmodelled rows and accepts Yahoo name abbreviations", () => {
@@ -256,6 +289,7 @@ test("boot persists a settings receipt when Yahoo hydrates after document idle",
     document:documentRef,
     location:{ pathname:"/f1/420010/settings" },
     SKRODZKaiYahooRealBoard:healthyBoard(),
+    SKRODZKaiYahooMockRunner:{realExecutionEnabled:true},
     setInterval(callback) { tick = callback; return 1; },
     clearInterval() {},
   };
@@ -276,4 +310,15 @@ test("real shadow source contains no Yahoo execution primitive", () => {
   assert.doesNotMatch(shadowSource, /runtime\.onMessage/);
   assert.doesNotMatch(shadowSource, /setFilter\s*\(/);
   assert.doesNotMatch(shadowSource, /localStorage/);
+});
+
+test("enabled REAL draft client does not publish competing shadow advice", async () => {
+  const handle = await context.SKRODZKaiYahooRealShadow.boot({
+    location:{ pathname:"/draftclient/f1/420010/7" },
+    SKRODZKaiYahooMockRunner:{ realExecutionEnabled:true },
+    chrome:{ storage:{ session:{ async get() { return {}; } } },
+      runtime:{ sendMessage() { assert.fail("shadow must not publish on enabled REAL client"); } } },
+    setInterval() { assert.fail("no shadow refresh loop on enabled REAL client"); },
+  });
+  assert.equal(handle.getSnapshot(), null);
 });

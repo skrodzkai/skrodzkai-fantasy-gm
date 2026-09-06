@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, readdir, utimes, writeFile } from "node:fs/promises";
+import {createHash} from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -17,6 +18,38 @@ function response(bytes, headers = {}) {
     arrayBuffer: async () => bytes,
   };
 }
+
+test("health keeps verified false distinct from enabled and unknown, including evidence conflicts", () => {
+  const runnerSourceSha256="a".repeat(64);
+  const draftSignals={projectionUnchanged:true,roleAudit:{offenseTargets:150,idpTargets:40,rosterCoverageComplete:true,depthChartCoverageComplete:true},specialistContext:{scheduleComplete:true},sourceReceipts:[]};
+  for(const value of [false,true,null,undefined,"false"]) {
+    const health=buildHealth({draftSignals,runnerEvidence:{runnerSourceSha256,realExecutionEnabled:value}});
+    assert.equal(health.realLeagueExecutionDisabled,typeof value === "boolean" ? !value : null);
+    assert.equal(health.status,value===false ? "PASS" : "FAIL");
+  }
+  const mismatch=buildHealth({draftSignals,runnerEvidence:{runnerSourceSha256,realExecutionEnabled:false},rehearsal:{accepted:true,realExecutionEnabled:true,runnerSourceSha256}});
+  assert.ok(mismatch.reasons.includes("runner_evidence_mismatch"));
+});
+
+test("refresh failure publication retains actual switch evidence even before data exists", async () => {
+  for(const value of [false,true,null,undefined,"false"]) {
+    const root=await mkdtemp(join(tmpdir(),"draft-health-evidence-"));
+    const runnerPath=join(root,"runner.js");
+    const source=`globalThis.SKRODZKaiYahooMockRunner = ${JSON.stringify({realExecutionEnabled:value})};`;
+    await writeFile(runnerPath,source);
+    let failure;
+    try { await refreshDraftPrep({generatedAt:new Date().toISOString(),outputParent:root,allowedOutputRoot:root,runnerPath,baselinePath:join(root,"missing-baseline.json")}); }
+    catch(error){failure=error;}
+    assert.ok(failure?.finalPath);
+    const health=JSON.parse(await readFile(join(failure.finalPath,"nightly-health.json"),"utf8"));
+    assert.equal(health.status,"FAIL");
+    assert.equal(health.realLeagueExecutionDisabled,typeof value === "boolean" ? !value : null);
+    assert.equal(health.runnerSourceSha256,createHash("sha256").update(source).digest("hex"));
+    if(value===true) assert.ok(health.reasons.includes("real_execution_enabled"));
+    if(typeof value!=="boolean") assert.ok(health.reasons.includes("real_execution_state_unverified"));
+    assert.deepEqual(await readdir(failure.finalPath),["nightly-health.json"]);
+  }
+});
 
 function adpSnapshot() {
   return {
@@ -222,7 +255,7 @@ test("publishes the complete v15 artifact set with one atomic rename", async () 
   await publishSuccessfulRun({
     staging,
     finalPath,
-    board: { players: [] },
+    board: { leagueId:"420010",players: [] },
     extensionSource: "globalThis.board = {};\n",
     offlineBoardCsv: "value_rank,name\n1,Player\n",
     readiness: { status: "PASS" },
@@ -243,8 +276,8 @@ test("publishes the complete v15 artifact set with one atomic rename", async () 
     "real-shadow-acceptance-v15.json",
     "rehearsal-30s-v15.json",
     "source-snapshots",
-    "yahoo-mock-board-v15.csv",
-    "yahoo-mock-board-v15.js",
+    "yahoo-real-board-v15.csv",
+    "yahoo-real-board-v15.js",
   ]);
   await assert.rejects(() => readdir(staging), { code: "ENOENT" });
 });
@@ -286,6 +319,7 @@ test("health reasons fail closed on incomplete or mutating draft signals", () =>
   });
   assert.equal(health.status, "FAIL");
   assert.deepEqual(health.reasons, [
+    "real_execution_state_unverified",
     "draft_signal_overlay_mutated_projections",
     "top_150_offense_role_audit_missing",
     "top_40_idp_role_audit_missing",
@@ -359,7 +393,7 @@ test("stale caller-supplied Yahoo inputs publish a health-only failure atomicall
   assert.deepEqual(files, ["nightly-health.json"]);
   const health = JSON.parse(await readFile(join(outputParent, runs[0], "nightly-health.json"), "utf8"));
   assert.equal(health.status, "FAIL");
-  assert.match(health.reasons[0], /caller-supplied Yahoo snapshots are stale/);
+  assert.match(health.reasons.join("; "), /caller-supplied Yahoo snapshots are stale/);
 });
 
 test("a caller-supplied generatedAt cannot make old evidence look current", async () => {

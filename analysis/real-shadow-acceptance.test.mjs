@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {renderExtensionBoard} from "./export-extension-board.mjs";
 
 import { loadDecisionEngine, runRealShadowAcceptance } from "./real-shadow-acceptance.mjs";
 
@@ -21,14 +22,18 @@ function boardData() {
     const total = ["QB", "RB", "WR", "TE"].includes(position) ? 120 : 48;
     for (let index = 1; index <= total; index += 1) players.push(candidate(position, index, rank++));
   }
-  return { players, replacementBySlot:{ QB:100, RB:80, WR:80, TE:70, "W/R/T":80, K:30, DEF:30, D:25, DB:25, LB:25 } };
+  const config=engine.runner.configs.real_league_19_idp;
+  return { ...config.expectedScoring,replacementRoster:{teamCount:12,rosterSlots:config.rosterSlots.filter(s=>s!=="BN")},players, replacementBySlot:{ QB:100, RB:80, WR:80, TE:70, "W/R/T":80, K:30, DEF:30, D:25, DB:25, LB:25 } };
 }
 
 test("passes isolated 19-round real-roster decision stress at snake seats 1, 6, and 12", () => {
-  assert.deepEqual([...engine.decision.IDP_POSITIONS], ["D", "LB", "CB", "S"]);
-  const result = runRealShadowAcceptance({ engine, boardData:boardData(), settingsSnapshot:{ ready:true }, decisionBudgetMs:2_000 });
+  assert.deepEqual([...engine.runner.decision.IDP_POSITIONS], ["D", "LB", "CB", "S"]);
+  const result = runRealShadowAcceptance({ engine, boardSource:renderExtensionBoard(boardData(),{mode:"REAL"}), settingsSnapshot:{ ready:true }, decisionBudgetMs:2_000 });
   assert.equal(result.status, "PASS");
   assert.equal(result.execution, false);
+  assert.equal(result.realExecutionEnabled,false);
+  assert.equal(result.runnerSourceSha256,engine.runnerSourceSha256);
+  assert.match(result.boardSourceSha256,/^[a-f0-9]{64}$/);
   assert.equal(result.clockSeconds, 30);
   assert.deepEqual(result.seats.map((seat) => seat.decisions), [19, 19, 19]);
   assert.ok(result.seats.every((seat) => seat.idpCount <= 3 && (seat.counts.K ?? 0) <= 1 && (seat.counts.DEF ?? 0) <= 1));
@@ -36,5 +41,5 @@ test("passes isolated 19-round real-roster decision stress at snake seats 1, 6, 
 });
 
 test("refuses acceptance without verified real settings", () => {
-  assert.throws(() => runRealShadowAcceptance({ engine, boardData:boardData(), settingsSnapshot:{ ready:false } }), /settings must be verified/);
+  assert.throws(() => runRealShadowAcceptance({ engine, boardSource:renderExtensionBoard(boardData(),{mode:"REAL"}), settingsSnapshot:{ ready:false } }), /settings must be verified/);
 });

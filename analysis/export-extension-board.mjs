@@ -1,5 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
+import { basename } from "node:path";
+import { SCORING_SCHEMA_HASH, LEAGUE_STARTER_SLOTS } from "./build-v5-board.mjs";
 
 function finite(value) {
   return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
@@ -116,6 +118,7 @@ function specialistUsable(player) {
 }
 
 export function extensionBoardFromV5(board) {
+  const exportExclusions = [];
   const offenseSource = board?.boards?.offense ?? [];
   const offense = offenseSource
     .filter((player) => player.manualEligible !== false)
@@ -138,11 +141,15 @@ export function extensionBoardFromV5(board) {
             ? "S"
             : null;
     }
+    if (!position) exportExclusions.push({yahooId:String(player.yahooId),name:player.name,reason:"unsupported_concrete_idp_eligibility",eligible:[...eligible]});
     return position ? [compactSpecialist(player, position)] : [];
   }));
   if (offense.length < 100) throw new Error(`extension offense board too small: ${offense.length}`);
   if (kickers.length < 12) throw new Error(`extension kicker board too small: ${kickers.length}`);
-  if (defenses.length !== 32) throw new Error(`extension defense board must contain 32 teams: ${defenses.length}`);
+  if (defenses.length !== 32) {
+    const excluded = (specialists.DEF ?? []).filter((p) => !specialistUsable(p)).map((p) => ({yahooId:String(p.yahooId),name:p.name,health:p.injury?.draftAction ?? "MISSING",conflict:p.injury?.conflict===true,projection:p.consensusPoints ?? null}));
+    throw new Error(`extension defense board must contain 32 teams: ${defenses.length}; excluded=${JSON.stringify(excluded)}`);
+  }
   const playerByYahooId = new Map();
   const positionPriority = (position) => ["QB", "RB", "WR", "TE"].includes(position)
     ? 4
@@ -188,6 +195,7 @@ export function extensionBoardFromV5(board) {
   };
   return {
     generatedAt: board.generatedAt,
+    exportExclusions,
     source: `free-source board: raw projections scored under exact league rules and equal-weighted per independent source family; IDP projection fields use the consensus-anchored decision score only when the global historical gate passes (${board?.projectionModel?.idpRanking?.status ?? "calibration unavailable"}); rawProjection preserves consensus; market/history are timing context only; injuries use source-specific freshness`,
     leagueId: board.leagueId ?? null,
     scoringModel: board.scoringModel,
@@ -211,9 +219,19 @@ export function extensionBoardFromV5(board) {
   };
 }
 
-export function renderExtensionBoard(board, { mode = "TEST" } = {}) {
+export function validateBoardBinding(board, mode) {
   if (!["TEST", "REAL"].includes(mode)) throw new Error("extension export mode must be TEST or REAL");
-  if (mode === "REAL" && (String(board.leagueId) !== "420010" || board.scoringModel !== "2-minute-drillers-2026")) throw new Error("REAL export requires the exact REAL board");
+  const testConfig = globalThis.SKRODZKaiYahooMockRunner.configs.test_league_19_idp;
+  const expected = mode === "REAL" ? {leagueId:"420010",scoringModel:"2-minute-drillers-2026",scoringSchemaHash:SCORING_SCHEMA_HASH} : testConfig.expectedScoring;
+  const slots = mode === "REAL" ? LEAGUE_STARTER_SLOTS : testConfig.rosterSlots.filter((slot) => slot !== "BN");
+  const teams=board.replacementRoster?.teamCount;
+  const teamMatch = mode === "REAL" ? teams === 12 : Number.isInteger(teams) && teams >= 10 && teams <= 12;
+  if (!Object.entries(expected).every(([key,value]) => board[key] === value) || !teamMatch ||
+      JSON.stringify(board.replacementRoster?.rosterSlots) !== JSON.stringify(slots)) throw new Error(`${mode} export requires the exact ${mode} board, scoring and replacement roster`);
+}
+
+export function renderExtensionBoard(board, { mode } = {}) {
+  validateBoardBinding(board,mode);
   const runtimeBoard = {
     leagueId: board.leagueId ?? null,
     generatedAt: board.generatedAt,
@@ -232,6 +250,7 @@ export function renderExtensionBoard(board, { mode = "TEST" } = {}) {
     injuryFreshnessPolicy: board.injuryFreshnessPolicy,
     byeCoverage: board.byeCoverage,
     players: board.players,
+    exportExclusions:board.exportExclusions ?? [],
     defenses: board.defenses,
   };
   const binding = mode === "REAL" ? "SKRODZKaiYahooRealBoard" : "SKRODZKaiYahooMockBoard";
@@ -272,10 +291,12 @@ async function main() {
     const [key, ...value] = entry.split("=");
     return [key.replace(/^--/, ""), value.join("=")];
   }));
-  if (!args.input || !args.output) throw new Error("usage: node analysis/export-extension-board.mjs --input=board.json --output=extension/yahoo-mock-board.js");
+  if (!args.input || !args.output || !["TEST","REAL"].includes(args.mode)) throw new Error("usage: node analysis/export-extension-board.mjs --mode=TEST|REAL --input=board.json --output=extension/yahoo-mock-board.js|yahoo-real-board.js");
+  const expectedName = args.mode === "REAL" ? /^yahoo-real-board(?:-v\d+)?\.js$/ : /^yahoo-mock-board(?:-v\d+)?\.js$/;
+  if (!expectedName.test(basename(args.output))) throw new Error("extension output basename disagrees with mode");
   const source = JSON.parse(await readFile(args.input, "utf8"));
   const board = extensionBoardFromV5(source);
-  await writeFile(args.output, renderExtensionBoard(board, { mode:args.mode ?? "TEST" }), "utf8");
+  await writeFile(args.output, renderExtensionBoard(board, { mode:args.mode }), "utf8");
   if (args["csv-output"]) await writeFile(args["csv-output"], renderOfflineBoardCsv(board), "utf8");
   process.stdout.write(`${JSON.stringify({ output: args.output, csvOutput: args["csv-output"] ?? null, offense: board.offense.length, kickers: board.kickers.length, defenses: board.defenses.length, idp: board.idp.length })}\n`);
 }

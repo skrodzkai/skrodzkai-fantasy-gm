@@ -20,6 +20,8 @@
         "https://football.fantasysports.yahoo.com/draftclient/f1/*"
       ],
       "exclude_matches": [
+        "https://football.fantasysports.yahoo.com/draftclient/f1/420010",
+        "https://football.fantasysports.yahoo.com/draftclient/f1/420010?*",
         "https://football.fantasysports.yahoo.com/draftclient/f1/420010/*"
       ],
       "js": [
@@ -36,8 +38,10 @@
         "https://football.fantasysports.yahoo.com/f1/420010/settings*",
         "https://football.fantasysports.yahoo.com/f1/420010/draft*",
         "https://football.fantasysports.yahoo.com/f1/420010/7",
+        "https://football.fantasysports.yahoo.com/f1/420010/7?*",
         "https://football.fantasysports.yahoo.com/f1/420010/7/*",
         "https://football.fantasysports.yahoo.com/draftclient/f1/420010/7",
+        "https://football.fantasysports.yahoo.com/draftclient/f1/420010/7?*",
         "https://football.fantasysports.yahoo.com/draftclient/f1/420010/7/*"
       ],
       "js": [

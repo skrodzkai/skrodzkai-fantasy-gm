@@ -34,7 +34,9 @@
   function modeAllowlist({ mode = "MOCK", leagueId = "" } = {}) {
     const normalizedMode = String(mode ?? "").trim().toUpperCase();
     const normalizedLeague = String(leagueId ?? "").trim();
-    if (normalizedMode === "REAL") return { allowed: false, reason: "REAL mode is hard-disabled" };
+    if (normalizedMode === "REAL") return realEnabled() && normalizedLeague === DISABLED_LEAGUE_ID
+      ? {allowed:true, mode:normalizedMode, leagueId:normalizedLeague}
+      : { allowed: false, reason: "REAL mode is hard-disabled" };
     if (normalizedLeague === DISABLED_LEAGUE_ID) {
       return { allowed: false, reason: `league ${DISABLED_LEAGUE_ID} is hard-disabled` };
     }
@@ -112,10 +114,14 @@
     return root.SKRODZKaiYahooPageReaders.boardHealthGate(boardData, now, { maximumAgeMs:BOARD_MAX_AGE_MS, futureToleranceMs:BOARD_FUTURE_TOLERANCE_MS });
   }
 
-  function requiredTestFilterLabels(environment = root) {
-    const readLabels = environment.SKRODZKaiYahooMockRunner?._test?.requiredTestFilterLabels;
+  function realEnabled(environment = root) {
+    return environment.SKRODZKaiYahooMockRunner?.realExecutionEnabled === true;
+  }
+
+  function requiredFilterLabels(environment = root, config = environment.SKRODZKaiYahooMockRunner?.configs.test_league_19_idp) {
+    const readLabels = environment.SKRODZKaiYahooMockRunner?._test?.requiredFilterLabels;
     if (typeof readLabels !== "function") throw new Error("runner_filter_contract_missing");
-    return readLabels();
+    return readLabels(config);
   }
 
   function parseSequentialTeamCount(bodyText) {
@@ -270,7 +276,7 @@
     if (roster?.filled !== 0 || roster?.total !== 19) errors.push("test_empty_roster_required");
     if (readers.readAutodraftState(documentRef) !== "INACTIVE") errors.push("test_autodraft_not_off");
     if (readers.readQueueState(documentRef) !== "EMPTY") errors.push("test_queue_not_empty");
-    if (!requiredTestFilterLabels().every((label) => findFilter(documentRef, label))) errors.push("test_filters_missing");
+    if (!requiredFilterLabels().every((label) => findFilter(documentRef, label))) errors.push("test_filters_missing");
     return { roomId:TEST_LEAGUE_ID, urlSeat:TEST_TEAM_ID, seat, teamCount,
       rosterSlots:validTestSettingsReceipt(settingsReceipt, now) ? [...settingsReceipt.observedRosterSlots] : [],
       errors, ready:errors.length === 0 };
@@ -295,14 +301,59 @@
     return armRecord;
   }
 
-  function validateDraftPreflight(token, room, now = Date.now(), boardData = root.SKRODZKaiYahooMockBoard) {
-    if (!token || !["public_mock_15", "test_league_19_idp"].includes(token.mode)) return "approved_draft_arm_required";
+  function validRealSettingsReceipt(receipt, now = Date.now()) {
+    const shadow = root.SKRODZKaiYahooRealShadow?._test;
+    const config = root.SKRODZKaiYahooMockRunner.configs.real_league_19_idp;
+    return Boolean(shadow?.validSettingsReceipt(receipt, now) &&
+      Object.entries(config.expectedScoring).every(([key,value]) => shadow.scoringIdentity[key] === value) &&
+      receipt.rosterSlots.filter((slot) => slot === "IR").length === 1 &&
+      sameSlots(receipt.rosterSlots.filter((slot) => slot !== "IR"), config.rosterSlots));
+  }
+
+  function parseRealDraftClient(documentRef, locationRef, settingsReceipt, now = Date.now()) {
+    const readers = root.SKRODZKaiYahooPageReaders;
+    const config = root.SKRODZKaiYahooMockRunner.configs.real_league_19_idp;
+    const body = readers.draftSurfaceText(documentRef);
+    const room = readers.parseRoom(locationRef?.pathname);
+    const seat = root.SKRODZKaiYahooRealShadow?._test.clientDraftSlot(documentRef);
+    const titleSeat = Number(String(documentRef.title ?? "").match(/^You pick (\d{1,2})(?:st|nd|rd|th) \| Live NFL Draft \| Yahoo Fantasy Sports$/)?.[1]);
+    const errors = [];
+    if (!realEnabled()) errors.push("real_execution_disabled");
+    if (room?.roomId !== config.leagueId || room?.seat !== config.urlTeamId) errors.push("real_identity_mismatch");
+    if (!validRealSettingsReceipt(settingsReceipt, now)) errors.push("real_settings_preflight_required");
+    if (!/^2 minute Drillers$/im.test(body) || !/^Draft Starting Soon$/m.test(body)) errors.push("real_prestart_required");
+    if (!seat || seat !== titleSeat) errors.push("real_draft_slot_mismatch");
+    const roster = readers.parseRosterCount(body);
+    if (roster?.filled !== 0 || roster?.total !== config.rosterTotal) errors.push("real_empty_roster_required");
+    if (readers.readAutodraftState(documentRef) !== "INACTIVE") errors.push("real_autodraft_not_off");
+    if (readers.readQueueState(documentRef) !== "EMPTY") errors.push("real_queue_not_empty");
+    if (!requiredFilterLabels(root,config).every((label) => findFilter(documentRef,label))) errors.push("real_filters_missing");
+    return {roomId:config.leagueId,urlSeat:config.urlTeamId,seat,teamCount:config.teams,
+      rosterSlots:validRealSettingsReceipt(settingsReceipt,now) ? settingsReceipt.rosterSlots.filter((slot) => slot !== "IR") : [],
+      settingsReceipt,errors,ready:errors.length===0};
+  }
+
+  function makeRealPreflight(snapshot, now = Date.now(), boardData = root.SKRODZKaiYahooRealBoard) {
+    if (!snapshot?.ready || !realEnabled()) throw new Error("real_preflight_not_ready");
+    const token = {version:VERSION,mode:"real_league_19_idp",roomId:snapshot.roomId,urlSeat:snapshot.urlSeat,
+      seat:snapshot.seat,observedTeamCount:snapshot.teamCount,observedRosterSlots:[...snapshot.rosterSlots],
+      settingsReceipt:snapshot.settingsReceipt,armedAt:now,expiresAt:Math.min(now+PREFLIGHT_TTL_MS,snapshot.settingsReceipt.expiresAt),
+      boardHealth:boardHealthReceipt(boardData,now)};
+    const failure=validateDraftPreflight(token,{roomId:token.roomId,seat:token.urlSeat},now,boardData);
+    if(failure) throw new Error(failure);
+    return token;
+  }
+
+  function validateDraftPreflight(token, room, now = Date.now(), boardData = token?.mode === "real_league_19_idp" ? root.SKRODZKaiYahooRealBoard : root.SKRODZKaiYahooMockBoard) {
+    const isReal = token?.mode === "real_league_19_idp";
+    if (!token || !["public_mock_15", "test_league_19_idp", ...(realEnabled() ? ["real_league_19_idp"] : [])].includes(token.mode)) return "approved_draft_arm_required";
     if (token.version !== VERSION) return "draft_arm_version_mismatch";
-    if (String(room?.roomId ?? token.roomId) === DISABLED_LEAGUE_ID) return "league_420010_hard_disabled";
+    if (String(room?.roomId ?? token.roomId) === DISABLED_LEAGUE_ID && !(isReal && realEnabled())) return "league_420010_hard_disabled";
+    if (isReal && (token.roomId !== DISABLED_LEAGUE_ID || token.urlSeat !== 7 || !validRealSettingsReceipt(token.settingsReceipt,now))) return "real_settings_or_identity_mismatch";
     const boardFailure = boardHealthGate(boardData, now);
     if (boardFailure) return boardFailure;
     if (!Number.isFinite(token.expiresAt) || token.expiresAt <= now) return "draft_arm_expired";
-    const expectedUrlSeat = token.mode === "test_league_19_idp" ? Number(token.urlSeat) : Number(token.seat);
+    const expectedUrlSeat = token.mode !== "public_mock_15" ? Number(token.urlSeat) : Number(token.seat);
     if (!room || String(token.roomId) !== String(room.roomId) || expectedUrlSeat !== Number(room.seat)) {
       return "draft_room_or_url_team_changed";
     }
@@ -312,11 +363,11 @@
       : observedTeamCount === 12;
     if (!validTeamCount) return token.mode === "test_league_19_idp" ? "draft_team_count_out_of_range" : "draft_team_count_not_12";
     if (!Number.isInteger(Number(token.seat)) || Number(token.seat) < 1 || Number(token.seat) > observedTeamCount) return "draft_slot_invalid";
-    const expectedRoster = token.mode === "test_league_19_idp" ? TEST_ROSTER_SLOTS : PUBLIC_ROSTER_SLOTS;
+    const expectedRoster = isReal ? root.SKRODZKaiYahooMockRunner.configs.real_league_19_idp.rosterSlots : token.mode === "test_league_19_idp" ? TEST_ROSTER_SLOTS : PUBLIC_ROSTER_SLOTS;
     if (!sameSlots(token.observedRosterSlots, expectedRoster)) return "draft_roster_shape_mismatch";
     if (token.mode === "test_league_19_idp" && (String(token.roomId) !== TEST_LEAGUE_ID || Number(token.urlSeat) !== TEST_TEAM_ID)) return "test_identity_mismatch";
-    if (token.mode === "test_league_19_idp") {
-      const config = { ...root.SKRODZKaiYahooMockRunner.configs.test_league_19_idp, teams:observedTeamCount };
+    if (token.mode === "test_league_19_idp" || isReal) {
+      const config = { ...root.SKRODZKaiYahooMockRunner.configs[token.mode], teams:observedTeamCount };
       return root.SKRODZKaiYahooMockRunner.decision.scoringFailure(config, boardData) ??
         root.SKRODZKaiYahooMockRunner.decision.replacementFailure(config, boardData.replacementRoster);
     }
@@ -379,14 +430,15 @@
 
   function refuseArmForBoardHealth(environment, rail, { kind, roomId, seat, urlSeat = seat, expectedRosterTotal }, error) {
     const failure = String(error?.message ?? error);
-    writeReceipt(environment.localStorage, { kind, roomId, seat, urlSeat, failure, boardHealth: boardHealthReceipt(environment.SKRODZKaiYahooMockBoard) });
+    const boardData = roomId === DISABLED_LEAGUE_ID ? environment.SKRODZKaiYahooRealBoard : environment.SKRODZKaiYahooMockBoard;
+    writeReceipt(environment.localStorage, { kind, roomId, seat, urlSeat, failure, boardHealth: boardHealthReceipt(boardData) });
     rail.setWarnings(buildUiWarnings({
       room: { roomId, seat: urlSeat },
       armRecord: null,
       autodraft: false,
       roster: null,
-      board: environment.SKRODZKaiYahooMockBoard?.players ?? [],
-      boardData: environment.SKRODZKaiYahooMockBoard,
+      board: boardData?.players ?? [],
+      boardData,
       expectedRosterTotal,
     }));
     rail.render("bad", "BOARD HEALTH LOCKED", failure);
@@ -466,7 +518,7 @@
       const source = Array.isArray(boardData.players)
         ? boardData.players
         : [...boardData.offense, ...boardData.kickers, ...(boardData.idp ?? [])];
-      const allowed = mode === "TEST"
+      const allowed = ["TEST","REAL"].includes(mode)
         ? source
         : source.filter((player) => ["QB", "RB", "WR", "TE", "K", "DEF"].includes(normalize(player.position)));
       return [...new Map([...allowed.filter((player) => normalize(player.position) !== "DEF"), ...defenses]
@@ -888,7 +940,7 @@
     const activeMatches = activeToken && String(activeToken.roomId) === roomId && Number(activeToken.urlSeat ?? activeToken.seat) === urlSeat;
     const preflightRecord = activeMatches ? activeToken : readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
     const tokenMatches = preflightRecord && String(preflightRecord.roomId) === roomId && Number(preflightRecord.urlSeat ?? preflightRecord.seat) === urlSeat;
-    return { roomId, urlSeat, seat: tokenMatches ? Number(preflightRecord.seat) : roomId === TEST_LEAGUE_ID ? null : draft ? urlSeat : null };
+    return { roomId, urlSeat, seat: tokenMatches ? Number(preflightRecord.seat) : [TEST_LEAGUE_ID,DISABLED_LEAGUE_ID].includes(roomId) ? null : draft ? urlSeat : null };
   }
 
   function lockExtensionContext(environment, rail, error = null) {
@@ -1083,15 +1135,14 @@
     const startedAt = Date.now();
     while (Date.now() - startedAt < deadlineMs) {
       const roster = controllerApi.runtime.parseRosterCount(documentRef.body?.innerText);
-      const labels = executionMode === "TEST"
-        ? requiredTestFilterLabels(environment)
-        : ["All Positions", "Team Defenses", "Kickers"];
+      const configName = executionMode === "REAL" ? "real_league_19_idp" : executionMode === "TEST" ? "test_league_19_idp" : "public_mock_15";
+      const labels = requiredFilterLabels(environment,environment.SKRODZKaiYahooMockRunner.configs[configName]);
       const filtersReady = labels
         .every((label) => findFilter(documentRef, label));
       if (roster?.filled === 0 && roster?.total === expectedRosterTotal && filtersReady) return roster;
       await new Promise((resolve) => environment.setTimeout(resolve, 50));
     }
-    throw new Error(executionMode === "TEST" ? "empty_test_draft_not_ready" : "empty_public_mock_draft_not_ready");
+    throw new Error(executionMode === "REAL" ? "empty_real_draft_not_ready" : executionMode === "TEST" ? "empty_test_draft_not_ready" : "empty_public_mock_draft_not_ready");
   }
 
   function buildUiRoster(picks = [], rosterSlots = PUBLIC_ROSTER_SLOTS) {
@@ -1100,13 +1151,13 @@
     return allocate(picks, rosterSlots);
   }
 
-  function parseFinalRosterDocument(documentRef, picks = []) {
+  function parseFinalRosterDocument(documentRef, picks = [], rosterSlots = TEST_ROSTER_SLOTS) {
     const byId = new Map(Array.from(picks, (pick) => [String(pick.yahooId), pick]));
     const rows = [];
     for (const row of documentRef.querySelectorAll("tr.editable")) {
       const cells = [...row.querySelectorAll("td")];
       const slot = normalize(cells[0]?.innerText);
-      if (![...TEST_ROSTER_SLOTS, "BN"].includes(slot)) continue;
+      if (!rosterSlots.includes(slot)) continue;
       const empty = row.classList?.contains?.("empty-position") || /\(EMPTY\)/i.test(String(cells[1]?.innerText ?? ""));
       if (empty) {
         rows.push({ slot, yahooId:null, name:null, empty:true });
@@ -1182,7 +1233,7 @@
       nextPick: "—",
       intervening: "—",
       atRisk: [],
-      managerNote: executionMode === "TEST" ? "TEST ROOM · 2 Minute Drillers manager histories do not apply to these opponents." : "PUBLIC MOCK · room behavior only; historical manager profiles are not applicable.",
+      managerNote: executionMode === "REAL" ? "REAL · use the private offline opponent cards; live manager predictions are unavailable." : executionMode === "TEST" ? "TEST ROOM · 2 Minute Drillers manager histories do not apply to these opponents." : "PUBLIC MOCK · room behavior only; historical manager profiles are not applicable.",
     };
     const atRisk = Array.from(decision.positionLeaders ?? [])
       .filter((leader) => Number(leader.pAvailableNext) < 0.5)
@@ -1193,11 +1244,11 @@
       nextPick: decision.nextPick ?? "—",
       intervening: decision.interveningOpponentPicks ?? "—",
       atRisk,
-      managerNote: executionMode === "TEST" ? "TEST ROOM · market timing and snake window; live run pressure is not applied; 2 Minute Drillers owner models are intentionally withheld." : "PUBLIC MOCK · market timing and snake window; live run pressure is not applied.",
+      managerNote: executionMode === "REAL" ? "REAL · exact snake window; private opponent cards are offline. No live run-pressure or manager prediction." : executionMode === "TEST" ? "TEST ROOM · market timing and snake window; live run pressure is not applied; 2 Minute Drillers owner models are intentionally withheld." : "PUBLIC MOCK · market timing and snake window; live run pressure is not applied.",
     };
   }
 
-  function buildUiWarnings({ room, armRecord, autodraft, roster, board, boardData = root.SKRODZKaiYahooMockBoard, decision = null, expectedRosterTotal = 15, now = Date.now() }) {
+  function buildUiWarnings({ room, armRecord, autodraft, roster, board, boardData = room?.roomId === DISABLED_LEAGUE_ID ? root.SKRODZKaiYahooRealBoard : root.SKRODZKaiYahooMockBoard, decision = null, expectedRosterTotal = 15, now = Date.now() }) {
     const health = boardHealthReceipt(boardData, now);
     const healthFailure = boardHealthGate(boardData, now);
     const asOf = health.generatedAt ? new Date(health.generatedAt).toISOString() : "missing";
@@ -1218,7 +1269,7 @@
     ];
     if (autodraft) warnings.unshift({ severity: "danger", text: "Autodraft is active: execution is fail-closed." });
     if (!armRecord) warnings.unshift({ severity: "danger", text: "Roster mismatch or missing arm token: locked." });
-    if (room?.roomId === DISABLED_LEAGUE_ID) warnings.unshift({ severity: "danger", text: "League 420010 is hard-disabled." });
+    if (room?.roomId === DISABLED_LEAGUE_ID && !realEnabled()) warnings.unshift({ severity: "danger", text: "League 420010 is hard-disabled." });
     if (!roster || roster.total !== expectedRosterTotal) warnings.push({ severity: "danger", text: `Roster mismatch: expected ${expectedRosterTotal} slots.` });
     if (!Array.isArray(board) || board.length < 6) warnings.push({ text: "Recommendation board has fewer than six verified entries." });
     return warnings;
@@ -1446,24 +1497,38 @@
   async function bootDraft(environment, rail, bridge) {
     const controllerApi = environment.SKRODZKaiYahooDraftController;
     const runnerApi = environment.SKRODZKaiYahooMockRunner;
-    const boardData = environment.SKRODZKaiYahooMockBoard;
-    if (!controllerApi || !runnerApi || !boardData) throw new Error("extension_dependencies_missing");
+    if (!controllerApi || !runnerApi) throw new Error("extension_dependencies_missing");
     const room = controllerApi.runtime.parseRoom(environment.location.pathname);
     if (!room) throw new Error("draft_room_missing");
+    const isReal = room.roomId === DISABLED_LEAGUE_ID;
+    if (isReal && (!realEnabled(environment) || room.seat !== 7)) {
+      rail.setMode("REAL"); rail.controls.arm.disabled = true;
+      rail.render("bad","LOCKED","REAL mode is hard-disabled or the team identity is wrong");
+      return;
+    }
+    const boardData = isReal ? environment.SKRODZKaiYahooRealBoard : environment.SKRODZKaiYahooMockBoard;
+    if (!boardData) throw new Error("extension_dependencies_missing");
+    const leagueMode = isReal ? "REAL" : "TEST";
+    const leagueConfig = runnerApi.configs[isReal ? "real_league_19_idp" : "test_league_19_idp"];
+    const leagueId = leagueConfig.leagueId;
+    const teamId = leagueConfig.urlTeamId;
+    const leagueName = isReal ? "2 minute Drillers" : "League Two";
+    const realSettingsKey = environment.SKRODZKaiYahooRealShadow?.settingsKey;
+    const realSettings = isReal ? (await environment.chrome.storage.session.get(realSettingsKey))[realSettingsKey] : null;
     const armRecord = readJson(environment.sessionStorage, PREFLIGHT_KEY, null);
     if (room.roomId === TEST_LEAGUE_ID && Number(room.seat) !== TEST_TEAM_ID) throw new Error("test_identity_mismatch");
-    if (room.roomId === TEST_LEAGUE_ID && Number(room.seat) === TEST_TEAM_ID && validateDraftPreflight(armRecord, room)) {
+    if (room.roomId === leagueId && Number(room.seat) === teamId && validateDraftPreflight(armRecord, room, Date.now(), boardData)) {
       if (armRecord) {
         environment.sessionStorage.removeItem(PREFLIGHT_KEY);
-        writeReceipt(environment.localStorage, { kind:"test_stale_arm_disarmed", roomId:room.roomId, urlSeat:room.seat, failure:validateDraftPreflight(armRecord, room) });
+        writeReceipt(environment.localStorage, { kind:`${leagueMode.toLowerCase()}_stale_arm_disarmed`, roomId:room.roomId, urlSeat:room.seat, failure:validateDraftPreflight(armRecord, room,Date.now(),boardData) });
       }
-      rail.setMode("TEST");
+      rail.setMode(leagueMode);
       rail.setExpanded(true);
-      rail.setRoster(TEST_ROSTER_SLOTS.map((slot) => ({ slot })));
-      rail.setBetweenTurns(buildUiOpponentWindow(null, "TEST"));
-      rail.setContext({ roomId: TEST_LEAGUE_ID, league: "League Two", armed: false, autodraft: controllerApi.runtime.isAutodraftActive(environment.document), kill: false });
-      const readPreflight = () => parseTestDraftClient(environment.document, environment.location,
-        readJson(environment.localStorage, TEST_SETTINGS_KEY, null));
+      rail.setRoster(leagueConfig.rosterSlots.map((slot) => ({ slot })));
+      rail.setBetweenTurns(buildUiOpponentWindow(null, leagueMode));
+      rail.setContext({ roomId: leagueId, league: leagueName, armed: false, autodraft: controllerApi.runtime.isAutodraftActive(environment.document), kill: false });
+      const readPreflight = () => isReal ? parseRealDraftClient(environment.document,environment.location,realSettings)
+        : parseTestDraftClient(environment.document, environment.location,readJson(environment.localStorage, TEST_SETTINGS_KEY, null));
       let pendingTimer = null;
       let lastBlocker = null;
       const update = () => {
@@ -1471,18 +1536,18 @@
         const snapshot = readPreflight();
         const roster = controllerApi.runtime.readRosterCount(environment.document);
         const blocker = !roster ? "test_roster_readback_unavailable" : roster.filled > 0 ? "RECOVERY REQUIRED: roster is not empty; automatic resume is disabled"
-          : boardHealthGate(boardData) ?? runnerApi.decision.scoringFailure(runnerApi.configs.test_league_19_idp, boardData);
+          : boardHealthGate(boardData) ?? runnerApi.decision.scoringFailure(leagueConfig, boardData);
         const ready = snapshot.ready && !blocker;
-        rail.controls.arm.textContent = "ARM TEST";
+        rail.controls.arm.textContent = `ARM ${leagueMode}`;
         rail.controls.arm.disabled = !ready;
         rail.setContext({ seat:snapshot.seat > 0 ? snapshot.seat : null, observedRosterCount:roster?.filled ?? null });
         const failure = [blocker, ...snapshot.errors].filter(Boolean).join(" · ");
         if (failure && failure !== lastBlocker) {
-          writeReceipt(environment.localStorage, { kind:"test_preflight_locked", roomId:TEST_LEAGUE_ID, urlSeat:TEST_TEAM_ID, seat:null, failure, observedRosterCount:roster?.filled ?? null });
+          writeReceipt(environment.localStorage, { kind:`${leagueMode.toLowerCase()}_preflight_locked`, roomId:leagueId, urlSeat:teamId, seat:null, failure, observedRosterCount:roster?.filled ?? null });
           lastBlocker = failure;
         }
-        rail.render(ready ? "ok" : "bad", ready ? "TEST READY TO ARM" : "TEST PREFLIGHT LOCKED",
-          ready ? `League Two · ${snapshot.teamCount} teams · snake slot ${snapshot.seat} · Yahoo team ${TEST_TEAM_ID}` : failure);
+        rail.render(ready ? "ok" : "bad", ready ? `${leagueMode} READY TO ARM` : `${leagueMode} PREFLIGHT LOCKED`,
+          ready ? `${leagueName} · ${snapshot.teamCount} teams · snake slot ${snapshot.seat} · Yahoo team ${teamId}` : failure);
       };
       update();
       pendingTimer = environment.setInterval(update, 250);
@@ -1492,27 +1557,27 @@
         try {
           await requireCurrentExtensionVersion(environment);
           const snapshot = readPreflight();
-          const nextArmRecord = makeTestPreflight(snapshot, Date.now(), boardData);
+          const nextArmRecord = isReal ? makeRealPreflight(snapshot, Date.now(), boardData) : makeTestPreflight(snapshot, Date.now(), boardData);
           environment.sessionStorage.setItem(PREFLIGHT_KEY, JSON.stringify(nextArmRecord));
-          writeReceipt(environment.localStorage, { kind:"test_armed_from_draftclient", roomId:TEST_LEAGUE_ID, seat:snapshot.seat, urlSeat:TEST_TEAM_ID, observedTeamCount:snapshot.teamCount });
+          writeReceipt(environment.localStorage, { kind:`${leagueMode.toLowerCase()}_armed_from_draftclient`, roomId:leagueId, seat:snapshot.seat, urlSeat:teamId, observedTeamCount:snapshot.teamCount });
           await bootDraft(environment, rail, bridge);
         } catch (error) {
-          environment[GLOBAL_KEY]?.runner?.halt("test_room_arm_failure");
+          environment[GLOBAL_KEY]?.runner?.halt(`${leagueMode.toLowerCase()}_room_arm_failure`);
           environment.sessionStorage.removeItem(PREFLIGHT_KEY);
           rail.setContext({ armed:false });
-          rail.render("bad", "TEST ARM REFUSED", `${String(error?.message ?? error)} · terminal refusal; leave the room, correct preflight, then enter through Yahoo's draft link. No automatic retry.`);
-          writeReceipt(environment.localStorage, { kind:"test_room_arm_refused", roomId:TEST_LEAGUE_ID, seat:null, urlSeat:TEST_TEAM_ID, failure:String(error?.message ?? error) });
+          rail.render("bad", `${leagueMode} ARM REFUSED`, `${String(error?.message ?? error)} · terminal refusal; leave the room, correct preflight, then enter through Yahoo's draft link. No automatic retry.`);
+          writeReceipt(environment.localStorage, { kind:`${leagueMode.toLowerCase()}_room_arm_refused`, roomId:leagueId, seat:null, urlSeat:teamId, failure:String(error?.message ?? error) });
         }
       }, { once:true });
       return;
     }
-    const executionMode = armRecord?.mode === "test_league_19_idp" ? "TEST" : armRecord?.mode === "public_mock_15" ? "MOCK" : "UNKNOWN";
+    const executionMode = armRecord?.mode === "real_league_19_idp" ? "REAL" : armRecord?.mode === "test_league_19_idp" ? "TEST" : armRecord?.mode === "public_mock_15" ? "MOCK" : "UNKNOWN";
     const mode = modeAllowlist({ mode: executionMode, leagueId: room.roomId });
-    const draftSeat = executionMode === "TEST" ? Number(armRecord?.seat) : room.seat;
-    const configName = executionMode === "TEST" ? "test_league_19_idp" : "public_mock_15";
-    const expectedRosterTotal = executionMode === "TEST" ? 19 : 15;
-    const rosterSlots = executionMode === "TEST" ? TEST_ROSTER_SLOTS : PUBLIC_ROSTER_SLOTS;
-    const leagueLabel = executionMode === "TEST" ? "League Two" : room.roomId === DISABLED_LEAGUE_ID ? "420010 BLOCKED" : "PUBLIC";
+    const draftSeat = ["TEST","REAL"].includes(executionMode) ? Number(armRecord?.seat) : room.seat;
+    const configName = executionMode === "REAL" ? "real_league_19_idp" : executionMode === "TEST" ? "test_league_19_idp" : "public_mock_15";
+    const expectedRosterTotal = runnerApi.configs[configName].rosterTotal;
+    const rosterSlots = runnerApi.configs[configName].rosterSlots;
+    const leagueLabel = executionMode === "REAL" ? "2 minute Drillers" : executionMode === "TEST" ? "League Two" : "PUBLIC";
     const receiptRoom = { roomId: room.roomId, seat: draftSeat, urlSeat: room.seat };
     rail.setMode(executionMode);
     rail.setExpanded(true);
@@ -1525,7 +1590,7 @@
       return;
     }
     enableExport(environment, rail, receiptRoom);
-    const preflightError = validateDraftPreflight(armRecord, room);
+    const preflightError = validateDraftPreflight(armRecord, room, Date.now(), boardData);
     if (preflightError) {
       writeReceipt(environment.localStorage, { kind: "extension_locked", ...receiptIdentity(environment), failure: preflightError });
       rail.setWarnings(buildUiWarnings({ room, armRecord: null, autodraft: controllerApi.runtime.isAutodraftActive(environment.document), roster: null, board: boardData.players, boardData, expectedRosterTotal }));
@@ -1746,7 +1811,12 @@
       validTestSettingsReceipt,
       parseTestDraftHome,
       parseTestDraftClient,
-      requiredTestFilterLabels,
+      requiredFilterLabels,
+      validRealSettingsReceipt,
+      parseRealDraftClient,
+      makeRealPreflight,
+      prepareBoard,
+      bootDraft,
       parseFinalRosterDocument,
       makeTestPreflight,
       validateDraftPreflight,

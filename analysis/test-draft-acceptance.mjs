@@ -285,7 +285,7 @@ function evaluateDraftExport(payload, options = {}) {
     const turn = String(entry.turn ?? "");
     if (decisionsByTurn.has(turn)) errors.push(`duplicate_runner_decision:${turn}`);
     decisionsByTurn.set(turn, entry);
-    const allowedViews = publicMock ? ["All Positions"] : globalThis.SKRODZKaiYahooMockRunner._test.requiredTestFilterLabels();
+    const allowedViews = publicMock ? ["All Positions"] : globalThis.SKRODZKaiYahooMockRunner._test.requiredFilterLabels(globalThis.SKRODZKaiYahooMockRunner.configs.test_league_19_idp);
     const coverage = entry.coverage;
     if (!allowedViews.includes(entry.filterLabel) || coverage?.filterLabel !== entry.filterLabel || coverage?.turn !== turn ||
         coverage?.scope !== "fresh_clickable_rendered_rows" || !Number.isFinite(coverage?.observedAt) ||

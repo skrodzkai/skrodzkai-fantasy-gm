@@ -4,11 +4,13 @@ import test from "node:test";
 import vm from "node:vm";
 
 import { extensionBoardFromV5, renderExtensionBoard, renderOfflineBoardCsv } from "./export-extension-board.mjs";
+import {SCORING_SCHEMA_HASH,LEAGUE_STARTER_SLOTS} from "./build-v5-board.mjs";
+const realBinding = {leagueId:"420010",scoringModel:"2-minute-drillers-2026",scoringSchemaHash:SCORING_SCHEMA_HASH,replacementRoster:{teamCount:12,rosterSlots:LEAGUE_STARTER_SLOTS}};
 
 const controllerSource = await readFile(new URL("../controller/yahoo-mock-runner.js", import.meta.url), "utf8");
 
 test("REAL export is explicitly isolated from the TEST global", () => {
-  const board = { leagueId:"420010", scoringModel:"2-minute-drillers-2026", players:[] };
+  const board = {...realBinding,players:[]};
   const context = {};
   vm.createContext(context);
   vm.runInContext(renderExtensionBoard(board, {mode:"REAL"}), context);
@@ -16,6 +18,9 @@ test("REAL export is explicitly isolated from the TEST global", () => {
   assert.equal(context.SKRODZKaiYahooMockBoard, undefined);
   assert.throws(() => renderExtensionBoard({...board,leagueId:"542830"}, {mode:"REAL"}), /exact REAL board/);
   assert.throws(() => renderExtensionBoard(board, {mode:"OTHER"}), /mode/);
+  assert.throws(() => renderExtensionBoard(board), /mode/);
+  assert.throws(() => renderExtensionBoard(board,{mode:"TEST"}), /exact TEST board/);
+  for (const change of [{scoringSchemaHash:"bad"},{replacementRoster:{teamCount:10,rosterSlots:LEAGUE_STARTER_SLOTS}},{replacementRoster:{teamCount:12,rosterSlots:["QB"]}}]) assert.throws(() => renderExtensionBoard({...board,...change},{mode:"REAL"}),/exact REAL board/);
 });
 
 function validateWithController(players) {
@@ -55,10 +60,8 @@ test("exports only executable offense while retaining explicitly labeled special
   offense[1].marketAdpLow = null;
   offense.push(player("WR", 102));
   const board = extensionBoardFromV5({
-    leagueId:"420010",
+    ...realBinding,
     generatedAt: "2026-08-22T00:00:00Z",
-    scoringModel: "test",
-    replacementRoster:{teamCount:12,rosterSlots:["QB"]},
     sourceExpirations:[{sourceId:"yahoo",observedAt:"2026-08-22T00:00:00Z",maxAgeHours:6}],
     injuryFreshnessPolicy: { default: 36, yahoo: 6 },
     replacementBySlot: { QB: 200, RB: 100, WR: 100, TE: 80, K: 70, DEF: 60, D: 50, DB: 45, LB: 48 },
@@ -89,10 +92,10 @@ test("exports only executable offense while retaining explicitly labeled special
   assert.equal(board.offense.length, 101);
   assert.equal(board.leagueId, "420010");
   const exported = vm.createContext({});
-  vm.runInContext(renderExtensionBoard(board), exported);
-  assert.equal(exported.SKRODZKaiYahooMockBoard.leagueId, "420010");
-  assert.equal(exported.SKRODZKaiYahooMockBoard.replacementRoster.teamCount,12);
-  assert.equal(exported.SKRODZKaiYahooMockBoard.sourceExpirations[0].maxAgeHours,6);
+  vm.runInContext(renderExtensionBoard(board,{mode:"REAL"}), exported);
+  assert.equal(exported.SKRODZKaiYahooRealBoard.leagueId, "420010");
+  assert.equal(exported.SKRODZKaiYahooRealBoard.replacementRoster.teamCount,12);
+  assert.equal(exported.SKRODZKaiYahooRealBoard.sourceExpirations[0].maxAgeHours,6);
   assert.equal(board.offense.some((entry) => entry.yahooId === "RB-1"), false);
   assert.equal(board.offense.some((entry) => entry.yahooId === "RB-2"), true);
   assert.equal(board.offense.find((entry) => entry.yahooId === "RB-2").adpLow, null);
@@ -119,8 +122,9 @@ test("exports only executable offense while retaining explicitly labeled special
   assert.equal(board.byeCoverage.playersWithBye, board.byeCoverage.playersTotal);
   assert.match(board.byeCoverage.denominator, /including DEF/);
   assert.deepEqual(board.idp.slice(-2).map((entry) => entry.position), ["CB", "CB"]);
-  assert.match(renderExtensionBoard(board), /SKRODZKaiYahooMockBoard/);
-  assert.match(renderExtensionBoard(board), /"byeCoverage"/);
+  assert.match(renderExtensionBoard(board,{mode:"REAL"}), /SKRODZKaiYahooRealBoard/);
+  assert.match(renderExtensionBoard(board,{mode:"REAL"}), /"byeCoverage"/);
+  assert.equal(board.exportExclusions.find((p)=>p.yahooId==="DB-3").reason,"unsupported_concrete_idp_eligibility");
   const csv = renderOfflineBoardCsv(board);
   assert.match(csv, /^value_rank,name,team,position,eligible,projection,vor,bye,yahoo_rank,confidence,automatic_eligible,manual_eligible,validation_status,attention_required,signal_warnings/m);
   assert.match(csv, /RB 2,TST,RB/);
