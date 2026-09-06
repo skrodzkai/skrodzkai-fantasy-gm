@@ -82,6 +82,7 @@ export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36, maxAgeHour
       bodyPart: report.bodyPart ? String(report.bodyPart) : null,
       practice: report.practice ? String(report.practice) : null,
       reportedReturn: report.reportedReturn ? String(report.reportedReturn) : null,
+      sourceUrl: report.sourceUrl ? String(report.sourceUrl) : null,
       expectedGamesThroughWeek17: finite(report.expectedGamesThroughWeek17)
         ? Number(report.expectedGamesThroughWeek17)
         : null,

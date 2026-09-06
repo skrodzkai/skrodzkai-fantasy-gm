@@ -3,11 +3,18 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 
-import { extensionBoardFromV5, renderExtensionBoard, renderOfflineBoardCsv } from "./export-extension-board.mjs";
+import { extensionBoardFromV5, renderExtensionBoard, renderOfflineBoardCsv, validateProjectionHorizon } from "./export-extension-board.mjs";
 import {SCORING_SCHEMA_HASH,LEAGUE_STARTER_SLOTS} from "./build-v5-board.mjs";
-const realBinding = {leagueId:"420010",scoringModel:"2-minute-drillers-2026",scoringSchemaHash:SCORING_SCHEMA_HASH,replacementRoster:{teamCount:12,rosterSlots:LEAGUE_STARTER_SLOTS}};
+const realBinding = {projectionHorizon:"WEEKS_1_17",leagueId:"420010",scoringModel:"2-minute-drillers-2026",scoringSchemaHash:SCORING_SCHEMA_HASH,replacementRoster:{teamCount:12,rosterSlots:LEAGUE_STARTER_SLOTS}};
 
 const controllerSource = await readFile(new URL("../controller/yahoo-mock-runner.js", import.meta.url), "utf8");
+
+test('export refuses season/weekly/replacement horizon mismatch and missing values',()=>{
+ const p={yahooId:'30115',projection:29.55,weeklyPoints:Array(17).fill(29.55/17),replacementPoints:320,vor:29.55-320};
+ assert.doesNotThrow(()=>validateProjectionHorizon([p]));
+ for(const change of [{projection:502.35},{vor:118.1},{replacementPoints:null},{weeklyPoints:null},{projection:null}])assert.throws(()=>validateProjectionHorizon([{...p,...change}]),/horizon mismatch/);
+ assert.throws(()=>extensionBoardFromV5({}),/WEEKS_1_17/);
+});
 
 test("REAL export is explicitly isolated from the TEST global", () => {
   const board = {...realBinding,players:[]};
@@ -40,8 +47,12 @@ function player(position, rank, overrides = {}) {
     draftBoardRank: rank,
     specialistRank: rank,
     vorp: 200 - rank,
-    marketAdpLow: rank + 3,
-    marketAdpHigh: rank - 1,
+    replacementPoints: 50,
+    rankingPoints: 250 - rank,
+    weeklyPoints: Array.from({length:17},(_,index)=>index===6?0:(250-rank)/16),
+    marketAdp: rank + 1,
+    marketAdpLow: rank - 1,
+    marketAdpHigh: rank + 3,
     consensusPoints: 250 - rank,
     executable: true,
     manualEligible: true,
@@ -71,6 +82,7 @@ test("exports only executable offense while retaining explicitly labeled special
       DL: [player("DL", 1)],
       LB: [player("LB", 1, {
         rankingPoints: 200,
+        replacementPoints: 1,
         rankingPerGamePoints: 200 / 17,
         idpDecisionPoints: 200,
         idpModelStatus: "ACTIVE",
@@ -147,6 +159,7 @@ test("fresh REVIEW specialists remain visible for manual selection while blocked
   }));
   const board = extensionBoardFromV5({
     generatedAt: "2026-09-03T00:00:00Z",
+    projectionHorizon: "WEEKS_1_17",
     boards: {
       offense,
       specialists: {
@@ -168,6 +181,7 @@ test("eligible-player injury coverage uses the bye denominator and missing evide
   offense[0].injury = null;
   const board = extensionBoardFromV5({
     generatedAt: "2026-08-27T00:00:00Z",
+    projectionHorizon: "WEEKS_1_17",
     boards: {
       offense,
       specialists: {
@@ -185,6 +199,7 @@ test("eligible-player injury coverage uses the bye denominator and missing evide
 test("missing eligibility fields export fail closed", () => {
   const source = player("RB", 1, { automaticEligible: undefined, manualEligible: undefined, validationStatus: undefined });
   const compact = extensionBoardFromV5({
+    projectionHorizon: "WEEKS_1_17",
     generatedAt: "2026-08-22T00:00:00Z",
     boards: {
       offense: Array.from({ length: 100 }, (_, index) => player("RB", index + 1, index ? {} : source)),

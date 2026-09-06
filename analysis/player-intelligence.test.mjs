@@ -11,6 +11,12 @@ import {
   scoreKickerStatLine,
 } from "./player-intelligence.mjs";
 
+test('missing projections cannot become zero-valued replacement starters',()=>{
+ const p=(id,points)=>({playerId:id,name:id,position:'QB',consensusPoints:points});
+ assert.throws(()=>deriveJointReplacementLevels({players:[p('starter',10),p('missing',null)],teamCount:2,rosterSlots:['QB']}),/filled 1 of 2/);
+ assert.doesNotThrow(()=>deriveJointReplacementLevels({players:[p('starter',10),p('zero',0)],teamCount:2,rosterSlots:['QB']}));
+});
+
 test("cached offense-table kicker rows cannot halve Yahoo kicker projections", () => {
   const board = buildPlayerBoard({
     asOf:"2026-09-05T18:18:06Z", minimumFreshSources:1, replacementRanks:{K:2},

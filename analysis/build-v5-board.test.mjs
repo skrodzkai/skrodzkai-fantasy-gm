@@ -53,7 +53,8 @@ test("TEST builder rejects REAL snapshots and rescores independent raw statistic
   const board = fixture(inputs);
   assert.equal(board.leagueId, "542830");
   assert.equal(board.scoringSchemaHash, identity.scoringSchemaHash);
-  assert.equal(board.players[0].consensusPoints, 260);
+  assert.equal(board.players[0].sourceSeasonPoints, 260);
+  assert.ok(Math.abs(board.players[0].consensusPoints - 260 * 16 / 17) < 1e-9);
   assert.equal(board.players[0].automaticEligible, true);
   assert.equal(board.survivalCalibration, null);
   assert.equal(board.projectionModel.idpRanking.globalGate.pass, false);
@@ -121,7 +122,8 @@ test("Yahoo reserve PUP flag cannot be treated as an unknown health badge", () =
 
 test("keeps history and market data out of projection evidence", () => {
   const board = fixture();
-  assert.equal(board.players[0].consensusPoints, 420);
+  assert.equal(board.players[0].sourceSeasonPoints, 420);
+  assert.ok(Math.abs(board.players[0].consensusPoints - 420 * 16 / 17) < 1e-9);
   assert.deepEqual(board.players[0].sourceIds, ["yahoo-season-projection"]);
   assert.equal(board.players[0].automaticEligible, false);
   assert.equal(board.players[0].manualEligible, true);
@@ -299,16 +301,36 @@ test("current Yahoo eligibility excludes every baseline slot channel and uses cu
 });
 
 test("Yahoo projected games normalize rates without granting reduced-game players a full season", () => {
-  for (const games of [16, 6]) {
+  for (const games of [16, 6, 1]) {
     const board = fixture({ offenseSnapshot:{ observedAt:"2026-08-22T10:00:00Z", players:[{ yahooId:"1", name:"Quarterback", team:"BUF", position:"QB", games, yahooProjectedPoints:games * 20, injuryStatus:null, bye:7 }] } });
     const player = board.players[0];
     assert.equal(player.sourceFamilyPerGamePoints.yahoo, 20);
     assert.equal(player.expectedGamesThroughWeek17, games);
+    assert.ok(Math.abs(player.consensusPoints - games*20)<1e-9);
+    assert.ok(Math.abs(player.rankingPoints - games*20)<1e-9);
+    assert.ok(Math.abs(player.rankingPoints-player.replacementPoints-player.vorp)<1e-9);
+    assert.ok(Math.abs(player.weeklyPoints.reduce((sum,x)=>sum+x,0)-player.rankingPoints)<1e-9);
     if (games === 6) {
       assert.equal(player.automaticEligible, false);
       assert.equal(player.validationStatus, "UNVALIDATED_SINGLE_SOURCE_PROJECTION", "games cap does not clear the independent projection gate");
     }
   }
+});
+
+test("Trubisky GP=1 regression and all-player joint replacement use the allocated horizon",()=>{
+ const board=fixture({replacementRoster:{teamCount:2,rosterSlots:['QB']},sleeperPlayers:{},offenseSnapshot:{observedAt:'2026-08-22T10:00:00Z',players:[
+  {yahooId:'30115',name:'Mitchell Trubisky',team:'TEN',position:'QB',games:1,yahooProjectedPoints:29.55,injuryStatus:'Q',bye:9},
+  {yahooId:'1',name:'Starter One',team:'BUF',position:'QB',games:17,yahooProjectedPoints:425,injuryStatus:null,bye:7},
+  {yahooId:'2',name:'Starter Two',team:'KC',position:'QB',games:17,yahooProjectedPoints:340,injuryStatus:null,bye:8},
+ ]}});
+ const backup=board.players.find(p=>p.yahooId==='30115');assert.ok(Math.abs(backup.rankingPoints-29.55)<1e-9);assert.equal(backup.overallRank,3);assert.equal(backup.automaticEligible,false);
+ assert.ok(Math.abs(board.replacementBySlot.QB-320)<1e-9);
+ for(const player of board.players){assert.ok(Math.abs(player.weeklyPoints.reduce((s,x)=>s+x,0)-player.rankingPoints)<1e-9);assert.ok(Math.abs(player.rankingPoints-player.replacementPoints-player.vorp)<1e-9);}
+});
+test("unknown Yahoo game basis cannot receive a weekly profile or fill a starter slot",()=>{
+ const inputs={sleeperPlayers:{},offenseSnapshot:{observedAt:'2026-08-22T10:00:00Z',players:[{yahooId:'1',name:'Unknown',team:'BUF',position:'QB',games:null,yahooProjectedPoints:400,injuryStatus:null}]}};
+ const p=fixture(inputs).players[0];assert.equal(p.weeklyPoints,null);assert.equal(p.consensusPoints,null);assert.equal(p.rankingPoints,null);assert.equal(p.manualEligible,false);
+ assert.throws(()=>fixture({...inputs,replacementRoster:{teamCount:2,rosterSlots:['QB']}}),/filled .* starter slots/);
 });
 
 test("CLEAR reduced-game players remain discounted but eligible; actual injury restrictions remain", () => {
@@ -482,7 +504,8 @@ test("an offense row keeps its own projection and injury timestamp when it also 
     },
   });
   const player = board.players[0];
-  assert.equal(player.consensusPoints, 420);
+  assert.equal(player.sourceSeasonPoints, 420);
+  assert.ok(Math.abs(player.consensusPoints - 420 * 16 / 17) < 1e-9);
   assert.equal(player.injury.evidence.find((entry) => entry.sourceId === "yahoo-player-list").observedAt, "2026-08-22T10:00:00Z");
   assert.equal(player.injury.draftAction, "CLEAR");
   assert.equal(player.injury.evidence.find((entry) => entry.sourceId === "yahoo-player-list").status, "CLEAR");
@@ -530,8 +553,10 @@ test("passes a globally approved IDP calibration through ranking and weekly fiel
     },
   });
   const linebacker = board.players[0];
-  assert.equal(linebacker.consensusPoints, 60);
-  assert.equal(linebacker.rankingPoints, 15);
+  assert.equal(linebacker.sourceSeasonPoints, 60);
+  assert.equal(linebacker.sourceSeasonRankingPoints, 15);
+  assert.ok(Math.abs(linebacker.consensusPoints - 60 * 16 / 17) < 1e-9);
+  assert.ok(Math.abs(linebacker.rankingPoints - 15 * 16 / 17) < 1e-9);
   assert.equal(linebacker.idpModelStatus, "ACTIVE");
   const rawWeeklyTotal = linebacker.rawWeeklyPoints.reduce((sum, value) => sum + value, 0);
   const decisionWeeklyTotal = linebacker.weeklyPoints.reduce((sum, value) => sum + value, 0);
