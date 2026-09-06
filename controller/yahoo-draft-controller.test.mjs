@@ -288,9 +288,9 @@ for (const { seat, real = false, disabled = false, missingFilter = false, onCloc
   const runner = environment.__skrodzkaiYahooMockExtensionV1?.runner;
   assert.ok(runner, railState.detail);
   if(real) {
-    const token=environment.__skrodzkaiYahooMockExtensionV1.token;
-    assert.equal(token.settingsReceipt.rosterSlots.length,20);
-    assert.equal(token.observedRosterSlots.length,19);
+    const preflightRecord=environment.__skrodzkaiYahooMockExtensionV1.token;
+    assert.equal(preflightRecord.settingsReceipt.rosterSlots.length,20);
+    assert.equal(preflightRecord.observedRosterSlots.length,19);
     assert.ok(railState.board.some(p=>p.position==="CB"),"REAL prepareBoard retains IDP");
     const options={configName:config.name,executionMode:"TEST",expectedRoomId:"420010",expectedSeat:seat,
       expectedUrlSeat:7,observedTeamCount:12,observedRosterSlots:config.rosterSlots,board};
