@@ -31,7 +31,7 @@ export function validatePacket(p) {
   const seen = new Set();
   for (const row of p.players) {
     if (!/^\d+$/.test(row.yahooId) || seen.has(row.yahooId) || typeof row.name !== 'string' || !Array.isArray(row.eligible) || !row.eligible.every(x => typeof x === 'string')) throw Error('Invalid or duplicate player identity.');
-    for (const key of ['projection','vor','adpLow','adpHigh']) if (row[key] != null && (typeof row[key] !== 'number' || !Number.isFinite(row[key]))) throw Error(`Invalid ${key}.`);
+    for (const key of ['projection','vor','marketAdp','adpLow','adpHigh']) if (row[key] != null && (typeof row[key] !== 'number' || !Number.isFinite(row[key]))) throw Error(`Invalid ${key}.`);
     for (const key of ['position','team']) if (row[key] != null && typeof row[key] !== 'string') throw Error(`Invalid ${key}.`);
     if (row.bye != null && (!Number.isInteger(row.bye) || row.bye < 1 || row.bye > 18)) throw Error('Invalid bye.');
     if (row.injury != null && (typeof row.injury !== 'object' || Array.isArray(row.injury))) throw Error('Invalid injury.');

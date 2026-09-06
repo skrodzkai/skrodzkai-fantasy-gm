@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 
 import { buildDraftWatchlist, compileInjuryBoard } from "./injury-monitor.mjs";
-import { buildPlayerBoard, IDP_SCORING, KICKER_SCORING, OFFENSE_SCORING } from "./player-intelligence.mjs";
+import { buildPlayerBoard, rankPlayerProjections, IDP_SCORING, KICKER_SCORING, OFFENSE_SCORING } from "./player-intelligence.mjs";
 import { buildWeeklyProjectionProfile, expectedGamesFromInjury } from "./weekly-roster-utility.mjs";
 import { FREE_SOURCE_REGISTRY, validateSourceSnapshot } from "./free-source-registry.mjs";
 import { applyFreshAdpSnapshot, adpSourceHealth } from "./market-adp.mjs";
@@ -304,6 +304,9 @@ export function assembleV5Board({
       .filter((row) => hasFiniteProjection(row.yahooProjectedPoints))
       .map((row) => yahooProjectionRow(row, specialistSnapshot, "yahoo-specialist-season-projection")).filter(Boolean),
   };
+  const projectedGamesById = new Map([...yahooOffenseSource.rows, ...yahooSpecialistSource.rows]
+    .map((row) => [row.playerId, row.projectionGames]));
+  for (const player of players) player.expectedGames = projectedGamesById.get(player.playerId) ?? 0;
   const registryById = new Map(FREE_SOURCE_REGISTRY.map((source) => [source.id, source]));
   const projectionHealth = validateSourceSnapshot(projectionSnapshots.map((snapshot) => snapshot.manifest), asOf);
   const externalProjectionSources = projectionSnapshots
@@ -383,6 +386,7 @@ export function assembleV5Board({
         status: sleeper.injury_status || (sleeper.status === "Active" ? "ACTIVE" : "UNKNOWN"),
         bodyPart: sleeper.injury_body_part || null,
         practice: sleeper.practice_participation || null,
+        sourceUrl: "https://api.sleeper.app/v1/players/nfl",
       });
     }
   }
@@ -394,7 +398,7 @@ export function assembleV5Board({
   });
   const injuryByPlayer = new Map(injuryBoard.players.map((player) => [player.playerId, player]));
 
-  const combined = projectionBoard.players.map((player) => {
+  const allocatedPlayers = projectionBoard.players.map((player) => {
     const injury = injuryByPlayer.get(player.playerId) ?? {
       status: "UNKNOWN",
       draftAction: "REVIEW",
@@ -413,14 +417,15 @@ export function assembleV5Board({
       (injury.draftAction === "REVIEW" && injury.conflict !== true && freshInjuryEvidence);
     const reviewedAvailabilityAssumption = injury.draftAction === "REVIEW" && manualHealthEligible ? 16 : null;
     const injuryGames = expectedGamesFromInjury(injury) ?? reviewedAvailabilityAssumption;
-    const expectedGamesThroughWeek17 = injuryGames == null ? null : Math.min(injuryGames, player.yahooProjectedGames ?? 16);
+    const expectedGamesThroughWeek17 = injuryGames == null || !(player.expectedGames > 0)
+      ? null : Math.min(injuryGames, player.expectedGames);
     // A valid reduced-games estimate discounts availability; it is not injury
     // evidence. Affirmative injury restrictions and projection validation remain.
     const projectedGamesReview = player.yahooProjectedGames != null && player.yahooProjectedGames < 16 &&
       injury.draftAction !== "CLEAR" && injury.availabilityStatus !== "EXPLICIT";
     const projectionGames = Number(player.expectedGames);
     const hasOutcomeRate = Number.isFinite(projectionGames) && projectionGames > 0;
-    const rawWeeklyProfile = Number.isFinite(Number(player.perGamePoints)) && expectedGamesThroughWeek17 != null
+    const rawWeeklyProfile = hasFiniteProjection(player.perGamePoints) && expectedGamesThroughWeek17 != null
       ? buildWeeklyProjectionProfile({
           perGamePoints: Number(player.perGamePoints),
           byeWeek: player.bye,
@@ -430,7 +435,7 @@ export function assembleV5Board({
           perGameOutcomeHigh: hasOutcomeRate && hasFiniteProjection(player.outcomeHigh) ? Number(player.outcomeHigh) / projectionGames : null,
         })
       : null;
-    const weeklyProfile = Number.isFinite(Number(player.rankingPerGamePoints)) && expectedGamesThroughWeek17 != null
+    const weeklyProfile = hasFiniteProjection(player.rankingPerGamePoints) && expectedGamesThroughWeek17 != null
       ? buildWeeklyProjectionProfile({
           perGamePoints: Number(player.rankingPerGamePoints),
           byeWeek: player.bye,
@@ -440,7 +445,7 @@ export function assembleV5Board({
           perGameOutcomeHigh: hasOutcomeRate && hasFiniteProjection(player.rankingOutcomeHigh) ? Number(player.rankingOutcomeHigh) / projectionGames : null,
         })
       : null;
-    const projectionUsable = Number.isFinite(Number(player.rankingPoints)) && weeklyProfile != null;
+    const projectionUsable = hasFiniteProjection(player.rankingPoints) && weeklyProfile != null;
     const offensePosition = player.eligible.some((position) => ["QB", "RB", "WR", "TE"].includes(position));
     const specialistPosition = player.eligible.some((position) => ["K", "DEF", "DL", "LB", "DB", "CB", "S", "D"].includes(position));
     const yahooOnlyLateSpecialist = !offensePosition && player.eligible.some((position) => ["K", "DEF"].includes(position)) && player.sourceFamilies.includes("yahoo") && player.scorableSourceFamilyCount === 1;
@@ -464,9 +469,20 @@ export function assembleV5Board({
               : "NO_FRESH_PROJECTION";
     return {
       ...player,
+      sourceSeasonPoints: player.consensusPoints,
+      sourceSeasonRankingPoints: player.rankingPoints,
+      consensusPoints: rawWeeklyProfile?.weeklyPoints.reduce((sum, points) => sum + points, 0) ?? null,
+      rankingPoints: weeklyProfile?.weeklyPoints.reduce((sum, points) => sum + points, 0) ?? null,
+      idpDecisionPoints: player.idpDecisionPoints == null ? null : weeklyProfile?.weeklyPoints.reduce((sum, points) => sum + points, 0) ?? null,
+      outcomeLow: rawWeeklyProfile?.weeklyOutcomeLow?.reduce((sum, points) => sum + points, 0) ?? null,
+      outcomeHigh: rawWeeklyProfile?.weeklyOutcomeHigh?.reduce((sum, points) => sum + points, 0) ?? null,
+      rawOutcomeLow: rawWeeklyProfile?.weeklyOutcomeLow?.reduce((sum, points) => sum + points, 0) ?? null,
+      rawOutcomeHigh: rawWeeklyProfile?.weeklyOutcomeHigh?.reduce((sum, points) => sum + points, 0) ?? null,
+      rankingOutcomeLow: weeklyProfile?.weeklyOutcomeLow?.reduce((sum, points) => sum + points, 0) ?? null,
+      rankingOutcomeHigh: weeklyProfile?.weeklyOutcomeHigh?.reduce((sum, points) => sum + points, 0) ?? null,
       injury,
       availabilityAssumption: projectedGamesReview ? "MANUAL_REVIEW_PROJECTED_GAME_CAP" : reviewedAvailabilityAssumption == null ? null : "MANUAL_REVIEW_ASSUMES_AVAILABLE_EXCEPT_BYE",
-      expectedGamesThroughWeek17,
+      expectedGamesThroughWeek17: weeklyProfile?.expectedGamesThroughWeek17 ?? null,
       weeklyPoints: weeklyProfile?.weeklyPoints ?? null,
       rawWeeklyPoints: rawWeeklyProfile?.weeklyPoints ?? null,
       weeklyAvailability: weeklyProfile?.availabilityProbability ?? null,
@@ -481,6 +497,9 @@ export function assembleV5Board({
       draftPhase: "UNIFIED",
     };
   });
+
+  const horizonBoard = rankPlayerProjections({ players: allocatedPlayers, replacementRanks: LEAGUE_REPLACEMENT_RANKS, replacementRoster });
+  const combined = horizonBoard.players;
 
   const offense = combined
     .filter((player) => player.eligible.some((position) => ["QB", "RB", "WR", "TE"].includes(position)))
@@ -526,6 +545,7 @@ export function assembleV5Board({
 
   return Object.freeze({
     schemaVersion: 2,
+    projectionHorizon: "WEEKS_1_17",
     generatedAt: asOf,
     ...scoringIdentity,
     replacementRoster: replacementRoster ? { teamCount:replacementRoster.teamCount, rosterSlots:[...replacementRoster.rosterSlots] } : null,
@@ -538,8 +558,8 @@ export function assembleV5Board({
           maxAgeHours:injuryBoard.freshnessPolicyHours[entry.sourceKind] ?? injuryBoard.freshnessPolicyHours.default }]))).values()],
     ],
     replacementRanks: LEAGUE_REPLACEMENT_RANKS,
-    replacementBySlot: projectionBoard.replacementBySlot,
-    rawReplacementBySlot: projectionBoard.rawReplacementBySlot,
+    replacementBySlot: horizonBoard.replacementBySlot,
+    rawReplacementBySlot: horizonBoard.rawReplacementBySlot,
     replacementRankBasis: `joint maximum-weight allocation of every ${isTest ? "League Two" : "2 Minute Drillers"} starter slot`,
     specialistRankingBasis: { K: "Yahoo preseason rank; Razzball raw-stat total is a diagnostic challenger", DEF: "Yahoo preseason rank; season aggregates cannot reconstruct weekly scoring", DL: "global-gated IDP decision score, otherwise exact-scored source-family consensus", LB: "global-gated IDP decision score, otherwise exact-scored source-family consensus", DB: "global-gated IDP decision score, otherwise exact-scored source-family consensus" },
     sources: projectionBoard.sourceReceipts,

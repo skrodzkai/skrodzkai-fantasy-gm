@@ -1,10 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {seatAt,nextTurns,validateOrder,opponentBetween,firstPickTiming,SCOUT_POSITIONS,boardReady,rankedPlayers,opponentSummary} from './manual-draft-model.mjs';
+import {seatAt,nextTurns,validateOrder,opponentBetween,firstPickTiming,SCOUT_POSITIONS,boardReady,rankedPlayers,opponentSummary,injuryNotes} from './manual-draft-model.mjs';
 import {renderDesk,validatePacket} from './build-manual-draft-desk.mjs';
 import vm from 'node:vm';
 const input={leagueId:'420010',scoringModel:'fixture',teams:12,rounds:19,health:'FAIL',observedAt:'2026-09-06T05:00:00Z',notice:'Fixture, not current data',players:[{yahooId:'1',name:'One',eligible:['WR'],position:'WR',vor:10,projection:100},{yahooId:'2',name:'Two',eligible:['CB','WR'],position:'CB',vor:20,projection:90}]};
 const packet=validatePacket(input);
+test('all eight columns sort both ways, with missing numeric values always last',async()=>{
+ const a={yahooId:'1',name:'Alpha',position:'QB',team:'BUF',projection:10,vor:2,marketAdp:3,bye:4,injury:{status:'DOUBTFUL',draftAction:'REVIEW'}},b={yahooId:'2',name:'Beta',position:'WR',team:'NYJ',projection:20,vor:4,marketAdp:6,bye:8,injury:{status:'QUESTIONABLE',draftAction:'REVIEW'}};
+ for(const sort of ['name','position','team','health','points','value','adp','bye']){
+  const p={players:[b,a]};assert.equal(rankedPlayers(p,{sort,direction:'asc'})[0].yahooId,'1',sort);assert.equal(rankedPlayers(p,{sort,direction:'desc'})[0].yahooId,'2',sort);
+ }
+ for(const sort of ['points','value','adp','bye'])for(const direction of ['asc','desc'])assert.equal(rankedPlayers({players:[{yahooId:'3',name:'Missing'},a,b]},{sort,direction}).at(-1).yahooId,'3');
+ const html=await renderDesk(input);for(const key of ['name','position','team','health','points','value','adp','bye'])assert(html.includes(`data-sort="${key}"`));assert(html.includes('aria-sort'));assert(html.includes("sortDirection==='asc'?'desc':'asc'"));
+});
+test('injury notes retain dated source facts without inventing a return',()=>{
+ const note=injuryNotes({injury:{status:'QUESTIONABLE',draftAction:'REVIEW',bodyParts:['Biceps'],reportedReturns:[],evidence:[{sourceId:'sleeper',observedAt:'2026-09-06T12:00Z',status:'QUESTIONABLE',bodyPart:'Biceps',practice:'Limited',fresh:true}]}});
+ for(const fact of ['Biceps','Limited','sleeper','2026-09-06T12:00Z','Not confirmed'])assert(note.includes(fact));assert(!note.includes('Ready for Week 1'));
+ assert(injuryNotes({}).includes('unavailable'));
+});
 const opponent={teamId:'sample',teamName:'Example Team',managerId:'Example Manager',seasons:[2021,2022,2023,2024,2025],rows:95,recentRound1:{RB:1,WR:4},recentOpening:{RB:7,TE:3,WR:10},specialty:Object.fromEntries(SCOUT_POSITIONS.map(position=>[position,{medianRound:6,draftedSeasons:5,recent:[{season:2025,round:7}]}]))};
 test('opponent summaries preserve actual sample, ties and absent evidence',()=>{
  assert.deepEqual(opponentSummary(opponent),{headline:'WR first in 4 of 5 recent drafts',detail:'WR 4/5 · RB 1/5'});

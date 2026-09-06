@@ -86,6 +86,13 @@ test("fresh FFC ADP replaces only exact current name-team-position market rows",
   assert.equal(result.rows[1].adp, null);
 });
 
+test("ADP suffix aliases require unique identities on both sides",()=>{
+ const baseline=[{name:'James Cook',team:'BUF',position:'RB'}];
+ const snapshot=adpSnapshot();snapshot.players.push({name:'James Cook III',team:'BUF',position:'RB',adp:7.9,high:4,low:12});
+ const result=applyFreshAdpSnapshot(baseline,snapshot);assert.equal(result.suffixJoined,1);assert.equal(result.rows[0].adp,7.9);assert.equal(result.rows[0].adp_low,4);assert.equal(result.rows[0].adp_high,12);
+ assert.throws(()=>applyFreshAdpSnapshot([...baseline,{name:'James Cook Jr',team:'BUF',position:'RB'}],snapshot),/identity coverage is too small: 0/);
+ assert.throws(()=>applyFreshAdpSnapshot(baseline,{...snapshot,players:[...snapshot.players,{...snapshot.players.at(-1),name:'James Cook Jr'}]}),/identity coverage is too small: 0/);
+});
 test("fresh ADP joins PK and unique team defenses and clears unmatched or ambiguous endpoints", () => {
   const baseline = [
     { name:"Ka'imi Fairbairn", team:"HOU", position:"K", adp:142.6 },
@@ -102,7 +109,8 @@ test("fresh ADP joins PK and unique team defenses and clears unmatched or ambigu
   assert.equal(result.unmatched, 2);
   assert.equal(result.ambiguousIdentities, 1);
   assert.equal(result.rows[0].adp, 133.8);
-  assert.equal(result.rows[0].adp_high, 80);
+  assert.equal(result.rows[0].adp_low, 80);
+  assert.equal(result.rows[0].adp_high, 159);
   assert.equal(result.rows[1].adp, 160);
   for (const row of result.rows.slice(2)) {
     for (const key of ["adp","adp_low","adp_high"]) assert.equal(row[key], null);

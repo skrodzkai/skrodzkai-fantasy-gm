@@ -7,6 +7,32 @@ function finite(value) {
   return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
 }
 
+function compactInjury(injury) {
+  if (injury == null) return null;
+  return {
+    status: injury.status ?? "UNKNOWN", draftAction: injury.draftAction ?? "REVIEW",
+    blockReason: injury.blockReason ?? null, conflict: injury.conflict === true,
+    freshestAt: injury.freshestAt ?? null, bodyParts: injury.bodyParts ?? [],
+    reportedReturns: injury.reportedReturns ?? [],
+    evidence: (injury.evidence ?? []).map(({sourceId, sourceKind, observedAt, fresh, status, bodyPart, practice, reportedReturn, note, sourceUrl}) =>
+      ({sourceId, sourceKind, observedAt, fresh, status, bodyPart, practice, reportedReturn, note, sourceUrl})),
+  };
+}
+
+export function validateProjectionHorizon(players) {
+  const epsilon = 1e-6;
+  const sum = (values) => Array.isArray(values) && values.length === 17 && values.every(finite)
+    ? values.reduce((total, value) => total + Number(value), 0) : null;
+  for (const player of players) {
+    const total = sum(player.weeklyPoints);
+    if (!finite(player.projection) || total == null || Math.abs(total - player.projection) > epsilon ||
+        !finite(player.replacementPoints) || !finite(player.vor) ||
+        Math.abs(player.projection - player.replacementPoints - player.vor) > epsilon) {
+      throw new Error(`projection horizon mismatch for Yahoo player ${player.yahooId}`);
+    }
+  }
+}
+
 function compactOffense(player) {
   return {
     yahooId: String(player.yahooId),
@@ -16,10 +42,12 @@ function compactOffense(player) {
     rank: player.draftBoardRank,
     valueRank: player.overallRank,
     yahooRank: finite(player.yahooPreseasonRank) ? Number(player.yahooPreseasonRank) : null,
-    vor: Number(player.vorp),
+    vor: finite(player.vorp) ? Number(player.vorp) : null,
+    marketAdp: finite(player.marketAdp) ? Number(player.marketAdp) : null,
     adpLow: finite(player.marketAdpLow) ? Number(player.marketAdpLow) : null,
     adpHigh: finite(player.marketAdpHigh) ? Number(player.marketAdpHigh) : null,
-    projection: Number(player.consensusPoints),
+    projection: finite(player.rankingPoints) ? Number(player.rankingPoints) : null,
+    sourceSeasonProjection: finite(player.sourceSeasonPoints) ? Number(player.sourceSeasonPoints) : null,
     perGamePoints: finite(player.perGamePoints) ? Number(player.perGamePoints) : null,
     expectedGamesThroughWeek17: finite(player.expectedGamesThroughWeek17) ? Number(player.expectedGamesThroughWeek17) : null,
     availabilityAssumption: player.availabilityAssumption ?? null,
@@ -38,13 +66,7 @@ function compactOffense(player) {
     omittedScoringCategories: Array.from(player.omittedScoringCategories ?? []),
     projectionBlendPolicy: player.projectionBlendPolicy ?? "unspecified",
     draftSignals: player.draftSignals ?? null,
-    injury: player.injury == null ? null : {
-      status: player.injury.status ?? "UNKNOWN",
-      draftAction: player.injury.draftAction ?? "REVIEW",
-      blockReason: player.injury.blockReason ?? null,
-      conflict: player.injury.conflict === true,
-      freshestAt: player.injury.freshestAt ?? null,
-    },
+    injury: compactInjury(player.injury),
   };
 }
 
@@ -63,10 +85,12 @@ function compactSpecialist(player, positionOverride = null) {
     rank: player.specialistRank,
     valueRank: player.overallRank,
     yahooRank: finite(player.yahooPreseasonRank) ? Number(player.yahooPreseasonRank) : null,
+    marketAdp: finite(player.marketAdp) ? Number(player.marketAdp) : null,
     adpLow: finite(player.marketAdpLow) ? Number(player.marketAdpLow) : null,
     adpHigh: finite(player.marketAdpHigh) ? Number(player.marketAdpHigh) : null,
     projection: finite(player.rankingPoints) ? Number(player.rankingPoints) : finite(player.consensusPoints) ? Number(player.consensusPoints) : null,
     rawProjection: finite(player.consensusPoints) ? Number(player.consensusPoints) : null,
+    sourceSeasonProjection: finite(player.sourceSeasonPoints) ? Number(player.sourceSeasonPoints) : null,
     idpDecisionProjection: finite(player.idpDecisionPoints) ? Number(player.idpDecisionPoints) : null,
     perGamePoints: finite(player.rankingPerGamePoints) ? Number(player.rankingPerGamePoints) : finite(player.perGamePoints) ? Number(player.perGamePoints) : null,
     rawPerGamePoints: finite(player.perGamePoints) ? Number(player.perGamePoints) : null,
@@ -97,13 +121,7 @@ function compactSpecialist(player, positionOverride = null) {
     idpModelWarning: player.idpModelWarning ?? null,
     idpCalibrationHash: player.idpCalibrationHash ?? null,
     draftSignals: player.draftSignals ?? null,
-    injury: player.injury == null ? null : {
-      status: player.injury.status ?? "UNKNOWN",
-      draftAction: player.injury.draftAction ?? "REVIEW",
-      blockReason: player.injury.blockReason ?? null,
-      conflict: player.injury.conflict === true,
-      freshestAt: player.injury.freshestAt ?? null,
-    },
+    injury: compactInjury(player.injury),
   };
 }
 
@@ -118,6 +136,7 @@ function specialistUsable(player) {
 }
 
 export function extensionBoardFromV5(board) {
+  if (board?.projectionHorizon !== "WEEKS_1_17") throw new Error("board requires recomputed WEEKS_1_17 projection horizon");
   const exportExclusions = [];
   const offenseSource = board?.boards?.offense ?? [];
   const offense = offenseSource
@@ -165,6 +184,7 @@ export function extensionBoardFromV5(board) {
     }
   }
   const players = [...playerByYahooId.values()];
+  validateProjectionHorizon(players);
   const byeEligible = players.filter((player) => player.automaticEligible || player.manualEligible);
   const playersWithBye = byeEligible.filter((player) => Number.isInteger(Number(player.bye)) && Number(player.bye) >= 1 && Number(player.bye) <= 17).length;
   const sourceByYahooId = new Map();
@@ -195,6 +215,7 @@ export function extensionBoardFromV5(board) {
   };
   return {
     generatedAt: board.generatedAt,
+    projectionHorizon: board.projectionHorizon,
     exportExclusions,
     source: `free-source board: raw projections scored under exact league rules and equal-weighted per independent source family; IDP projection fields use the consensus-anchored decision score only when the global historical gate passes (${board?.projectionModel?.idpRanking?.status ?? "calibration unavailable"}); rawProjection preserves consensus; market/history are timing context only; injuries use source-specific freshness`,
     leagueId: board.leagueId ?? null,

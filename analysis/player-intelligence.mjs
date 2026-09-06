@@ -159,7 +159,7 @@ export function deriveJointReplacementLevels({ players, teamCount, rosterSlots, 
   if (!Object.keys(slotCounts).length) throw new Error("rosterSlots must include at least one starter slot");
 
   const eligiblePlayers = Array.from(players ?? [])
-    .filter((player) => Number.isFinite(Number(player[pointsField])))
+    .filter((player) => hasFinite(player[pointsField]))
     .map((player) => ({ ...player, eligible: eligibilityFor(player), points: Number(player[pointsField]) }))
     .filter((player) => Object.keys(slotCounts).some((slot) => slotAccepts(slot, player.eligible)));
   const slotNames = Object.keys(slotCounts);
@@ -525,6 +525,12 @@ export function buildPlayerBoard({
     };
   });
 
+  return Object.freeze({ asOf, scoring: scoring.offense, sourceReceipts,
+    ...rankPlayerProjections({ players: board, replacementRanks, replacementRoster }) });
+}
+
+// The builder calls this again after allocating points to fantasy weeks 1–17.
+export function rankPlayerProjections({ players: board, replacementRanks, replacementRoster = null }) {
   const replacementByPosition = {};
   const rawReplacementByPosition = {};
   for (const [position, rankValue] of Object.entries(replacementRanks)) {
@@ -576,6 +582,7 @@ export function buildPlayerBoard({
       return { ...player, replacementPoints, vorp, rawReplacementPoints, rawVorp };
     })
     .sort((left, right) => {
+      if (left.vorp === null && right.vorp === null) return left.name.localeCompare(right.name);
       if (left.vorp === null) return 1;
       if (right.vorp === null) return -1;
       return right.vorp - left.vorp || left.name.localeCompare(right.name);
@@ -583,15 +590,12 @@ export function buildPlayerBoard({
     .map((player, index) => ({ ...player, overallRank: player.vorp === null ? null : index + 1 }));
 
   return Object.freeze({
-    asOf,
-    scoring: scoring.offense,
     replacementRanks: { ...replacementRanks },
     replacementByPosition,
     rawReplacementByPosition,
     replacementBySlot: joint?.replacementBySlot ?? null,
     rawReplacementBySlot: rawJoint?.replacementBySlot ?? null,
     replacementAllocation: joint?.assignments ?? null,
-    sourceReceipts,
     players: ranked,
   });
 }

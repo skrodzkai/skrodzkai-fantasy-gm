@@ -47,11 +47,29 @@ export function firstPickTiming(rows, managerId, seasons, position) {
 export function boardReady(packet, now = Date.now()) {
   return packet.health === 'PASS' && Number.isFinite(Date.parse(packet.expiresAt)) && now < Date.parse(packet.expiresAt);
 }
-export function rankedPlayers(packet, {position='ALL', search='', sort='value'} = {}) {
+export function healthMarker(p) {
+  const status=p.injury?.status;
+  return status&&!['ACTIVE','CLEAR','NO_YAHOO_MARKER'].includes(status)?status:p.injury?.draftAction!=='CLEAR'?'CHECK':'';
+}
+export function injuryNotes(p) {
+  const injury=p.injury;
+  if (!injury) return 'Injury details unavailable. Availability has not been confirmed.';
+  const lines=[`Status: ${injury.status??'UNKNOWN'}`,`Injury: ${(injury.bodyParts??[]).join(', ')||'Body part not supplied'}`];
+  const returns=(injury.reportedReturns??[]).filter(Boolean);
+  lines.push(`Expected return: ${returns.length?returns.join('; '):'Not confirmed by these sources'}`);
+  lines.push(`Draft impact: ${injury.draftAction==='CLEAR'?'No injury restriction in this snapshot.':injury.blockReason||'Review current availability before drafting.'}`);
+  for (const e of injury.evidence??[]) lines.push(`\n${e.sourceId??'Source'} · ${e.observedAt??'Date unavailable'}${e.fresh===false?' · STALE':''}\n${[e.status,e.bodyPart,e.practice,e.reportedReturn,e.note].filter(Boolean).join(' · ')||'No narrative supplied.'}${e.sourceUrl?`\n${e.sourceUrl}`:''}`);
+  if (!(injury.evidence?.length)) lines.push(`Last checked: ${injury.freshestAt??'Unavailable'}; source narrative unavailable.`);
+  return lines.join('\n');
+}
+export function rankedPlayers(packet, {position='ALL', search='', sort='value', direction=null} = {}) {
   const query = search.trim().toLowerCase();
-  const number = (p, key) => typeof p[key] === 'number' && Number.isFinite(p[key]) ? p[key] : -Infinity;
+  const field={value:'vor',points:'projection',adp:'marketAdp',name:'name',position:'position',team:'team',bye:'bye',health:'health'}[sort]??'vor';
+  const numeric=['vor','projection','marketAdp','bye'].includes(field),descending=direction?direction==='desc':['vor','projection'].includes(field);
+  const value=p=>field==='health'?healthMarker(p):p[field];
+  const missing=v=>v==null||v===''||(numeric&&!Number.isFinite(v));
   return packet.players.filter(p =>
     (position === 'ALL' || p.eligible.includes(position) || p.position === position || (position === 'FLEX' && [...p.eligible,p.position].some(x=>['WR','RB','TE'].includes(x))) || (position === 'DL' && p.eligible.some(x => ['DE','DT'].includes(x))) || (position === 'IDP' && p.eligible.some(x => ['D','DL','DE','DT','LB','DB','CB','S'].includes(x)))) &&
     `${p.name} ${p.team??''}`.toLowerCase().includes(query))
-    .sort((a,b) => number(b, sort === 'points' ? 'projection' : 'vor') - number(a, sort === 'points' ? 'projection' : 'vor') || number(b,'projection') - number(a,'projection') || a.yahooId.localeCompare(b.yahooId));
+    .sort((a,b) => {const x=value(a),y=value(b),mx=missing(x),my=missing(y);if(mx!==my)return mx?1:-1;const order=mx?0:numeric?x-y:String(x).localeCompare(String(y));return (descending?-order:order)||a.yahooId.localeCompare(b.yahooId);});
 }
