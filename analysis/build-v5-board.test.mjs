@@ -333,7 +333,7 @@ test("unknown Yahoo game basis cannot receive a weekly profile or fill a starter
  assert.throws(()=>fixture({...inputs,replacementRoster:{teamCount:2,rosterSlots:['QB']}}),/filled .* starter slots/);
 });
 
-test("CLEAR reduced-game players remain discounted but eligible; actual injury restrictions remain", () => {
+test("reduced-game players without verified starter roles retain their cap; actual injury restrictions remain", () => {
   for (const injuryStatus of [null, "Q", "IR"]) {
     const board = fixture({
       offenseSnapshot:{ observedAt:"2026-08-22T10:00:00Z", players:[{ yahooId:"1", name:"Quarterback", team:"BUF", position:"QB", games:15, yahooProjectedPoints:300, injuryStatus, bye:7 }] },
@@ -351,6 +351,50 @@ test("CLEAR reduced-game players remain discounted but eligible; actual injury r
       assert.ok(Math.abs(player.weeklyPoints.reduce((a, b) => a + b, 0) - player.rankingPerGamePoints * 15) < 1e-8);
       assert.equal(player.weeklyPoints[6], 0);
     }
+  }
+});
+
+test("healthy verified starters use all 16 fantasy games, preserving each source rate and reranked VOR", () => {
+  for (const leagueId of ["420010", "542830"]) {
+    const identity = leagueId === "542830" ? testContract.expectedScoring : {};
+    const board = fixture({ leagueId, replacementRoster:{teamCount:2,rosterSlots:["QB"]},
+      offenseSnapshot:{...identity,observedAt:"2026-08-22T10:00:00Z",players:[
+        {yahooId:"1",name:"Healthy Starter",team:"BUF",position:"QB",games:15,yahooProjectedPoints:360,injuryStatus:null,bye:7},
+        {yahooId:"2",name:"Other Starter",team:"KC",position:"QB",games:16,yahooProjectedPoints:368,injuryStatus:null,bye:8},
+      ]},
+      specialistSnapshot:{...identity,observedAt:"2026-08-22T10:00:00Z",positions:{}},
+      sleeperPlayers:{s1:{yahoo_id:1,team:"BUF",position:"QB",status:"Active",depth_chart_order:1},s2:{yahoo_id:2,team:"KC",position:"QB",status:"Active",depth_chart_order:1}},
+    });
+    const p=board.players.find(p=>p.yahooId==="1");
+    assert.equal(p.sourceFamilyPerGamePoints.yahoo,24);
+    assert.equal(p.expectedGames,15,"source normalization basis remains diagnostic, not availability");
+    assert.equal(p.expectedGamesThroughWeek17,16);
+    assert.equal(p.rankingPoints,384);
+    assert.equal(p.weeklyPoints[6],0);
+    assert.equal(p.availabilityAssumption,"HEALTHY_STARTER_FULL_SCHEDULE");
+    assert.equal(board.replacementBySlot.QB,368);
+    assert.equal(p.vorp,16);
+    assert.equal(p.automaticEligible,false,"normalization does not bypass independent-source gate");
+  }
+});
+
+test("healthy starter normalization requires fresh matching role evidence, not merely ACTIVE", () => {
+  const starter={yahoo_id:1,team:"BUF",position:"QB",status:"Active",depth_chart_order:1};
+  for(const [role,observedAt] of [[{...starter,depth_chart_order:2},"2026-08-22T10:05:00Z"],[{...starter,depth_chart_order:null},"2026-08-22T10:05:00Z"],[{...starter,team:"KC"},"2026-08-22T10:05:00Z"],[{...starter,position:"WR"},"2026-08-22T10:05:00Z"],[starter,"2026-08-20T10:05:00Z"]]){
+    const p=fixture({sleeperPlayers:{s1:role},sleeperObservedAt:observedAt,offenseSnapshot:{observedAt:"2026-08-22T10:00:00Z",players:[{yahooId:"1",name:"Role Limited",team:"BUF",position:"QB",games:1,yahooProjectedPoints:29.55,injuryStatus:null,bye:7}]}}).players[0];
+    assert.equal(p.expectedGamesThroughWeek17,1);
+    assert.ok(Math.abs(p.rankingPoints-29.55)<1e-9,"no repeat of the backup QB full-season inflation");
+    assert.notEqual(p.availabilityAssumption,"HEALTHY_STARTER_FULL_SCHEDULE");
+  }
+});
+
+test("starter depth rank never clears injuries or overrides explicit missed-game evidence", () => {
+  for(const [status,reports,games] of [["Q",[],15],["IR",[],0],[null,[{playerId:"1",sourceId:"team-report",sourceKind:"team_official",observedAt:"2026-08-22T11:00:00Z",status:"ACTIVE",expectedGamesThroughWeek17:12,unavailableWeeks:[1,2,3,4]}],12]]){
+    const p=fixture({sleeperPlayers:{s1:{yahoo_id:1,team:"BUF",position:"QB",status:"Active",injury_status:status==="IR"?"IR":status==="Q"?"Questionable":null,depth_chart_order:1}},externalInjuryReports:reports,offenseSnapshot:{observedAt:"2026-08-22T10:00:00Z",players:[{yahooId:"1",name:"Starter",team:"BUF",position:"QB",games:15,yahooProjectedPoints:360,injuryStatus:status,bye:7}]}}).players[0];
+    assert.equal(p.expectedGamesThroughWeek17,games);
+    assert.notEqual(p.availabilityAssumption,"HEALTHY_STARTER_FULL_SCHEDULE");
+    if(status)assert.equal(p.automaticEligible,false);
+    if(reports.length)assert.deepEqual(p.weeklyPoints.slice(0,4),[0,0,0,0]);
   }
 });
 

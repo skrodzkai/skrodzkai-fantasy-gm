@@ -417,8 +417,18 @@ export function assembleV5Board({
       (injury.draftAction === "REVIEW" && injury.conflict !== true && freshInjuryEvidence);
     const reviewedAvailabilityAssumption = injury.draftAction === "REVIEW" && manualHealthEligible ? 16 : null;
     const injuryGames = expectedGamesFromInjury(injury) ?? reviewedAvailabilityAssumption;
+    // Yahoo GP normalizes its source rate; it is not a researched absence count.
+    // Only a fresh, same-team/position starter may replace that cap with the
+    // healthy full-schedule assumption. Backups retain their role-limited basis.
+    const sleeperRole = sleeperByYahooId.get(String(player.yahooId));
+    const healthyStarterFullSchedule = injury.draftAction === "CLEAR" &&
+      injury.availabilityStatus !== "EXPLICIT" &&
+      injury.evidence.some((entry) => entry.sourceKind === "sleeper" && entry.fresh) &&
+      sleeperRole?.status === "Active" && Number(sleeperRole.depth_chart_order) === 1 &&
+      Boolean(player.team) && sleeperRole.team === player.team &&
+      player.eligible.includes(normalizePosition(sleeperRole.position));
     const expectedGamesThroughWeek17 = injuryGames == null || !(player.expectedGames > 0)
-      ? null : Math.min(injuryGames, player.expectedGames);
+      ? null : healthyStarterFullSchedule ? injuryGames : Math.min(injuryGames, player.expectedGames);
     // A valid reduced-games estimate discounts availability; it is not injury
     // evidence. Affirmative injury restrictions and projection validation remain.
     const projectedGamesReview = player.yahooProjectedGames != null && player.yahooProjectedGames < 16 &&
@@ -481,7 +491,7 @@ export function assembleV5Board({
       rankingOutcomeLow: weeklyProfile?.weeklyOutcomeLow?.reduce((sum, points) => sum + points, 0) ?? null,
       rankingOutcomeHigh: weeklyProfile?.weeklyOutcomeHigh?.reduce((sum, points) => sum + points, 0) ?? null,
       injury,
-      availabilityAssumption: projectedGamesReview ? "MANUAL_REVIEW_PROJECTED_GAME_CAP" : reviewedAvailabilityAssumption == null ? null : "MANUAL_REVIEW_ASSUMES_AVAILABLE_EXCEPT_BYE",
+      availabilityAssumption: healthyStarterFullSchedule ? "HEALTHY_STARTER_FULL_SCHEDULE" : projectedGamesReview ? "MANUAL_REVIEW_PROJECTED_GAME_CAP" : reviewedAvailabilityAssumption == null ? null : "MANUAL_REVIEW_ASSUMES_AVAILABLE_EXCEPT_BYE",
       expectedGamesThroughWeek17: weeklyProfile?.expectedGamesThroughWeek17 ?? null,
       weeklyPoints: weeklyProfile?.weeklyPoints ?? null,
       rawWeeklyPoints: rawWeeklyProfile?.weeklyPoints ?? null,
