@@ -37,7 +37,7 @@ function fixture({ path = "/draftclient/f1/542830/3", bridge = "ok", filled = 0,
   const helpers = context.SKRODZKaiYahooMockExtension._test;
   const settingsDoc = { body:{ innerText:"League Name:\tLeague Two\nDraft Type:\tLive Standard Draft\nMax Teams:\t12\nLive Draft Pick Time:\t1 Minute\nPassing Touchdowns\t4\nReceptions Yahoo Default\t1\t0.5\nRoster Positions:\tQB, WR, WR, WR, RB, RB, TE, W/R/T, W/R/T, K, DEF, D, D, BN, BN, BN, BN, BN, BN, IR, IR, IR" } };
   localStorage.setItem("skrodzkai-yahoo-test-settings-v1", JSON.stringify(helpers.makeTestSettingsReceipt(helpers.parseTestSettings(withScoringTable(settingsDoc), { pathname:"/f1/542830/settings" }))));
-  const attestation = { ok:true, version:"0.16.3", digest:"a".repeat(64), bootId:"synthetic-boot-1234", bootedAt:1 };
+  const attestation = { ok:true, version:"0.16.4", digest:"a".repeat(64), bootId:"synthetic-boot-1234", bootedAt:1 };
   const now = Date.now() - (stale ? 25 * 3600_000 : 1000);
   const board = { leagueId:"542830", scoringModel:"league-two-2026", scoringSchemaHash:configured ? context.SKRODZKaiYahooMockRunner.configs.test_league_19_idp.expectedScoring.scoringSchemaHash : "b".repeat(64), generatedAt:new Date(now).toISOString(),
     marketAdpReceipt:{ observedAt:new Date(now).toISOString(), rows:218 },

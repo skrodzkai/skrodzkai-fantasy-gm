@@ -50,6 +50,30 @@
       .split(",").map((slot) => normalize(slot).replaceAll(" ", "")).filter(Boolean);
   }
 
+  function scoringTableErrors(documentRef, expectedRows) {
+    const errors = [];
+    const observed = {};
+    for (const table of documentRef.querySelectorAll?.("table") ?? []) {
+      let section = null;
+      for (const row of table.querySelectorAll("tr")) {
+        const cells = Array.from(row.querySelectorAll("th,td"), (cell) => String(cell.innerText ?? "").replace(/\s+/g, " ").trim());
+        const label = cells[0]?.replace(/\s*Yahoo Default$/, "").trim();
+        if (Object.hasOwn(expectedRows, label)) {
+          if (Object.hasOwn(observed, label)) errors.push("scoring_duplicate_section");
+          section = label;
+          observed[section] = [];
+        } else if (section && cells.length >= 2) observed[section].push([label, cells[1]]);
+      }
+    }
+    const valueKey = (value) => String(value).trim() !== "" && Number.isFinite(Number(value)) ? String(Number(value)) : String(value);
+    for (const [section, rows] of Object.entries(expectedRows)) {
+      const values = observed[section] ?? [];
+      if (values.length !== rows.length || rows.some(([label, value], index) =>
+        values[index]?.[0] !== label || valueKey(values[index]?.[1]) !== valueKey(value))) errors.push(`scoring_rows_mismatch:${section}`);
+    }
+    return errors;
+  }
+
   function readOwnedTurn(documentRef) {
     const banner = textLines(draftSurfaceText(documentRef)).find((line) => /^YOUR TURN • ROUND \d+, PICK \d+$/.test(line));
     if (!String(documentRef.title ?? "").startsWith("YOUR TURN") || !banner) return null;
@@ -190,6 +214,9 @@
       }
     }
     if (!candidates.length) return null;
+    // Duplicate responsive panels may agree, but conflicting own-team sets
+    // cannot be resolved by choosing the shortest DOM fragment.
+    if (new Set(candidates.map(({yahooIds}) => JSON.stringify([...yahooIds].sort()))).size !== 1) return null;
     candidates.sort((left, right) => left.textLength - right.textLength || left.depth - right.depth);
     return { ...roster, yahooIds:candidates[0].yahooIds };
   }
@@ -234,7 +261,7 @@
   }
 
   root.SKRODZKaiYahooPageReaders = Object.freeze({
-    normalize, textLines, draftSurfaceText, parseRoom, parseRosterCount, readRosterCount, parseRosterSlots, readOwnedTurn, readOwnedTurnState,
+    normalize, textLines, draftSurfaceText, parseRoom, parseRosterCount, readRosterCount, parseRosterSlots, scoringTableErrors, readOwnedTurn, readOwnedTurnState,
     buttonText, readAutodraftState, isAutodraftActive, readQueueState, readDraftClock,
     isVisible, blockers, readPlayerRow, readAvailablePlayerRows, readDiscoveryRows, readProjectedOrder, readTeamRosterPlayerIds, boardHealthReceipt, boardHealthGate,
   });

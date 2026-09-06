@@ -306,7 +306,28 @@ test("Yahoo projected games normalize rates without granting reduced-game player
     assert.equal(player.expectedGamesThroughWeek17, games);
     if (games === 6) {
       assert.equal(player.automaticEligible, false);
-      assert.equal(player.validationStatus, "PROJECTED_GAMES_REVIEW");
+      assert.equal(player.validationStatus, "UNVALIDATED_SINGLE_SOURCE_PROJECTION", "games cap does not clear the independent projection gate");
+    }
+  }
+});
+
+test("CLEAR reduced-game players remain discounted but eligible; actual injury restrictions remain", () => {
+  for (const injuryStatus of [null, "Q", "IR"]) {
+    const board = fixture({
+      offenseSnapshot:{ observedAt:"2026-08-22T10:00:00Z", players:[{ yahooId:"1", name:"Quarterback", team:"BUF", position:"QB", games:15, yahooProjectedPoints:300, injuryStatus, bye:7 }] },
+      sleeperPlayers:{},
+      projectionSnapshots:[{
+        manifest:{ snapshotId:"reduced-games", sourceId:"espn-mike-clay", sourceFamily:"espn-clay", sourceAsOf:"2026-08-22T11:00:00Z", retrievedAt:"2026-08-22T11:10:00Z", contentSha256:"a".repeat(64), gamesBasis:"17", projectionPeriod:"2026", licenseUseNote:"regression" },
+        rows:[{ playerId:"1", name:"Quarterback", position:"QB", team:"BUF", projectionGames:17, scoringKind:"offense", stats:{ passingYards:4000, passingTouchdowns:30, passingCompletions:300, interceptions:10 } }],
+      }],
+    });
+    const player = board.players[0];
+    assert.equal(player.automaticEligible, injuryStatus === null);
+    if (injuryStatus === null) {
+      assert.equal(player.injury.draftAction, "CLEAR");
+      assert.equal(player.expectedGamesThroughWeek17, 15);
+      assert.ok(Math.abs(player.weeklyPoints.reduce((a, b) => a + b, 0) - player.rankingPerGamePoints * 15) < 1e-8);
+      assert.equal(player.weeklyPoints[6], 0);
     }
   }
 });

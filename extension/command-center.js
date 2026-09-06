@@ -28,6 +28,7 @@ function commandIntent() {
     : { mode:"NEXT_PICK", round, turnLabel:`R${round}` };
 }
 async function command(name, payload = null) {
+  if (state?.mode === "REAL SHADOW") return { ok:false, error:"real_shadow_read_only" };
   try {
     const response = await chrome.runtime.sendMessage({ type:"command", command:name, payload });
     const status = response?.ok === true ? "APPLIED" : "REJECTED";
@@ -102,6 +103,9 @@ function render() {
   renderSearch();
   if (state.mode === "REAL SHADOW") {
     [elements.arm, elements.kill, elements.export, elements.clearPin, elements.pin, elements.search, elements.clearSearch].forEach((control) => { control.disabled = true; });
+    for (const button of elements.ladder.querySelectorAll("[data-live-choice]")) button.disabled = true;
+    elements.results.replaceChildren();
+    elements.rosterCount.textContent = `${roster.length} / 19 · OBSERVED MEMBERSHIP`;
   }
 }
 

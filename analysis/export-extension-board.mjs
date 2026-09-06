@@ -211,7 +211,9 @@ export function extensionBoardFromV5(board) {
   };
 }
 
-export function renderExtensionBoard(board) {
+export function renderExtensionBoard(board, { mode = "TEST" } = {}) {
+  if (!["TEST", "REAL"].includes(mode)) throw new Error("extension export mode must be TEST or REAL");
+  if (mode === "REAL" && (String(board.leagueId) !== "420010" || board.scoringModel !== "2-minute-drillers-2026")) throw new Error("REAL export requires the exact REAL board");
   const runtimeBoard = {
     leagueId: board.leagueId ?? null,
     generatedAt: board.generatedAt,
@@ -232,7 +234,8 @@ export function renderExtensionBoard(board) {
     players: board.players,
     defenses: board.defenses,
   };
-  return `(function installYahooMockBoard(root) {\n  "use strict";\n\n  root.SKRODZKaiYahooMockBoard = Object.freeze(${JSON.stringify(runtimeBoard, null, 2)});\n})(globalThis);\n`;
+  const binding = mode === "REAL" ? "SKRODZKaiYahooRealBoard" : "SKRODZKaiYahooMockBoard";
+  return `(function installYahooBoard(root) {\n  "use strict";\n\n  root.${binding} = Object.freeze(${JSON.stringify(runtimeBoard, null, 2)});\n})(globalThis);\n`;
 }
 
 function csvCell(value) {
@@ -272,7 +275,7 @@ async function main() {
   if (!args.input || !args.output) throw new Error("usage: node analysis/export-extension-board.mjs --input=board.json --output=extension/yahoo-mock-board.js");
   const source = JSON.parse(await readFile(args.input, "utf8"));
   const board = extensionBoardFromV5(source);
-  await writeFile(args.output, renderExtensionBoard(board), "utf8");
+  await writeFile(args.output, renderExtensionBoard(board, { mode:args.mode ?? "TEST" }), "utf8");
   if (args["csv-output"]) await writeFile(args["csv-output"], renderOfflineBoardCsv(board), "utf8");
   process.stdout.write(`${JSON.stringify({ output: args.output, csvOutput: args["csv-output"] ?? null, offense: board.offense.length, kickers: board.kickers.length, defenses: board.defenses.length, idp: board.idp.length })}\n`);
 }
