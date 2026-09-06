@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SKRODZKai Yahoo Mock Draft Control",
-  "version": "0.16.3",
+  "version": "0.16.4",
   "description": "SKRODZKai command center for MOCK/TEST execution and isolated read-only REAL SHADOW observation.",
   "background": {
     "service_worker": "extension/command-center-background.js"
@@ -42,7 +42,8 @@
       ],
       "js": [
         "controller/yahoo-page-readers.js",
-        "extension/yahoo-mock-board.js",
+        "controller/yahoo-mock-runner.js",
+        "extension/yahoo-real-board.js",
         "extension/yahoo-real-shadow.js"
       ],
       "run_at": "document_idle"

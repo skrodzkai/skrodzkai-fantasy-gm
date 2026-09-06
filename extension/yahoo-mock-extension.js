@@ -1,7 +1,7 @@
 (function installYahooMockExtension(root) {
   "use strict";
 
-  const VERSION = "0.16.3";
+  const VERSION = "0.16.4";
   const GLOBAL_KEY = "__skrodzkaiYahooMockExtensionV1";
   const PREFLIGHT_KEY = "skrodzkai-yahoo-mock-extension-preflight-v1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-extension-receipts-v1";
@@ -158,26 +158,7 @@
     if (!sameSlots(rosterSlots, TEST_SETTINGS_ROSTER_SLOTS)) errors.push("test_roster_shape_mismatch");
     const contract = root.SKRODZKaiYahooMockRunner.configs.test_league_19_idp;
     const expectedRows = contract.scoringSettingsRows;
-    const observedRows = {};
-    let section = null;
-    for (const table of documentRef.querySelectorAll?.("table") ?? []) {
-      for (const row of table.querySelectorAll("tr")) {
-        const cells = Array.from(row.querySelectorAll("th,td"), (cell) => String(cell.innerText ?? "").replace(/\s+/g, " ").trim());
-        const label = cells[0]?.replace(/\s*Yahoo Default$/, "").trim();
-        if (Object.hasOwn(expectedRows, label)) {
-          if (Object.hasOwn(observedRows, label)) errors.push("test_scoring_duplicate_section");
-          section = label;
-          observedRows[section] = [];
-        } else if (section && cells.length >= 2) observedRows[section].push([label, cells[1]]);
-      }
-      section = null;
-    }
-    const valueKey = (value) => String(value).trim() !== "" && Number.isFinite(Number(value)) ? String(Number(value)) : String(value);
-    for (const [name, rows] of Object.entries(expectedRows)) {
-      const observed = observedRows[name] ?? [];
-      if (observed.length !== rows.length || rows.some(([label, value], index) =>
-        observed[index]?.[0] !== label || valueKey(observed[index]?.[1]) !== valueKey(value))) errors.push(`test_scoring_rows_mismatch:${name}`);
-    }
+    errors.push(...root.SKRODZKaiYahooPageReaders.scoringTableErrors(documentRef, expectedRows).map((error) => `test_${error}`));
     return { roomId: TEST_LEAGUE_ID, maximumTeams, rosterSlots, activeRosterSlots: rosterSlots.slice(0, TEST_ROSTER_SLOTS.length), scoringSchemaHash:contract.expectedScoring.scoringSchemaHash, errors, ready: errors.length === 0 };
   }
 
@@ -1212,7 +1193,7 @@
       nextPick: decision.nextPick ?? "—",
       intervening: decision.interveningOpponentPicks ?? "—",
       atRisk,
-      managerNote: executionMode === "TEST" ? "TEST ROOM · live snake pressure only; 2 Minute Drillers owner models are intentionally withheld." : "PUBLIC MOCK · live snake pressure only.",
+      managerNote: executionMode === "TEST" ? "TEST ROOM · market timing and snake window; live run pressure is not applied; 2 Minute Drillers owner models are intentionally withheld." : "PUBLIC MOCK · market timing and snake window; live run pressure is not applied.",
     };
   }
 

@@ -422,6 +422,13 @@ export function buildHealth({ generatedAt, clock, yahoo, adpHealth, espnHealth, 
       automaticEligibleByPosition: countsByPosition(automatic),
       automaticEligibleTotal: automatic.length,
       ambiguousNameTeamKeys: board?.identityEvidence?.ambiguousNameTeamKeys ?? [],
+      top100YahooOffenseExclusions: (board?.players ?? [])
+        .filter((player) => ["QB", "RB", "WR", "TE"].includes(player.position) &&
+          Number(player.yahooPreseasonRank) >= 1 && Number(player.yahooPreseasonRank) <= 100 && !player.automaticEligible)
+        .sort((a, b) => a.yahooPreseasonRank - b.yahooPreseasonRank)
+        .map((player) => ({ yahooId:player.yahooId, name:player.name, position:player.position,
+          yahooRank:player.yahooPreseasonRank, status:player.validationStatus,
+          reason:player.blockReason, healthAction:player.injury?.draftAction ?? "UNKNOWN" })),
     },
     byes: { source: "caller-supplied Yahoo player snapshots", ...byes },
     boardMovement: movement ?? { changes:[], reason:"board-not-built" },
@@ -446,6 +453,9 @@ async function ensureOutputParent(outputParent, allowedOutputRoot) {
 }
 
 export async function publishSuccessfulRun({ staging, finalPath, board, extensionSource, offlineBoardCsv, readiness, rehearsal, packets, opponentWarRoom, movementMarkdown, realShadowAcceptance, health }) {
+  if (String(board?.leagueId) === "420010") {
+    await writeFile(join(staging, "yahoo-real-board-v15.js"), renderExtensionBoard(extensionBoardFromV5(board), {mode:"REAL"}), {mode:0o600});
+  }
   await Promise.all([
     writeFile(join(staging, "player-board-v15.json"), `${JSON.stringify(board, null, 2)}\n`, { mode: 0o600 }),
     writeFile(join(staging, "draft-signals-v15.json"), `${JSON.stringify(board.draftSignalOverlay ?? null, null, 2)}\n`, { mode: 0o600 }),
