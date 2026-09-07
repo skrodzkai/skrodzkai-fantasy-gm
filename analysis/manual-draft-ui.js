@@ -1,6 +1,6 @@
 const $=id=>document.getElementById(id),text=(tag,value,cls)=>{const el=document.createElement(tag);el.textContent=value;if(cls)el.className=cls;return el;},num=n=>Number.isFinite(n)?n.toFixed(1):'—';
 const opponents=packet.opponents??[],key=`skrodzkai-draft-order:${packet.leagueId}:${packet.scoringModel}`,favKey=`skrodzkai-favorites:${packet.leagueId}:2026`;
-let order=Object.create(null),selected=opponents[0]??null,sortKey='value',sortDirection='desc',favorites=new Set(),drafted=new Set(),ledger=null,historyLimit=5,tierFilter=null;
+let order=Object.create(null),selected=opponents[0]??null,sortKey='value',sortDirection='desc',favorites=new Set(),drafted=new Set(),ledger=null,historyLimit=5,tierFilter=null,selectedRound=1;
 const tiers=playerTiers(packet.players),prebuilt=new Map();
 for(let seat=1;seat<=packet.teams;seat++)prebuilt.set(seat,Array.from({length:packet.rounds},(_,i)=>roundTargets(packet,seat,i+1)));
 function message(value){$('message').textContent=value;}
@@ -14,7 +14,9 @@ function renderHealth(){
  $('connection').textContent=status==='OFFLINE'?'Offline reference':`${status} · last confirmed #${last}${status==='COMPLETE'?` · captured ${new Date(ledger.checkedAt).toLocaleString()}`:''}`;
  $('connection').className=status==='LIVE'?'connected':status==='COMPLETE'?'muted':'warn';
  $('connection').title=ledger?.reason??'This standalone file does not receive Yahoo picks. Open the live desk from the extension.';
- $('feedNote').textContent=status==='LIVE'?'Availability reconciled with Yahoo.':status==='COMPLETE'?'Complete draft results received.':ledger?'Showing confirmed picks only; later picks may be missing. Live availability is not verified.':'Captured board — no live availability claim.';
+ $('identity').title=`${$('snapshot').textContent} · ${$('health').textContent} · ${$('connection').textContent}`;
+ $('feedNote').hidden=!ledger||status==='LIVE';
+ $('feedNote').textContent=!ledger?'':status==='COMPLETE'?$('connection').textContent:`${status} · confirmed through pick #${last}`;
 }
 function applyDraftLedger(value){
  if(value&&(value.leagueId!==packet.leagueId||value.season!==2026)){message('Rejected picks from a different league or season.');return;}
@@ -32,7 +34,7 @@ function renderBoard(){
  $('rows').textContent=`${players.length} shown · ${favorites.size} favorites`;
  for(const th of document.querySelectorAll('[data-sort]'))th.setAttribute('aria-sort',th.dataset.sort===sortKey?(sortDirection==='asc'?'ascending':'descending'):'none');
  $('players').replaceChildren(...players.map(p=>{
-   const t=tiers.get(p.yahooId),row=text('tr','','tier-row');row.dataset.tier=String(t?.tier??0);row.style.setProperty('--tier-alpha',t?.tier%2?'.075':'.025');
+   const t=tiers.get(p.yahooId),row=text('tr','','tier-row');row.dataset.tier=String(t?.tier??0);
    if(drafted.has(p.yahooId)){row.classList.add('drafted');row.title='Confirmed drafted in Yahoo';}
    const star=text('button',favorites.has(p.yahooId)?'★':'☆','star');star.setAttribute('aria-label',`Favorite ${p.name}`);star.setAttribute('aria-pressed',String(favorites.has(p.yahooId)));star.onclick=()=>toggleFavorite(p);const favorite=text('td','');favorite.append(star);
    const name=text('td','','namecell'),button=text('button',p.name,'player');button.title=p.name;button.onclick=()=>showDetails(p);name.append(button);
@@ -42,11 +44,25 @@ function renderBoard(){
 }
 function renderTiers(){
  const counts=tierCounts(packet.players,tiers,drafted),grid=$('tierGrid');grid.replaceChildren();
- for(const pos of SCOUT_POSITIONS){const column=text('div','','tier-column');column.append(text('strong',pos));for(const c of counts.filter(x=>x.position===pos).sort((a,b)=>a.tier-b.tier)){const b=text('button','','tier-box');const id=`${pos}:${c.tier}`;b.setAttribute('aria-pressed',String(tierFilter===id));b.title=`${c.remaining} of ${c.total} not recorded drafted; ${ledger?'check feed status':'snapshot only'}`;b.append(text('small',`TIER ${c.tier}`),text('strong',`${c.remaining}`));b.onclick=()=>{tierFilter=tierFilter===id?null:id;renderTiers();renderBoard();};column.append(b);}grid.append(column);}
+ for(const pos of SCOUT_POSITIONS){const column=text('div','','tier-column');column.append(text('strong',pos));for(const c of counts.filter(x=>x.position===pos).sort((a,b)=>a.tier-b.tier)){const b=text('button','','tier-box');b.dataset.tier=String(c.tier);if(c.remaining===1)b.classList.add('scarce');const id=`${pos}:${c.tier}`;b.setAttribute('aria-pressed',String(tierFilter===id));b.setAttribute('aria-label',`${pos} tier ${c.tier}: ${c.remaining} remaining`);b.title=`${c.remaining} of ${c.total} not recorded drafted; ${ledger?'check feed status':'snapshot only'}`;b.append(text('small',`TIER ${c.tier}`),text('strong',`${c.remaining}`));b.onclick=()=>{tierFilter=tierFilter===id?null:id;renderTiers();renderBoard();};column.append(b);}grid.append(column);}
  $('clearTier').hidden=!tierFilter;
 }
 $('clearTier').onclick=()=>{tierFilter=null;renderTiers();renderBoard();};
-function showDetails(p){$('detailName').textContent=p.name;$('detailBody').textContent=`${p.team} · Eligible: ${p.eligible.join(', ')}\nValue above replacement: ${num(p.vor)}\nCustom points, weeks 1–17: ${num(p.projection)}\nFull-season source consensus: ${num(p.sourceSeasonProjection)}\nADP: ${num(p.marketAdp)} · Draft range: ${num(p.adpLow)}–${num(p.adpHigh)}\n${p.marketAdp==null?'No matched ADP in this feed.\n':''}\n${playerWarnings(p).map(w=>w.detail).join('\n')}\n${injuryNotes(p)}\n\nValidation: ${p.validationStatus??'UNREVIEWED'}\n${p.idpModelWarning??''}\n${p.notes??''}`;$('details').showModal();}
+function showDetails(p){
+ $('detailName').textContent=p.name;const panel=$('detailBody'),injury=injurySummary(p);
+ panel.replaceChildren(text('p',`${p.team} · ${p.eligible.join(' / ')} · ${injury.status}`,'detail-meta'));
+ const stats=text('div','','detail-stats');for(const [label,value]of [['Value +/−',num(p.vor)],['Points · W1–17',num(p.projection)],['ADP',num(p.marketAdp)],['Projected games · W1–17',injury.games??'—']]){const item=text('div','');item.append(text('small',label),text('strong',value));stats.append(item);}panel.append(stats);
+ const comparison=text('table','','source-table'),head=text('thead',''),tr=text('tr','');for(const [label,tip]of [['Source','Only captured sources; derived position ranks use this board, not publisher rankings'],['Overall','SKRODZKai value rank or captured Yahoo published rank'],['Pos.','SKRODZKai value rank; external position ranks calculated from source projections within the captured board'],['Pts · W1–17','Source league-scored points per game × our projected games; not the publisher’s displayed season total']]){const th=text('th',label);th.title=tip;th.scope='col';tr.append(th);}head.append(tr);comparison.append(head);const body=text('tbody','');for(const entry of sourceComparison(packet,p)){const row=text('tr',''),label=text('td','');label.append(text('strong',entry.name),text('small',entry.basis));row.append(label,text('td',entry.overall??'—','num'),text('td',entry.position??'—','num'),text('td',num(entry.points),'num'));body.append(row);}comparison.append(body);panel.append(comparison);
+ if(injury.clear)panel.append(text('p','No reported injury restriction.','injury-update'));
+ else{
+ if(injury.update){const update=text('p','','injury-update');update.append(text('small',`Latest report · ${injury.reportDate}`),text('span',injury.update));panel.append(update);}
+ const facts=text('dl','','injury-facts');for(const [label,value]of [['Injury',injury.body],['Practice',injury.practice],['Games missed',injury.missed],...(injury.returnNote?[['Return',injury.returnNote]]:[])])facts.append(text('dt',label),text('dd',value));panel.append(facts,text('p',injury.impact,'injury-impact'));
+ }
+ const split=playerWarnings(p).find(w=>w.label==='SPLIT');if(split)panel.append(text('p',split.detail.split(' Diagnostic')[0],'injury-update'));
+ if(p.idpModelWarning)panel.append(text('p','IDP estimate uses the Yahoo-based model; tackle-first calibration is unavailable.','injury-update'));
+ if(!injury.clear&&injury.links.length){const sources=text('div','','detail-sources');injury.links.forEach((url,i)=>{const a=text('a',`Link ${i+1}`);a.href=url;a.target='_blank';a.rel='noopener noreferrer';sources.append(a);});panel.append(sources);}
+ $('details').showModal();
+}
 function orderContext(card,round){
  if(!order.ours||!order[card.managerId])return 'Assign the actual draft order to add between-turn context.';
  const picks=opponentBetween(card,order,round,packet),windows=[];
@@ -59,36 +75,43 @@ function selectOpponent(card){
  const choices=historyWindows(card);if(!choices.includes(historyLimit))historyLimit=choices[0];
  const controls=text('div','','history-controls');controls.append(text('strong','First pick at each position'));
  for(const n of choices){const b=text('button',String(n));b.setAttribute('aria-label',`Median across last ${n} drafts`);b.setAttribute('aria-pressed',String(n===historyLimit));b.onclick=()=>{historyLimit=n;selectOpponent(card);};controls.append(b);}panel.append(controls);
- panel.append(text('p',`Median across last ${historyLimit} drafts · latest five seasons shown · “—” means not drafted`,'inline-note'));
  const recent=[...card.seasons].sort((a,b)=>b-a).slice(0,5).reverse(),table=text('table','','scout-table'),head=text('thead',''),tr=text('tr','');
  for(const label of ['Position','Median',...recent.map(String)]){const th=text('th',label);th.scope='col';tr.append(th);}head.append(tr);table.append(head);const body=text('tbody','');
  for(const pos of SCOUT_POSITIONS){const summary=timingWindow(card,pos,historyLimit),row=text('tr','');row.append(text('td',pos),text('td',summary.missing?'Unavailable':summary.median===null?'—':`R${summary.median}`,'median num'));for(const year of recent){const value=(card.specialty[pos].history??card.specialty[pos].recent).find(x=>x.season===year);row.append(text('td',value?.round==null?'—':`R${value.round}`,'num'));}body.append(row);}table.append(body);const wrap=text('div','','scout-table-wrap');wrap.append(table);panel.append(wrap,text('p',orderContext(card,Number($('planningRound').value)),'order-context'));
 }
 function renderCards(){
- $('opponentCount').textContent=`${opponents.length} opponents`;
  $('opponentTeams').replaceChildren(...opponents.map(card=>{const b=text('button','','team-card');b.dataset.teamId=card.teamId;b.setAttribute('aria-controls','opponentDetail');b.setAttribute('aria-pressed','false');b.append(text('small',`${card.managerId}${order[card.managerId]?` · Seat ${order[card.managerId]}`:''}`),text('strong',card.teamName),text('span',opponentSummary(card).headline));b.onclick=()=>selectOpponent(card);return b;}));
  if(selected)selectOpponent(selected);
 }
 for(let r=1;r<=packet.rounds;r++)$('planningRound').append(new Option(`R${r}`,r));$('planningRound').onchange=()=>{if(selected)selectOpponent(selected);};
 for(const owner of [{managerId:'ours',teamName:'SKRODZKai'},...opponents]){const label=text('label','','order-field'),select=document.createElement('select');select.dataset.owner=owner.managerId;select.setAttribute('aria-label',`Snake seat for ${owner.teamName}`);select.append(new Option('Unassigned',''));for(let n=1;n<=packet.teams;n++)select.append(new Option(`Seat ${n}`,n));select.value=order[owner.managerId]??'';label.append(text('span',owner.teamName),select);$('orderFields').append(label);}
 function renderStrategy(){
- const panel=$('strategy');panel.replaceChildren();if(!order.ours){panel.append(text('p','Choose your snake seat to load its prebuilt round-by-round plan.','muted'));return;}
- panel.append(text('p',order.ours===1||order.ours===packet.teams?'Turn seat: evaluate each two-pick pair together; secure a scarce tier before the long wait.':'Middle seat: compare the best values at every turn; the wait alternates each round.'));
- panel.append(text('p','Five strongest values in a plausible ADP / Yahoo-rank window. Alternatives, not a scripted roster or a guarantee they survive. No fixed positions by round.','inline-note'));
- if(!boardReady(packet))panel.append(text('p','Data status check due. These are saved planning targets, not fresh live recommendations.','warn'));
- for(let round=1;round<=packet.rounds;round++){
-   const pick=nextTurns(order.ours,1,packet.teams,packet.rounds)[round-1],intel=roundOpponents(packet,order,round),card=text('article','','round-card');card.append(text('h3',`Round ${round} · Pick #${pick}`));
-   const before=intel.before;card.append(text('p',before==='BACK_TO_BACK'?'Your own back-to-back pick.':before?`Immediately ahead: ${before.teamName}. ${round===1?opponentSummary(before).detail:orderContext(before,round-1)}`:pick===1?'You open the draft.':'Manager ahead is unassigned.','round-intel'));
-   if(intel.between.length){const pressure=SCOUT_POSITIONS.map(pos=>{const owners=intel.between.filter(c=>{const rounds=new Set(opponentBetween(c,order,round,packet).map(p=>Math.ceil(p/packet.teams)));return c.specialty[pos].recent.some(x=>x.round!==null&&rounds.has(x.round));});return owners.length?`${pos}: ${owners.length} managers`:null;}).filter(Boolean);card.append(text('p',`Before your next turn: ${intel.between.length} opponents.${pressure.length?` Historical first-position timing overlaps — ${pressure.join(' · ')}.`:''}`,'round-intel'));}
-   const targets=ledger?roundTargets(packet,order.ours,round,drafted):prebuilt.get(order.ours)[round-1],list=text('ol','','target-list');
-   for(const p of targets){const li=text('li',''),b=text('button',p.name,'target-player');b.onclick=()=>showDetails(p);li.append(b,text('span',`${p.position} · value ${num(p.vor)} · ${tiers.get(p.yahooId)?`T${tiers.get(p.yahooId).tier}`:'un-tiered'} · ${Number.isFinite(p.marketAdp)?`ADP ${num(p.marketAdp)}`:'Yahoo timing; ADP missing'}`),text('small',playerWarnings(p).map(w=>w.label).join(' · ')));list.append(li);}card.append(list);
-   if(targets.length<5)card.append(text('p',`Only ${targets.length} eligible targets in this window. Use the full board for alternatives; missing evidence is not filled with guesses.`,'inline-note'));
-   panel.append(card);
+ const panel=$('strategy'),nav=$('roundNav');panel.replaceChildren();nav.replaceChildren();if(!order.ours){panel.append(text('p','Choose your seat above.','muted'));return;}
+ for(let n=1;n<=packet.rounds;n++){const b=text('button',`R${n}`);b.setAttribute('aria-pressed',String(n===selectedRound));b.setAttribute('aria-label',`Round ${n}`);b.onclick=()=>{selectedRound=n;renderStrategy();};nav.append(b);}
+ const round=selectedRound,turns=nextTurns(order.ours,1,packet.teams,packet.rounds),pick=turns[round-1],intel=roundOpponents(packet,order,round),title=text('div','','round-title');
+ title.append(text('h3',`Round ${round} · Pick #${pick}`),text('span',round===packet.rounds?'Final pick':`${turns[round]-pick-1} picks until next turn`));panel.append(title);
+ const before=intel.before;
+ let context=before==='BACK_TO_BACK'?'Back-to-back picks':before?`Ahead: ${before.teamName}`:pick===1?'You pick first':'Ahead: seat unassigned';
+ if(before&&before!=='BACK_TO_BACK'){
+   const picks=Object.entries(round===1?before.recentRound1:Object.fromEntries(SCOUT_POSITIONS.map(pos=>[pos,before.specialty[pos].recent.filter(x=>x.round===round).length]))).filter(([,n])=>n>0).sort((a,b)=>b[1]-a[1]);
+   if(picks.length){context+=` · ${round===1?'R1 history':'First-position history'}: ${picks.map(([pos,n])=>`${pos} ${n}`).join(' / ')}`;}
  }
+ panel.append(text('p',context,'round-intel'));
+ const targets=ledger?roundTargets(packet,order.ours,round,drafted):prebuilt.get(order.ours)[round-1],table=text('table','','target-table'),head=text('thead',''),headRow=text('tr','');
+ for(const [label,cls]of [['#',''],['Player',''],['Pos',''],['Tier',''],['Value +/−','num'],['Points','num'],['ADP','num'],['Health','']]){const th=text('th',label,cls);th.scope='col';headRow.append(th);}head.append(headRow);table.append(head);const body=text('tbody','');
+ targets.forEach((p,i)=>{const t=tiers.get(p.yahooId),row=text('tr','','tier-row');row.dataset.tier=String(t?.tier??0);const name=text('td',''),b=text('button',p.name,'player');b.onclick=()=>showDetails(p);name.append(b);const health=text('td','','statuscell');for(const w of playerWarnings(p)){const badge=text('button',w.label,'badge');badge.title=w.detail;badge.onclick=()=>showDetails(p);health.append(badge);}row.append(text('td',String(i+1),'num target-rank'),name,text('td',p.position,'position'),text('td',t?`T${t.tier}`:'—'),text('td',num(p.vor),'num value'),text('td',num(p.projection),'num'),text('td',num(p.marketAdp),'num'),health);body.append(row);});
+ table.append(body);const wrap=text('div','','target-wrap');wrap.append(table);panel.append(wrap);
+ if(targets.length<5)panel.append(text('p',`${targets.length} targets in range · see Player board for more`,'muted'));
 }
-$('saveOrder').onclick=()=>{try{const candidate=Object.create(null);for(const select of $('orderFields').querySelectorAll('select'))if(select.value)candidate[select.dataset.owner]=Number(select.value);order=validateOrder(candidate,packet);try{localStorage.setItem(key,JSON.stringify(order));$('orderStatus').textContent=Object.keys(order).length===packet.teams?'Complete order saved; plan updated':'Partial order saved; unassigned managers have no seat context';}catch{message('Order saved in this tab only.');}renderCards();renderStrategy();}catch(e){message(e.message);}};
+function renderOrder(){
+ $('orderSetup').hidden=Boolean(order.ours);$('orderStrip').hidden=!order.ours;const strip=$('orderStripList');strip.replaceChildren();
+ for(const owner of [{managerId:'ours',teamName:'SKRODZKai'},...opponents].filter(o=>order[o.managerId]).sort((a,b)=>order[a.managerId]-order[b.managerId])){const item=text('span','');item.append(text('strong',`#${order[owner.managerId]}`),text('span',owner.teamName));strip.append(item);}
+ if(Object.keys(order).length<packet.teams)strip.append(text('span',`${packet.teams-Object.keys(order).length} seats unassigned`,'muted'));
+}
+$('editOrder').onclick=()=>{for(const select of $('orderFields').querySelectorAll('select'))select.value=order[select.dataset.owner]??'';$('orderSetup').hidden=false;$('orderStrip').hidden=true;};
+$('saveOrder').onclick=()=>{try{const candidate=Object.create(null);for(const select of $('orderFields').querySelectorAll('select'))if(select.value)candidate[select.dataset.owner]=Number(select.value);order=validateOrder(candidate,packet);message('');try{localStorage.setItem(key,JSON.stringify(order));$('orderStatus').textContent='Saved';}catch{message('Order saved in this tab only.');}renderOrder();renderCards();renderStrategy();}catch(e){message(e.message);}};
 for(const [value,label]of Object.entries({favorites:'Favorites first',tier:'Positional tier',name:'Player name',position:'Position',team:'NFL team',health:'Health status',adp:'Average draft position',bye:'Bye week'}))$('sort').append(new Option(label,value));
 for(const id of ['search','position','favoritesOnly','hideDrafted'])$(id).addEventListener('input',renderBoard);
 $('sort').onchange=()=>{sortKey=$('sort').value;sortDirection=['value','points','favorites'].includes(sortKey)?'desc':'asc';renderBoard();};
 for(const th of document.querySelectorAll('[data-sort]'))th.onclick=()=>{const next=th.dataset.sort;sortDirection=next===sortKey?(sortDirection==='asc'?'desc':'asc'):['value','points','favorites'].includes(next)?'desc':'asc';sortKey=next;$('sort').value=next;renderBoard();};
-renderHealth();renderBoard();renderTiers();renderCards();renderStrategy();setInterval(renderHealth,1000);
+renderHealth();renderBoard();renderTiers();renderCards();renderOrder();renderStrategy();setInterval(renderHealth,1000);

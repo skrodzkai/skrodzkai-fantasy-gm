@@ -1,20 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {seatAt,nextTurns,validateOrder,opponentBetween,firstPickTiming,SCOUT_POSITIONS,boardReady,rankedPlayers,opponentSummary,injuryNotes} from './manual-draft-model.mjs';
+import {seatAt,nextTurns,validateOrder,opponentBetween,firstPickTiming,SCOUT_POSITIONS,boardReady,rankedPlayers,opponentSummary,injurySummary} from './manual-draft-model.mjs';
 import {renderDesk,validatePacket} from './build-manual-draft-desk.mjs';
 import vm from 'node:vm';
 const input={leagueId:'420010',scoringModel:'fixture',teams:12,rounds:19,health:'FAIL',observedAt:'2026-09-06T05:00:00Z',notice:'Fixture, not current data',players:[{yahooId:'1',name:'One',eligible:['WR'],position:'WR',vor:10,projection:100},{yahooId:'2',name:'Two',eligible:['CB','WR'],position:'CB',vor:20,projection:90}]};
 const packet=validatePacket(input);
-test('researched injury note leads with latest published facts and honest point impact',()=>{
+test('compact injury summary keeps dated facts, unknown absences and source links separate',()=>{
  const base={sourceId:'reporter',sourceKind:'reported_news',sourceUrl:'https://example.com/report',narrativeOnly:true,observedAt:'2026-09-06T23:00Z',publishedAt:'2026-09-06',fresh:true,note:'Psoas soreness; coach expects Week 1.',reportedReturn:'Week 1 expected, not confirmed.',draftImpact:'Keep on shortlist; check final participation.'};
- const note=injuryNotes({expectedGamesThroughWeek17:15,injury:{status:'QUESTIONABLE',draftAction:'REVIEW',availabilityStatus:'UNSPECIFIED',evidence:[base,{...base,publishedAt:'2026-09-01',note:'Older update'},{...base,publishedAt:'2026-09-05',fresh:false,note:'Stale update'}]}});
- assert(note.startsWith('Latest researched update · 2026-09-06\nPsoas'));
- for(const fact of ['analysis','15 expected games','does not change points','Automatic selection remains blocked','STALE'])assert(note.includes(fact));
- const stale=injuryNotes({injury:{status:'QUESTIONABLE',draftAction:'REVIEW',evidence:[{...base,fresh:false}]}});assert(!stale.startsWith('Latest researched update'));
- const undated=injuryNotes({injury:{bodyParts:['Knee'],reportedReturns:['Week 2'],evidence:[{...base,publishedAt:null}]}});
- for(const fact of ['publication date unavailable','Knee','Week 2','Reported timeline (not confirmed)'])assert(undated.includes(fact));
+ const p={expectedGamesThroughWeek17:15,injury:{status:'QUESTIONABLE',draftAction:'REVIEW',availabilityStatus:'UNSPECIFIED',evidence:[base,{...base,publishedAt:'2026-09-01',note:'Older update'},{...base,publishedAt:'2026-09-05',fresh:false,note:'Stale update'}]}},before=JSON.stringify(p),note=injurySummary(p);
+ assert.equal(note.reportDate,'2026-09-06');assert.equal(note.update,base.note);assert.equal(note.impact,base.draftImpact);assert.equal(note.games,15);assert.equal(note.missed,'Unknown','source GP cap must not be called a researched injury absence');assert.equal(note.practice,'Not reported');assert.deepEqual(note.links,[base.sourceUrl]);assert.equal(JSON.stringify(p),before);
+ const stale=injurySummary({injury:{status:'QUESTIONABLE',draftAction:'REVIEW',evidence:[{...base,fresh:false}]}});assert.equal(stale.update,null);
+ const undated=injurySummary({injury:{bodyParts:['Knee'],reportedReturns:['Week 2'],evidence:[{...base,publishedAt:null,reportedReturn:null}]}});
+ assert.equal(undated.reportDate,'checked 2026-09-06');assert.equal(undated.body,'Knee');assert.equal(undated.returnNote,'Week 2');
  for(const injury of [{roleUncertain:true},{availabilityStatus:'CONFLICT'}]){
-   const withheld=injuryNotes({injury:{...injury,evidence:[base]}});assert(withheld.includes('points withheld'));assert(!withheld.includes('does not change points'));
+   const withheld=injurySummary({injury:{...injury,evidence:[base]}});assert(withheld.impact.includes('points withheld'));
  }
 });
 test('all eight columns sort both ways, with missing numeric values always last',async()=>{
@@ -25,10 +24,11 @@ test('all eight columns sort both ways, with missing numeric values always last'
  for(const sort of ['points','value','adp','bye'])for(const direction of ['asc','desc'])assert.equal(rankedPlayers({players:[{yahooId:'3',name:'Missing'},a,b]},{sort,direction}).at(-1).yahooId,'3');
  const html=await renderDesk(input);for(const key of ['name','position','team','health','points','value','adp','bye'])assert(html.includes(`data-sort="${key}"`));assert(html.includes('aria-sort'));assert(html.includes("sortDirection==='asc'?'desc':'asc'"));
 });
-test('injury notes retain dated source facts without inventing a return',()=>{
- const note=injuryNotes({injury:{status:'QUESTIONABLE',draftAction:'REVIEW',bodyParts:['Biceps'],reportedReturns:[],evidence:[{sourceId:'sleeper',observedAt:'2026-09-06T12:00Z',status:'QUESTIONABLE',bodyPart:'Biceps',practice:'Limited',fresh:true}]}});
- for(const fact of ['Biceps','Limited','sleeper','2026-09-06T12:00Z','Not confirmed'])assert(note.includes(fact));assert(!note.includes('Ready for Week 1'));
- assert(injuryNotes({}).includes('unavailable'));
+test('injury summary reports practice and explicit absence only; unsafe links excluded',()=>{
+ const note=injurySummary({injury:{status:'QUESTIONABLE',draftAction:'REVIEW',bodyParts:['Biceps'],reportedReturns:[],evidence:[{sourceId:'sleeper',observedAt:'2026-09-06T12:00Z',status:'QUESTIONABLE',bodyPart:'Biceps',practice:'Limited',fresh:true,sourceUrl:'javascript:alert(1)'}]}});
+ assert.equal(note.body,'Biceps');assert.equal(note.practice,'Limited · checked 2026-09-06');assert.equal(note.returnNote,'');assert.equal(note.missed,'Unknown');assert.deepEqual(note.links,[]);
+ assert.equal(injurySummary({}).body,'Not specified');assert.equal(injurySummary({injury:{availabilityStatus:'EXPLICIT',expectedGamesThroughWeek17:12}}).missed,'4 expected through Week 17');
+ assert.equal(injurySummary({injury:{availabilityStatus:'EXPLICIT',unavailableWeeks:[1,2]}}).missed,'Weeks 1, 2 unavailable');
 });
 const opponent={teamId:'sample',teamName:'Example Team',managerId:'Example Manager',seasons:[2021,2022,2023,2024,2025],rows:95,recentRound1:{RB:1,WR:4},recentOpening:{RB:7,TE:3,WR:10},specialty:Object.fromEntries(SCOUT_POSITIONS.map(position=>[position,{medianRound:6,draftedSeasons:5,recent:[{season:2025,round:7}]}]))};
 test('opponent summaries preserve actual sample, ties and absent evidence',()=>{
