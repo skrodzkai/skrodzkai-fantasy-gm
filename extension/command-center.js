@@ -1,5 +1,6 @@
 /* global chrome */
 "use strict";
+document.querySelector('[data-open-desk]')?.addEventListener('click',async()=>{const status=document.querySelector('[data-desk-status]');status.textContent='';try{const reply=await chrome.runtime.sendMessage({type:'open_draft_desk',leagueId:String(state?.context?.roomId??'')});if(!reply?.ok)status.textContent=reply?.error??'Desk unavailable';}catch{status.textContent='Extension disconnected; reopen Command Center.';}});
 
 let state = null;
 let board = [];
