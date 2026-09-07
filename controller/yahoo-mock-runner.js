@@ -3,7 +3,7 @@
 
   const VERSION = "2.3.0";
   // Release-owned gate. Never read activation from page, storage or operator input.
-  const REAL_EXECUTION_ENABLED = false;
+  const REAL_EXECUTION_ENABLED = true;
   const GLOBAL_KEY = "__skrodzkaiYahooMockRunnerV1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-runner-receipts-v1";
   const OFFENSE = ["QB", "RB", "WR", "TE"];

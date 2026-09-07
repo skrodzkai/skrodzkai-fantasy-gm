@@ -169,7 +169,7 @@ test("keeps one visible position pool while containing autonomous specialists to
   assert.equal(helpers.filterLabelForRound(19, [], testConfig, 12), "All Positions");
   assert.deepEqual(Array.from(helpers.requiredFilterLabels(testConfig)), ["All Positions", "Kickers", "Team Defenses", "Defensive Players"]);
   assert.deepEqual(Array.from(helpers.requiredFilterLabels(mockConfig)), ["All Positions", "Team Defenses", "Kickers"]);
-  assert.equal(api.realExecutionEnabled,false);
+  assert.equal(api.realExecutionEnabled,true);
   assert.equal(helpers.automaticCandidateAllowed({ player:player("K", 1, 1), round:14, picks:[], config:testConfig }), false);
   assert.equal(helpers.automaticCandidateAllowed({ player:player("K", 1, 1), round:15, picks:[], config:testConfig }), true);
   assert.equal(helpers.automaticCandidateAllowed({ player:player("LB", 1, 1), round:16, picks:[], config:testConfig }), false);

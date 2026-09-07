@@ -145,8 +145,8 @@ async function waitFor(predicate, timeoutMs = 500) {
 for (const { seat, real = false, disabled = false, missingFilter = false, onClock = false, skipDiscovery = false, sparseDiscovery = false, lateSparse = false } of [{seat:6,real:true,disabled:true},{seat:1,real:true},{seat:6,real:true},{seat:12,real:true},{seat:6,real:true,missingFilter:true},{seat:6,real:true,skipDiscovery:true},{seat:6,real:true,onClock:true},{seat:6,real:true,lateSparse:true}, { seat:1 }, { seat:6 }, { seat:12 }, { seat:6, onClock:true }, { seat:6, skipDiscovery:true }, { seat:6, sparseDiscovery:true }, { seat:12, sparseDiscovery:true }, { seat:6, lateSparse:true }]) test(`${disabled ? "shipped-false REAL" : real ? "enabled-candidate REAL" : "production TEST"} ${missingFilter ? "missing filter preflight" : lateSparse ? "forced IDP pool exhaustion stops without a click" : sparseDiscovery ? "sparse hint uses one receipted fresh fallback" : skipDiscovery ? "non-adjacent stale discovery refuses clean acceptance" : "19-round zero-fallback acceptance"}, slot ${seat}, on-clock choice ${onClock}, 30-second clock (synthetic DOM, not live proof)`, async (t) => {
   const fixtureContext = vm.createContext({ ...context });
   fixtureContext.globalThis = fixtureContext;
-  assert.equal(runnerSource.split("const REAL_EXECUTION_ENABLED = false;").length,2,"unique release switch mutation only in an in-memory candidate");
-  vm.runInContext(real && !disabled ? runnerSource.replace("const REAL_EXECUTION_ENABLED = false;","const REAL_EXECUTION_ENABLED = true;") : runnerSource, fixtureContext);
+  assert.equal(runnerSource.split("const REAL_EXECUTION_ENABLED = true;").length,2,"unique enabled release switch");
+  vm.runInContext(disabled ? runnerSource.replace("const REAL_EXECUTION_ENABLED = true;","const REAL_EXECUTION_ENABLED = false;") : runnerSource, fixtureContext);
   vm.runInContext(shadowSource, fixtureContext);
   vm.runInContext(extensionSource, fixtureContext);
   const runnerApi = fixtureContext.SKRODZKaiYahooMockRunner;

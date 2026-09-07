@@ -14,7 +14,10 @@ const fixture=vm.createContext({});
 vm.runInContext(await readFile(new URL("../extension/yahoo-mock-board.js", import.meta.url), "utf8"),fixture);
 const boardSource=renderExtensionBoard({...fixture.SKRODZKaiYahooMockBoard,
   replacementRoster:{teamCount:12,rosterSlots:LEAGUE_STARTER_SLOTS}}, {mode:"REAL"});
-const runnerSource = await readFile(new URL("../controller/yahoo-mock-runner.js", import.meta.url), "utf8");
+const shippedRunnerSource = await readFile(new URL("../controller/yahoo-mock-runner.js", import.meta.url), "utf8");
+// This historical policy fixture explicitly exercises the disabled REAL release.
+assert.equal(shippedRunnerSource.split("const REAL_EXECUTION_ENABLED = true;").length, 2);
+const runnerSource = shippedRunnerSource.replace("const REAL_EXECUTION_ENABLED = true;", "const REAL_EXECUTION_ENABLED = false;");
 
 test("opponents can select our manual-only stars but obey their own roster completion", () => {
   const { runner } = loadRuntime(boardSource, runnerSource,"REAL");
