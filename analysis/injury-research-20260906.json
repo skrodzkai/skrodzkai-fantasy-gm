@@ -103,7 +103,7 @@
     "name": "D'Andre Swift",
     "sourceId": "researched-32705",
     "sourceKind": "reported_news",
-    "publishedAt": "2026-09-03",
+    "publishedAt": null,
     "observedAt": "2026-09-06T23:58:08Z",
     "sourceUrl": "https://www.cbssports.com/nfl/teams/chi/chicago-bears/injuries/",
     "note": "Abdomen injury listed with questionable Week 1 availability.",
@@ -136,9 +136,9 @@
     "name": "Bhayshul Tuten",
     "sourceId": "researched-41900",
     "sourceKind": "reported_news",
-    "publishedAt": "2026-09-02",
+    "publishedAt": null,
     "observedAt": "2026-09-06T23:58:08Z",
-    "sourceUrl": "https://11.racing.cbssports.com/nfl/teams/JAC/jacksonville-jaguars/injuries/",
+    "sourceUrl": "https://www.cbssports.com/nfl/teams/JAC/jacksonville-jaguars/injuries/",
     "note": "Illness listed with questionable Week 1 availability.",
     "draftImpact": "Do not price this as a long-term orthopedic injury. Verify return to practice; no confirmed missed games."
   },
@@ -237,7 +237,7 @@
     "sourceKind": "reported_news",
     "publishedAt": "2026-09-02",
     "observedAt": "2026-09-06T23:58:08Z",
-    "sourceUrl": "https://amp.nfl.com/news/chiefs-qb-patrick-mahomes-appears-on-track-to-start-week-1-vs-broncos",
+    "sourceUrl": "https://www.nfl.com/news/chiefs-qb-patrick-mahomes-appears-on-track-to-start-week-1-vs-broncos",
     "note": "Continued practicing after knee-ligament rehabilitation and appeared on track for the opener.",
     "draftImpact": "Our point estimate is not a validated post-surgery rushing model. Compare with healthy QBs near the same price."
   },
@@ -268,9 +268,9 @@
     "name": "Chuba Hubbard",
     "sourceId": "researched-33514",
     "sourceKind": "reported_news",
-    "publishedAt": "2026-09-01",
+    "publishedAt": "2026-09-02",
     "observedAt": "2026-09-06T23:58:08Z",
-    "sourceUrl": "https://staging-aws.sports.yahoo.com/articles/panthers-hc-dave-canales-declines-172821286.html",
+    "sourceUrl": "https://www.rotowire.com/football/headlines/chuba-hubbard-injury-returns-to-practice-tuesday-635820",
     "note": "Returned to practice after a hamstring issue.",
     "draftImpact": "Positive movement. Verify workload; Brooks' status does not guarantee Hubbard every touch."
   },
@@ -398,25 +398,14 @@
   {
     "playerId": "32675",
     "name": "Tua Tagovailoa",
-    "sourceId": "researched-32675",
-    "sourceKind": "reported_news",
-    "publishedAt": "2026-09-02",
-    "observedAt": "2026-09-06T23:58:08Z",
-    "sourceUrl": "https://www.atlantafalcons.com/news/falcons-gm-ian-cunningham-explains-4-qbs-53-man-roster",
-    "note": "Atlanta said its starting-quarterback competition remained open.",
-    "draftImpact": "Do not assume a full starting season from depth-chart order. Manual review only: the source-capped points are not a full-season starter projection."
-  }
-,
-  {
-    "playerId": "32675",
-    "name": "Tua Tagovailoa",
     "sourceId": "falcons-open-qb-competition-32675",
     "sourceKind": "team_official",
     "publishedAt": "2026-09-02",
     "observedAt": "2026-09-06T23:58:42Z",
     "sourceUrl": "https://www.atlantafalcons.com/news/falcons-gm-ian-cunningham-explains-4-qbs-53-man-roster",
     "status": "ROLE_UNCERTAIN",
-    "note": "Official report describes an unresolved starting-quarterback competition. No newer official starter announcement found in this audit. This is a role restriction, not an injury diagnosis."
+    "note": "Analyst role-review classification based on Atlanta's statement that the starting competition remains open. No newer official starter announcement found in this audit. ROLE_UNCERTAIN is not an official injury designation.",
+    "draftImpact": "Points withheld consistently for all unresolved candidates; a depth-chart order does not prove a starting job."
   },
   {
     "playerId": "40889",
@@ -427,7 +416,8 @@
     "observedAt": "2026-09-06T23:58:42Z",
     "sourceUrl": "https://www.atlantafalcons.com/news/falcons-gm-ian-cunningham-explains-4-qbs-53-man-roster",
     "status": "ROLE_UNCERTAIN",
-    "note": "Official report describes an unresolved starting-quarterback competition. No newer official starter announcement found in this audit. This is a role restriction, not an injury diagnosis."
+    "note": "Analyst role-review classification based on Atlanta's statement that the starting competition remains open. No newer official starter announcement found in this audit. ROLE_UNCERTAIN is not an official injury designation.",
+    "draftImpact": "Points withheld consistently for all unresolved candidates; a depth-chart order does not prove a starting job."
   },
   {
     "playerId": "30788",
@@ -438,6 +428,7 @@
     "observedAt": "2026-09-06T23:58:42Z",
     "sourceUrl": "https://www.atlantafalcons.com/news/falcons-gm-ian-cunningham-explains-4-qbs-53-man-roster",
     "status": "ROLE_UNCERTAIN",
-    "note": "Official report describes an unresolved starting-quarterback competition. No newer official starter announcement found in this audit. This is a role restriction, not an injury diagnosis."
+    "note": "Analyst role-review classification based on Atlanta's statement that the starting competition remains open. No newer official starter announcement found in this audit. ROLE_UNCERTAIN is not an official injury designation.",
+    "draftImpact": "Points withheld consistently for all unresolved candidates; a depth-chart order does not prove a starting job."
   }
 ]

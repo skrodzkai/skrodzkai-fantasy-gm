@@ -15,6 +15,7 @@ function compactInjury(injury) {
     freshestAt: injury.freshestAt ?? null, bodyParts: injury.bodyParts ?? [],
     reportedReturns: injury.reportedReturns ?? [],
     availabilityStatus: injury.availabilityStatus ?? "UNSPECIFIED",
+    roleUncertain: injury.roleUncertain === true,
     evidence: (injury.evidence ?? []).map(({sourceId, sourceKind, observedAt, publishedAt, narrativeOnly, draftImpact, fresh, status, bodyPart, practice, reportedReturn, note, sourceUrl}) =>
       ({sourceId, sourceKind, observedAt, publishedAt, narrativeOnly, draftImpact, fresh, status, bodyPart, practice, reportedReturn, note, sourceUrl})),
   };
@@ -197,7 +198,7 @@ export function extensionBoardFromV5(board) {
   }
   const injuryChecked = byeEligible.filter((player) => {
     const injury = sourceByYahooId.get(player.yahooId)?.injury;
-    return injury != null && Array.isArray(injury.evidence) && injury.evidence.some((entry) => entry?.fresh === true && !entry.narrativeOnly);
+    return injury != null && Array.isArray(injury.evidence) && injury.evidence.some((entry) => entry?.fresh === true && !entry.narrativeOnly && entry.sourceKind !== 'reported_news');
   });
   const injuryCheckedIds = new Set(injuryChecked.map((player) => player.yahooId));
   const injuryCoverage = {

@@ -64,6 +64,15 @@ test("TEST builder rejects REAL snapshots and rescores independent raw statistic
   assert.equal(fixture({ ...inputs, asOf:"2026-08-23T12:00:00Z" }).players[0].automaticEligible, false, "stale TEST data is not executable");
 });
 
+test('role holds withhold points for clear and questionable players; news does not set board expiry',()=>{
+  const news={playerId:'1',sourceId:'news',sourceKind:'reported_news',observedAt:'2026-08-22T10:00:00Z',sourceUrl:'https://example.com/report',note:'Practice context only.'};
+  assert(!fixture({externalInjuryReports:[news]}).sourceExpirations.some(s=>s.sourceId==='news'));
+  for(const status of [null,'Q']){
+    const board=fixture({externalInjuryReports:[{playerId:'1',sourceId:'team',sourceKind:'team_official',observedAt:'2026-08-22T10:00:00Z',status:'ROLE_UNCERTAIN'}],offenseSnapshot:{observedAt:'2026-08-22T10:00:00Z',players:[{yahooId:'1',name:'Quarterback',team:'BUF',position:'QB',games:15,yahooProjectedPoints:420,injuryStatus:status,bye:7}]}}),p=board.players[0];
+    assert.equal(p.consensusPoints,null);assert.equal(p.automaticEligible,false);assert.equal(p.manualEligible,false);assert.equal(p.validationStatus,'ROLE_UNCERTAIN');assert.equal(p.injury.conflict,status==='Q','actual Yahoo Q versus Sleeper Active disagreement is retained');
+  }
+});
+
 function fixture(overrides = {}) {
   return assembleV5Board({
     asOf: "2026-08-22T12:00:00Z",

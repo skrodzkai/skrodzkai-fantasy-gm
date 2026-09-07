@@ -182,7 +182,7 @@ test("fresh REVIEW specialists remain visible for manual selection while blocked
 
 test("eligible-player injury coverage uses the bye denominator and missing evidence fails closed", () => {
   const offense = Array.from({ length: 100 }, (_, index) => player("RB", index + 1));
-  offense[0].injury = {draftAction:'REVIEW',evidence:[{fresh:true,sourceKind:'reported_news',narrativeOnly:true}]};
+  offense[0].injury = {draftAction:'REVIEW',evidence:[{fresh:true,sourceKind:'reported_news'}]};
   const board = extensionBoardFromV5({
     generatedAt: "2026-08-27T00:00:00Z",
     projectionHorizon: "WEEKS_1_17",

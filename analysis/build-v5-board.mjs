@@ -412,11 +412,11 @@ export function assembleV5Board({
       splitDualRoleIdentities.has(identityKey(player.name, player.team)) ||
       (player.eligible.some((position) => ["QB", "RB", "WR", "TE"].includes(position)) &&
       player.eligible.some((position) => ["DL", "LB", "DB", "CB", "S", "D"].includes(position)));
-    const freshInjuryEvidence = injury.evidence.some((entry) => entry?.fresh === true && !entry.narrativeOnly);
-    const manualHealthEligible = injury.draftAction === "CLEAR" ||
-      (injury.draftAction === "REVIEW" && injury.conflict !== true && freshInjuryEvidence);
+    const freshInjuryEvidence = injury.evidence.some((entry) => entry?.fresh === true && !entry.narrativeOnly && entry.sourceKind !== 'reported_news');
+    const manualHealthEligible = !injury.roleUncertain && (injury.draftAction === "CLEAR" ||
+      (injury.draftAction === "REVIEW" && injury.conflict !== true && freshInjuryEvidence));
     const reviewedAvailabilityAssumption = injury.draftAction === "REVIEW" && manualHealthEligible ? 16 : null;
-    const injuryGames = expectedGamesFromInjury(injury) ?? reviewedAvailabilityAssumption;
+    const injuryGames = injury.roleUncertain ? null : expectedGamesFromInjury(injury) ?? reviewedAvailabilityAssumption;
     // Yahoo GP normalizes its source rate; it is not a researched absence count.
     // Only a fresh, same-team/position starter may replace that cap with the
     // healthy full-schedule assumption. Backups retain their role-limited basis.
@@ -465,6 +465,7 @@ export function assembleV5Board({
     const manualEligible = projectionUsable && manualHealthEligible;
     const validationStatus = dualRole
       ? "DUAL_ROLE_SCORING_UNVERIFIED"
+      : injury.roleUncertain ? "ROLE_UNCERTAIN"
       : injury.conflict ? "INJURY_CONFLICT"
       : injury.draftAction === "EXCLUDE" ? "INJURY_EXCLUDED"
       : projectedGamesReview ? "PROJECTED_GAMES_REVIEW"
@@ -563,7 +564,8 @@ export function assembleV5Board({
       ...projectionBoard.sourceReceipts.filter((source) => source.fresh || source.family === "yahoo")
         .map((source) => ({ sourceId:source.sourceId, observedAt:source.updatedAt, maxAgeHours:source.maxAgeHours })),
       ...(eligibilityObservedAt ? [{ sourceId:"yahoo-eligibility", observedAt:eligibilityObservedAt, maxAgeHours:6 }] : []),
-      ...[...new Map(injuryBoard.players.flatMap((player) => player.evidence.filter((entry) => entry.fresh)
+      // Narrative freshness controls its display at build time, not board execution.
+      ...[...new Map(injuryBoard.players.flatMap((player) => player.evidence.filter((entry) => entry.fresh && !entry.narrativeOnly)
         .map((entry) => [`${entry.sourceId}:${entry.observedAt}`, { sourceId:entry.sourceId, observedAt:entry.observedAt,
           maxAgeHours:injuryBoard.freshnessPolicyHours[entry.sourceKind] ?? injuryBoard.freshnessPolicyHours.default }]))).values()],
     ],
