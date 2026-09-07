@@ -51,34 +51,23 @@ export function healthMarker(p) {
   const status=p.injury?.status;
   return status&&!['ACTIVE','CLEAR','NO_YAHOO_MARKER'].includes(status)?status:p.injury?.draftAction!=='CLEAR'?'CHECK':'';
 }
-export function injuryNotes(p) {
-  const injury=p.injury;
-  if (!injury) return 'Injury details unavailable. Availability has not been confirmed.';
-  const evidence=injury.evidence??[];
-  const news=evidence.filter(e=>['reported_news','team_official','nfl_official'].includes(e.sourceKind) && e.fresh===true && e.note)
-    .sort((a,b)=>Date.parse(b.publishedAt??b.observedAt)-Date.parse(a.publishedAt??a.observedAt))[0];
-  const lines=[];
-  if(news){
-    lines.push(`Latest researched update · ${news.publishedAt??`publication date unavailable; checked ${news.observedAt}`}`,news.note);
-    if(news.reportedReturn)lines.push(`Reported timeline (not confirmed): ${news.reportedReturn}`);
-    if(news.draftImpact)lines.push(`Draft takeaway (analysis): ${news.draftImpact}`);
-  } else if(injury.draftAction!=='CLEAR') lines.push('No current researched update attached. The status flag alone does not establish severity or missed games.');
-  lines.push(`\nFeed status: ${injury.status??'UNKNOWN'}`);
-  const body=(injury.bodyParts??[]).filter(x=>!/^undisclosed$/i.test(x));
-  if(body.length)lines.push(`Feed-reported area: ${body.join(', ')}`);
-  lines.push(`Feed-reported return: ${(injury.reportedReturns??[]).join('; ')||'Not confirmed by these sources'}`);
-  if(Number.isFinite(p.expectedGamesThroughWeek17))lines.push(`Points use ${p.expectedGamesThroughWeek17} expected games through Week 17 (bye excluded).`);
-  lines.push(injury.roleUncertain
-    ? 'Starting role unresolved: points withheld until the role is established. This is not an injury diagnosis.'
-    : injury.availabilityStatus==='CONFLICT'
-    ? 'Availability sources conflict: points withheld pending reconciliation.'
-    : injury.availabilityStatus==='EXPLICIT'
-    ? 'Availability adjustment: explicit reported estimate or missed weeks is applied.'
-    : 'No researched injury-specific missed-game adjustment is applied. Source projections may already embed health or role assumptions; the news note does not change points.');
-  if(injury.draftAction!=='CLEAR')lines.push('Automatic selection remains blocked.');
-  for (const e of evidence) lines.push(`\n${e.sourceId??'Source'} · reported ${e.publishedAt??'date not supplied'} · checked ${e.observedAt??'Date unavailable'}${e.fresh===false?' · STALE':''}\n${[e.narrativeOnly?null:e.status,e.bodyPart,e.practice,e.reportedReturn,e.note].filter(Boolean).join(' · ')||'No narrative supplied.'}${e.sourceUrl?`\n${e.sourceUrl}`:''}`);
-  if (!(injury.evidence?.length)) lines.push(`Last checked: ${injury.freshestAt??'Unavailable'}; source narrative unavailable.`);
-  return lines.join('\n');
+export function injurySummary(p) {
+  const injury=p.injury??{},evidence=injury.evidence??[];
+  const current=evidence.filter(e=>e.fresh===true)
+    .sort((a,b)=>Date.parse(b.publishedAt??b.observedAt)-Date.parse(a.publishedAt??a.observedAt));
+  const news=current.find(e=>['reported_news','team_official','nfl_official'].includes(e.sourceKind)&&e.note);
+  const practice=current.find(e=>e.practice);
+  const body=[...new Set(current.map(e=>e.bodyPart).concat(injury.bodyParts??[]).filter(x=>x&&!/^undisclosed$/i.test(x)))];
+  const date=e=>e?.publishedAt??(e?.observedAt?`checked ${e.observedAt.slice(0,10)}`:'date unavailable');
+  let missed='Unknown',impact=news?.draftImpact??(injury.draftAction==='CLEAR'?'No injury restriction reported.':'Return and workload need confirmation.');
+  if(injury.availabilityStatus==='EXPLICIT'&&Number.isFinite(injury.expectedGamesThroughWeek17))missed=`${16-injury.expectedGamesThroughWeek17} expected through Week 17`;
+  else if(injury.availabilityStatus==='EXPLICIT'&&injury.unavailableWeeks?.length)missed=`Weeks ${injury.unavailableWeeks.join(', ')} unavailable`;
+  if(injury.roleUncertain)impact='Starting role unresolved; projected points withheld.';
+  else if(injury.availabilityStatus==='CONFLICT'){missed='Unknown — reports conflict';impact='Availability reports conflict; projected points withheld.';}
+  const links=[...new Set([news,...current].filter(Boolean).map(e=>e.sourceUrl).filter(url=>typeof url==='string'&&/^https?:\/\//i.test(url)))];
+  return {status:injury.status??'Unknown',body:body.join(', ')||'Not specified',practice:practice?`${practice.practice} · ${date(practice)}`:'Not reported',missed,
+    returnNote:news?.reportedReturn||(injury.reportedReturns??[]).join('; '),update:news?.note??null,reportDate:news?date(news):null,impact,links,
+    games:Number.isFinite(p.expectedGamesThroughWeek17)?p.expectedGamesThroughWeek17:null};
 }
 export function rankedPlayers(packet, {position='ALL', search='', sort='value', direction=null} = {}) {
   const query = search.trim().toLowerCase();
