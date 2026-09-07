@@ -52,6 +52,43 @@ test('observed DEF slug parses and resolves exactly; missing or duplicate names 
  assert.equal(SKRODZKaiPickLedger.resolveDefenses(structuredClone(parsed),[match]).picks[0].yahooId,'100034');
  for(const players of [[],[match,match]])assert.throws(()=>SKRODZKaiPickLedger.resolveDefenses(structuredClone(parsed),players),/Texans \(houston\)/);
 });
+
+test('DEF identity accepts only exact normalized nickname/city-prefix aliases and keeps canonical Yahoo IDs',()=>{
+ const resolve=(name,players)=>SKRODZKaiPickLedger.resolveDefenses({picks:[{yahooId:null,defense:'houston',name}]},players).picks[0].yahooId;
+ const row={position:'DEF',name:'Texans',yahooId:'100034'};
+ for(const name of ['TEXANS',' Texans ','Houston Texans','Houston—Texans'])assert.equal(resolve(name,[row]),'100034');
+ assert.equal(resolve('Texans',[{...row,name:'Houston Texans'}]),'100034');
+ for(const name of ['Texans II','Not Texans','Dallas Texans'])assert.throws(()=>resolve(name,[row]),/unresolved/);
+ for(const players of [[],[row,row],[{...row,yahooId:'DEF:houston'}],[{...row,position:'WR'}]])assert.throws(()=>resolve('Texans',players),/unresolved/);
+});
+
+test('off-turn counter uses captured header text, rejects ambiguity and does not confer turn ownership',()=>{
+ const readers=globalThis.SKRODZKaiYahooPageReaders;
+ const doc=body=>({title:'Live NFL Draft',body:{innerText:body},querySelectorAll:()=>[]});
+ for(const [body,round,pick]of [["Opponent's Pick • You're up in 2 Picks • Round 19, Pick 217",19,217],["Opponent's Pick • You're up in 1 Picks • Round 18, Pick 213",18,213],['YOUR TURN • ROUND 18, PICK 214',18,214]]) {
+   const d=doc(body);assert.deepEqual(readers.readCurrentPick(d),{round,pick});assert.equal(readers.readOwnedTurn(d),null);
+ }
+ for(const body of ['Round 1, Pick 0','Round 18, Pick 3','Round 20, Pick 229','Round 1, Pick 1\nRound 1, Pick 2','Round 1, Pick 1\nRound 1, Pick 1','No counter'])assert.equal(readers.readCurrentPick(doc(body)),null,body);
+ const chat='Chat says • Round 1, Pick 2',d=doc(`Round 1, Pick 1\n${chat}`);d.querySelectorAll=()=>[{innerText:chat}];
+ assert.equal(readers.readCurrentPick(d).pick,1);
+});
+
+test('room observer survives a competing tab lease and stops only after complete capture',async()=>{
+ let tick,cleared=0;const received=[],replies=[{ok:false,error:'other_observer_active'},{ok:true,status:'LIVE'},{ok:true,status:'COMPLETE'}];
+ const document={title:'Live NFL Draft',body:{innerText:"Opponent's Pick • You're up in 2 Picks • Round 1, Pick 4"},querySelectorAll:()=>[]};
+ const context=vm.createContext({document,location:{pathname:'/draftclient/f1/542830/3',origin:'https://football.fantasysports.yahoo.com'},URL,AbortSignal,
+   SKRODZKaiYahooMockBoard:{leagueId:'542830',players:[]},SKRODZKaiYahooPageReaders:globalThis.SKRODZKaiYahooPageReaders,
+   SKRODZKaiPickLedger:{readResults:()=>observation(3),resolveDefenses:x=>x},
+   DOMParser:class{parseFromString(){return{querySelector:()=>({textContent:'2026 draft order'})};}},
+   fetch:async()=>({ok:true,url:'https://football.fantasysports.yahoo.com/f1/542830/draftresults',text:async()=>''}),
+   setInterval:fn=>{tick=fn;return 1;},clearInterval:()=>{cleared++;},
+   chrome:{runtime:{sendMessage:async m=>{received.push(m);return replies.shift();}}}});
+ vm.runInContext(await readFile(new URL('../extension/draft-pick-observer.js',import.meta.url),'utf8'),context);
+ await new Promise(resolve=>setImmediate(resolve));assert.equal(cleared,0);assert.equal(received[0].observation.currentPick,4);
+ await tick();assert.equal(cleared,0);assert.equal(received.length,2);
+ await tick();assert.equal(cleared,1);assert.equal(received.length,3);
+ assert.ok(received.every(m=>m.type==='draft_ledger'));
+});
 test('background keeps leagues separate, prefers room observer, persists across restart, and never sends a Yahoo command',async()=>{
  const local={};let listener,now=10000;const opened=[];
  const storage={get:async key=>({[key]:local[key]}),set:async values=>Object.assign(local,values),setAccessLevel:async()=>{}};

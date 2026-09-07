@@ -19,11 +19,11 @@
       const selected=doc.querySelector('#yfa-draftresults-select option:checked')?.textContent??'';
       if(!/^2026 draft order$/.test(selected.trim()))throw Error('Results season not verified');
       const observation=api.resolveDefenses(api.readResults(doc,{leagueId}),board.players);
-      const turn=readers?.readOwnedTurn(document);
+      const turn=readers?.readCurrentPick(document);
       // Yahoo's captured banner reads ROUND 18, PICK 214: pick is already overall.
       observation.currentPick=turn?.pick??null;
       const receipt=await chrome.runtime.sendMessage({type:'draft_ledger',observation});
-      if(receipt?.status==='COMPLETE'||receipt?.error==='other_observer_active')clearInterval(timer);
+      if(receipt?.status==='COMPLETE')clearInterval(timer);
     }catch(error){await chrome.runtime.sendMessage({type:'draft_ledger_error',leagueId,reason:String(error.message)}).catch(()=>clearInterval(timer));}
     finally{busy=false;}
   }

@@ -139,6 +139,7 @@
     const roster = readers.parseRosterCount(body);
     const turnState = draftClient ? readers.readOwnedTurnState(documentRef) : null;
     const ownedTurn = turnState?.turn ?? null;
+    const currentTurn = draftClient ? readers.readCurrentPick(documentRef) : null;
     const autodraftState = draftClient ? readers.readAutodraftState(documentRef) : "UNKNOWN";
     const autodraft = autodraftState === "ACTIVE";
     let players = draftClient ? availablePlayers(documentRef, environment) : [];
@@ -158,6 +159,8 @@
     let advice = null;
     let adviceError = null;
     let observedPicks = [];
+    const unmodelledRosterIds = [];
+    let referenceTargets = [];
     let unmodelledVisibleRows = 0;
     if (draftClient && ready) {
       try {
@@ -172,7 +175,12 @@
         const board = engine.validateBoard(boardData.players);
         observedPicks = identity.yahooIds.map((id) => {
           const player = board.find((candidate) => candidate.yahooId === id);
-          if (!player) throw new Error(`real_roster_player_not_in_board:${id}`);
+          if (!player) {
+            unmodelledRosterIds.push(id);
+            // Display identity only. Never pass an unscored placeholder to the
+            // roster optimizer or guess its position, score, or eligibility.
+            return { yahooId:id, name:`Yahoo #${id} · unmodelled`, position:"UNKNOWN" };
+          }
           return player;
         });
         if (observedPicks.length === 19) throw new Error("draft_complete");
@@ -180,7 +188,11 @@
         if (ownedTurn && (ownedTurn.round !== round || ownedTurn.pick !== engine.overallPick(round, draftSlot, 12))) throw new Error("real_turn_roster_mismatch");
         if (new Set(players.map((p) => p.yahooId)).size !== players.length) throw new Error("real_visible_identity_ambiguous");
         for (const row of players) {
-          if (identity.yahooIds.includes(row.yahooId)) throw new Error("real_roster_available_overlap");
+          if (identity.yahooIds.includes(row.yahooId)) {
+            quarantinedPlayers.push({yahooId:row.yahooId, reason:"real_roster_available_overlap"});
+            players = players.filter((candidate) => candidate.yahooId !== row.yahooId);
+            continue;
+          }
           const player = board.find((candidate) => candidate.yahooId === row.yahooId);
           if (!player) { unmodelledVisibleRows += 1; continue; }
           // Yahoo IDs are canonical; draft rows abbreviate names and DEF rows
@@ -193,17 +205,28 @@
             continue;
           }
         }
-        advice = engine.buildDecisionLadder({ round, seat:draftSlot, picks:observedPicks, board, availablePlayers:players, config,
-          replacementBySlot:boardData.replacementBySlot, survivalCalibration:boardData.survivalCalibration, minimum:5 });
+        if (unmodelledRosterIds.length) {
+          const availableIds = new Set(players.map(player => player.yahooId));
+          referenceTargets = board.filter(player => availableIds.has(player.yahooId) && player.manualEligible !== false &&
+            Number.isFinite(player.vor) && Number.isFinite(player.projection))
+            .sort((a,b) => b.vor-a.vor || a.yahooId.localeCompare(b.yahooId)).slice(0,5);
+          adviceError = "real_roster_model_incomplete";
+        } else {
+          advice = engine.buildDecisionLadder({ round, seat:draftSlot, picks:observedPicks, board, availablePlayers:players, config,
+            replacementBySlot:boardData.replacementBySlot, survivalCalibration:boardData.survivalCalibration, minimum:5 });
+        }
       } catch (error) { adviceError = String(error?.message ?? error); }
     }
-    if (adviceError) warnings.unshift({ severity:adviceError === "draft_complete" ? "info" : "danger", text:`Advice withheld: ${adviceError}` });
+    if (adviceError) warnings.unshift({ severity:adviceError === "draft_complete" ? "info" : "danger", text:adviceError === "real_roster_model_incomplete"
+      ? `Roster-adjusted advice withheld: unmodelled Yahoo IDs ${unmodelledRosterIds.join(", ")}. Showing visible board value only.`
+      : `Advice withheld: ${adviceError}` });
     if (unmodelledVisibleRows) warnings.push({severity:"info",text:`${unmodelledVisibleRows} visible players lack a usable model and are not ranked.`});
     for (const player of quarantinedPlayers) warnings.push({severity:"danger",text:`Quarantined Yahoo ${player.yahooId}: ${player.reason}; excluded from availability and advice.`});
     warnings.push({ severity:"info", text:"VISIBLE-POOL advice only: hidden/unloaded players are not evaluated. Roster names are observed; Yahoo slot assignments are not inferred. Manager cards and committee reviews are offline." });
-    const recommendations = advice?.targets.map((player, index) => ({ ...player,
-      reason:"VISIBLE POOL · league-scored lineup value + next-turn alternatives",
-      edge:Number(advice.decision.positionLeaders[index]?.adjustedScore ?? 0).toFixed(1), confidence:"ADVISORY ONLY" })) ?? [];
+    const recommendations = (advice?.targets ?? referenceTargets).map((player, index) => ({ ...player,
+      reason:advice ? "VISIBLE POOL · league-scored lineup value + next-turn alternatives" : "BOARD VALUE ONLY · not roster-adjusted",
+      edge:advice ? Number(advice.decision.positionLeaders[index]?.adjustedScore ?? 0).toFixed(1) : Number(player.vor).toFixed(1),
+      confidence:advice ? "ADVISORY ONLY" : "ROSTER MODEL INCOMPLETE" }));
     return {
       version:VERSION,
       attestation:validRuntimeAttestation(attestation) ? { ...attestation } : null,
@@ -211,15 +234,15 @@
       kind:ready ? "neutral" : "bad",
       label:ready ? "REAL SHADOW · READ ONLY" : "REAL SHADOW LOCKED",
       detail:settingsPage ? (verified ? "Exact league settings verified. No Yahoo action is possible." : "Settings mismatch; inspect warnings.") : "Observation and local analysis only. Execution is hard-disabled.",
-      context:{ league:"2 minute Drillers", roomId:LEAGUE_ID, teamId:TEAM_ID, seat:draftSlot ?? "PENDING", round:advice ? observedPicks.length + 1 : ownedTurn?.round ?? null, pick:ownedTurn?.pick ?? null, clock:"30s", clockVerified:verified, armed:false, autodraft, autodraftState, kill:false, ownedTurn:Boolean(ownedTurn) },
+      context:{ league:"2 minute Drillers", roomId:LEAGUE_ID, teamId:TEAM_ID, seat:draftSlot ?? "PENDING", round:currentTurn?.round ?? null, pick:currentTurn?.pick ?? null, clock:"30s", clockVerified:verified, armed:false, autodraft, autodraftState, kill:false, ownedTurn:Boolean(ownedTurn) },
       roster:observedPicks.map((player) => ({ slot:"OBSERVED", player })), recommendations, board:[],
-      between:{ currentPick:ownedTurn?.pick ?? null, nextPick:advice?.decision.nextPick ?? null,
+      between:{ currentPick:currentTurn?.pick ?? null, nextPick:advice?.decision.nextPick ?? null,
         intervening:advice?.decision.interveningOpponentPicks ?? null, atRisk:[], managerNote:"Market timing and exact snake window; no live run-pressure, manager prediction or model committee." },
       warnings,
       events:[{ at:new Date(now).toISOString(), kind:"SHADOW", detail:`team ${TEAM_ID}; roster ${roster ? `${roster.filled}/${roster.total}` : "unreadable"}; available rows ${players.length}` }],
-      latestText:"No Yahoo action taken. Listed roster is observed membership, not verified Yahoo slot placement.", ladderState:advice ? "VISIBLE POOL · READ ONLY" : "ADVICE WITHHELD", pinned:false, pinText:"Overrides are disabled in REAL SHADOW.", pinLabel:"DISABLED",
+      latestText:"No Yahoo action taken. Listed roster is observed membership, not verified Yahoo slot placement.", ladderState:advice ? "VISIBLE POOL · READ ONLY" : referenceTargets.length ? "BOARD VALUE ONLY · ROSTER INCOMPLETE" : "ADVICE WITHHELD", pinned:false, pinText:"Overrides are disabled in REAL SHADOW.", pinLabel:"DISABLED",
       controls:{ arm:{ disabled:true, text:"ARM DISABLED" }, halt:{ disabled:true, text:"NO EXECUTION" }, export:{ disabled:true, text:"EXPORT DISABLED" } },
-      shadow:{ settingsVerified:verified, boardHealth:health, roster, availablePlayerCount:players.length, unmodelledVisibleRows, quarantinedPlayers, urlTeamId:draftClient ? room.seat : TEAM_ID, draftSlot, adviceError, decision:advice?.decision ?? null },
+      shadow:{ settingsVerified:verified, boardHealth:health, roster, availablePlayerCount:players.length, unmodelledVisibleRows, unmodelledRosterIds, quarantinedPlayers, urlTeamId:draftClient ? room.seat : TEAM_ID, draftSlot, adviceError, decision:advice?.decision ?? null },
     };
   }
 
