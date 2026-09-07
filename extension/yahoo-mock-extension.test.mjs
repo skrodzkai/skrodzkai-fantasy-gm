@@ -159,6 +159,18 @@ function memoryLocalStorage() {
   };
 }
 
+test("waiting room never advertises ready with an expired source", () => {
+  const now=Date.now(), board=healthyBoard(now), fixture=waitingFixture();
+  const rail={controls:{arm:{addEventListener(){}}},isLocked:()=>false,setMode(){},setContext(){},setWarnings(){},addEvent(){},render(kind,label,detail){this.label=label;this.detail=detail;}};
+  const environment={...fixture,sessionStorage:memoryLocalStorage(),SKRODZKaiYahooMockBoard:board};
+  helpers.bootWaitingRoom(environment,rail);
+  assert.equal(rail.label,"READY TO ARM");assert.equal(rail.controls.arm.disabled,false);
+  board.sourceExpirations[0].observedAt=new Date(now-7*3600_000).toISOString();
+  helpers.bootWaitingRoom(environment,rail);
+  assert.equal(rail.label,"BOARD REFRESH REQUIRED");assert.equal(rail.controls.arm.disabled,true);
+  assert.equal(rail.detail,"draft_board_required_source_expired_or_invalid");
+});
+
 test("required source clocks expire independently of fresh board and ADP generation", () => {
   const now=Date.parse("2026-09-05T18:00:00Z");
   const board=healthyBoard(now);
@@ -884,6 +896,14 @@ test("operator attestation is explicit none, explicit intervention, or missing",
   assert.equal(helpers.makeOperatorAttestation(null).status, "missing");
 });
 
+test('mock UI uses current header for display only and clears completed recommendations',()=>{
+ assert(source.includes('const turn = environment.SKRODZKaiYahooPageReaders?.readCurrentPick(environment.document)'));
+ assert(source.includes('ownedTurn: ownedTurnFromRunnerStatus(status)'));
+ assert(source.includes("status.state === 'completed' ? [] : buildUiRecommendations"));
+ assert(popupSource.includes('Draft complete'));assert(!popupSource.includes('`F${index}`'));
+ assert(source.includes('documentRef.body.prepend(host)'));assert(source.includes('height:48px'));
+ assert(!source.includes('top:72px'));
+});
 test("war-room recommendations show only the resolved live ladder with real metrics", () => {
   const board = [{ yahooId: "1", name: "One", position: "K", team: "BUF", confidence: "MULTI_SOURCE", draftSignals:{ specialist:{ kind:"K", teamOffenseRank:3, week1ImpliedPoints:27.5 } } }];
   assert.deepEqual([...helpers.buildUiRecommendations(board, null)], []);
@@ -897,9 +917,9 @@ test("war-room recommendations show only the resolved live ladder with real metr
       pAvailableNext: 0.2,
     }],
   });
-  assert.equal(recommendation.edge, "8.3");
+  assert.equal(recommendation.edge, "8.25");
   assert.equal(recommendation.confidence, "MULTI_SOURCE");
-  assert.match(recommendation.reason, /BPA 8\.3 · wait 2\.1 · Pnext 20%/);
+  assert.match(recommendation.reason, /Roster value 8\.25 · cost of waiting 2\.10/);
   assert.match(recommendation.reason, /K offense #3 · W1 implied 27\.5/);
   const [manual] = helpers.buildUiRecommendations(board, {
     targetYahooIds: ["1"],

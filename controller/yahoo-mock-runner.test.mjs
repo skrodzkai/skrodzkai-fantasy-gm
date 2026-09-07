@@ -706,11 +706,17 @@ function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE",
   const staleRows = board.slice(60, 80).map((entry) => ({ player:entry }));
   let rowReads = 0;
   let clockOffset = 0;
+  let currentPick = 1;
   class FixtureDate extends Date { static now() { return Date.now() + clockOffset; } }
   const select = { value:"all", options:[{ value:"all", textContent:"All Positions" }], dispatchEvent() {} };
+  const tabs = ['players','results','round'].map(id => ({
+    selected:id === 'players', disabled:false,
+    getAttribute(name) { return name === 'data-id' ? id : name === 'aria-selected' ? String(this.selected) : null; },
+    click() { if (id === 'round') this.selected = true; else tabs.filter(tab => tab.getAttribute('data-id') !== 'round').forEach(tab => { tab.selected = tab === this; }); },
+  }));
   const document = {
     body:{ innerText:"0 / 15" },
-    querySelectorAll(selector) { if (selector === "select") return [select]; if (selector === "tr") { rowReads += 1; return unstableRows && rowReads === 1 ? staleRows : rows; } return []; },
+    querySelectorAll(selector) { if (selector === 'button[role="tab"]') return tabs; if (selector === "select") return [select]; if (selector === "tr") { rowReads += 1; return unstableRows && rowReads === 1 ? staleRows : rows; } return []; },
   };
   let controllerTargets = null;
   let controllerOptions = null;
@@ -757,6 +763,7 @@ function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE",
     setInterval,
     setTimeout,
     SKRODZKaiYahooDraftController:controllerApi,
+    SKRODZKaiYahooPageReaders:{readCurrentPick:()=>({round:1,pick:currentPick})},
   };
   const runner = runnerApi.create({
     configName:"public_mock_15", executionMode:"MOCK", expectedRoomId:"99", expectedSeat:6, expectedUrlSeat:6,
@@ -765,10 +772,53 @@ function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE",
     assertRunnerLease:() => leaseState.current === true,
     runtimeAttestation:{ ok:true, version:"0.17.0", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
   }, environment);
-  return { runner, board, getControllerTargets:() => controllerTargets, getControllerOptions:() => controllerOptions, getClearedTimeouts:() => clearedTimeouts, getRowReads:() => rowReads,
-    setSignals(values) { ownedSignalState = values.owned ?? ownedSignalState; autodraftState = values.autodraft ?? autodraftState; queueState = values.queue ?? queueState; } };
+  return { runner, board, tabs, getControllerTargets:() => controllerTargets, getControllerOptions:() => controllerOptions, getClearedTimeouts:() => clearedTimeouts, getRowReads:() => rowReads,
+    setSignals(values) { currentPick = values.pick ?? currentPick; ownedSignalState = values.owned ?? ownedSignalState; autodraftState = values.autodraft ?? autodraftState; queueState = values.queue ?? queueState; draftClockSeconds = values.clock ?? draftClockSeconds; } };
 }
 
+test("public capture view yields to Players before constructing an owned-turn controller", async () => {
+  const fixture = integrationFixture({ownedSignalState:'OFF_TURN',selectionHoldMs:0});
+  fixture.runner.start();
+  try {
+    await waitFor(()=>fixture.tabs.find(t=>t.getAttribute('data-id')==='round').selected);
+    assert.equal(fixture.getControllerTargets(),null);
+    assert.equal(fixture.getRowReads(),0);
+    fixture.setSignals({owned:'OWNED'});
+    await waitFor(()=>fixture.getControllerTargets());
+    assert.equal(fixture.tabs.find(t=>t.getAttribute('data-id')==='players').selected,true);
+    assert.equal(fixture.tabs.find(t=>t.getAttribute('data-id')==='results').selected,false);
+  } finally {fixture.runner.halt('test_complete');}
+});
+
+test("public capture pauses an unavailable Results view without killing the runner or retrying clicks", async () => {
+  const fixture=integrationFixture({ownedSignalState:'OFF_TURN'});
+  fixture.tabs.find(t=>t.getAttribute('data-id')==='results').disabled=true;
+  fixture.runner.start();
+  await waitFor(()=>fixture.runner.exportReceipts().some(r=>r.kind==='public_capture_paused'));
+  assert.equal(fixture.getControllerTargets(),null);
+  assert.equal(fixture.runner.getStatus().state,'running');
+  fixture.tabs.find(t=>t.getAttribute('data-id')==='results').disabled=false;
+  await new Promise(resolve=>setTimeout(resolve,80));
+  assert.equal(fixture.runner.exportReceipts().filter(r=>r.kind==='public_capture_paused').length,1);
+  fixture.setSignals({pick:2});
+  await waitFor(()=>fixture.tabs.find(t=>t.getAttribute('data-id')==='round').selected);
+  fixture.setSignals({pick:5});
+  await waitFor(()=>fixture.tabs.find(t=>t.getAttribute('data-id')==='players').selected);
+  assert.equal(fixture.getControllerTargets(),null);
+  assert(fixture.runner.exportReceipts().filter(r=>r.kind==='public_view_requested').every(r=>r.currentPick===2||r.currentPick===5));
+  fixture.runner.halt('test_complete');
+});
+
+test('public views cannot oscillate even if round selection clears Results',async()=>{
+ const f=integrationFixture({ownedSignalState:'OFF_TURN'}),round=f.tabs.find(t=>t.getAttribute('data-id')==='round'),results=f.tabs.find(t=>t.getAttribute('data-id')==='results');
+ round.click=()=>{round.selected=true;results.selected=false;};
+ f.runner.start();try{await waitFor(()=>round.selected);await new Promise(r=>setTimeout(r,120));assert.equal(f.runner.exportReceipts().filter(r=>r.kind==='public_view_requested').length,2);assert.equal(f.runner.getStatus().state,'running');}finally{f.runner.halt();}
+});
+test('public Players remount starts one pick ahead, outside the owned-turn budget',async()=>{
+ const f=integrationFixture({ownedSignalState:'OFF_TURN',selectionHoldMs:0}),players=f.tabs.find(t=>t.getAttribute('data-id')==='players'),click=players.click.bind(players);
+ players.click=()=>setTimeout(click,300);
+ f.runner.start();try{await waitFor(()=>f.tabs.find(t=>t.getAttribute('data-id')==='round').selected);f.setSignals({pick:5});await waitFor(()=>players.selected);assert.equal(f.getControllerTargets(),null);f.setSignals({owned:'OWNED'});await waitFor(()=>f.getControllerTargets());assert(f.getControllerOptions().selectionDeadlineMs<=2000);}finally{f.runner.halt();}
+});
 test("between decisions a transient unreadable frame suspends actions without killing the run", async () => {
   for (const signals of [{owned:"INCONSISTENT"}, {autodraft:"UNKNOWN"}, {queue:"UNKNOWN"}]) {
     const fixture = integrationFixture({ownedSignalState:"OFF_TURN"});
@@ -865,6 +915,35 @@ test("runner requires an acknowledged live lease and a five-second owned-turn cl
   await waitFor(() => fixture.runner.getStatus().state === "failed");
   assert.match(fixture.runner.getStatus().failure.code, /draft_clock_margin_exhausted_at_detection/);
   assert.equal(fixture.getControllerTargets(), null);
+});
+
+test("public owned-turn clock settles without any player action or budget reset", async () => {
+  const fixture = integrationFixture({ draftClockSeconds:0, selectionHoldMs:0 });
+  fixture.runner.start();
+  try {
+    await waitFor(() => fixture.runner.exportReceipts().some(r => r.kind === 'owned_clock_observation_paused'));
+    assert.equal(fixture.getControllerTargets(), null);
+    assert.equal(fixture.getRowReads(), 0);
+    fixture.setSignals({clock:30});
+    await waitFor(() => fixture.getControllerTargets());
+    const resumed = fixture.runner.exportReceipts().find(r => r.kind === 'owned_clock_observation_resumed');
+    const resolved = fixture.runner.exportReceipts().find(r => r.kind === 'runner_turn_resolved');
+    assert.ok(resumed.elapsedMs > 0 && resumed.elapsedMs < 250);
+    assert.ok(resolved.panelReadyMs >= resumed.elapsedMs);
+    assert.equal(resolved.clockAtDecision.seconds, 30);
+    assert.ok(fixture.getControllerOptions().selectionDeadlineMs < 2000);
+  } finally { fixture.runner.halt(); }
+});
+
+test("public clock observation fails closed if the owned turn changes", async () => {
+  const fixture = integrationFixture({draftClockSeconds:0});
+  fixture.runner.start();
+  await waitFor(() => fixture.runner.exportReceipts().some(r => r.kind === 'owned_clock_observation_paused'));
+  fixture.setSignals({owned:'OFF_TURN',clock:30});
+  await waitFor(() => fixture.runner.getStatus().state === 'failed');
+  assert.equal(fixture.runner.getStatus().failure.code,'owned_turn_changed_during_clock_read');
+  assert.equal(fixture.getControllerTargets(),null);
+  assert.equal(fixture.getRowReads(),0);
 });
 
 test("runner lease loss before selection fails closed without constructing a controller", async () => {

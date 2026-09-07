@@ -68,8 +68,8 @@ test('shipped UI favorites, grey rows, hide, reload, tabs and order handlers wor
  ui.headers[1].onclick();assert.equal(ui.headers[1].attributes['aria-sort'],'ascending');
  const reload=boot();reload.elements.get('favoritesOnly').checked=true;reload.elements.get('favoritesOnly').oninput();assert.equal(reload.elements.get('players').children.length,1);assert.equal(reload.elements.get('roundNav').children.length,19);assert.equal(reload.elements.get('orderSetup').hidden,true);assert.equal(reload.elements.get('feedNote').hidden,true);
  reload.elements.get('players').children[0].children[1].children[0].onclick();assert.equal(reload.elements.get('details').open,true);assert.match(reload.elements.get('detailBody').textContent,/Games missedUnknown/);assert(!reload.elements.get('detailBody').textContent.includes('Validation:'));
- vm.runInContext("applyDraftLedger({leagueId:'420010',season:2026,status:'LIVE',checkedAt:Date.now(),lastConfirmed:1,picks:packet.players.filter(p=>p.position==='QB').slice(0,-1).map(p=>({yahooId:p.yahooId}))})",reload.context);
- const boxes=reload.elements.get('tierGrid').querySelectorAll('button'),scarce=boxes.filter(b=>b.className.includes('scarce'));assert(scarce.length>0);assert(scarce.every(b=>b.children[1].textContent==='1'));assert(boxes.every(b=>/^[1-5]$/.test(b.dataset.tier)));
+ vm.runInContext("applyDraftLedger({leagueId:'420010',season:2026,status:'LIVE',checkedAt:Date.now(),lastConfirmed:1,picks:packet.players.filter(p=>p.position==='QB').slice(1,-1).map(p=>({yahooId:p.yahooId}))})",reload.context);
+ const boxes=reload.elements.get('tierGrid').querySelectorAll('button'),scarce=boxes.filter(b=>b.className.includes('scarce'));assert(scarce.length>0);assert(scarce.every(b=>b.children[1].textContent==='1'&&b.dataset.tier!=='5'));assert(boxes.some(b=>b.dataset.tier==='5'&&b.children[1].textContent==='1'&&!b.className.includes('scarce')));assert(boxes.every(b=>/^[1-5]$/.test(b.dataset.tier)));
  assert(reload.elements.get('players').children.every(row=>/^[1-5]$/.test(row.dataset.tier)));
  let cleared=false,confirmed=false;
  reload.context.chrome={storage:{local:{get:async()=>({'skz.picks:420010:2026':{leagueId:'420010',season:2026,status:'COMPLETE',checkedAt:1,lastConfirmed:228,picks:[{yahooId:'1'}]}}),remove:async key=>{assert.equal(key,'skz.picks:420010:2026');cleared=true;}},onChanged:{addListener(){}}}};
@@ -77,6 +77,14 @@ test('shipped UI favorites, grey rows, hide, reload, tabs and order handlers wor
  vm.runInContext(await readFile(new URL('../extension/draft-desk-bridge.js',import.meta.url),'utf8'),reload.context);await new Promise(resolve=>setImmediate(resolve));
  assert.match(reload.elements.get('connection').textContent,/COMPLETE.*captured/);assert.equal(reload.elements.get('connection').className,'muted');
  await reload.elements.get('clearCapture').onclick();assert.equal(cleared,false);confirmed=true;await reload.elements.get('clearCapture').onclick();assert.equal(cleared,true);assert.equal(reload.elements.get('connection').textContent,'Offline reference');
+});
+test('Hunter role records retain IDs without a second unverified offensive ranking',()=>{
+ const base=packet.players[0],players=['99001','99002'].map(yahooId=>({...base,yahooId,name:'Travis Hunter',team:'JAX',position:'WR',eligible:['WR','CB']}));
+ const result=validatePacket({...packet,players}).players;
+ assert.equal(result.length,2);assert.equal(result[0].yahooId,'99001');assert.match(result[0].name,/offense/);
+ assert.equal(result[1].yahooId,'99002');assert.equal(result[1].position,'CB');assert.equal(result[1].projection,null);assert.equal(result[1].vor,null);assert.equal(result[1].manualEligible,false);
+ assert.equal(players[1].name,'Travis Hunter');
+ for(const change of [{name:'Travis Hunter Jr.'},{team:'BUF'}])assert.throws(()=>validatePacket({...packet,players:[{...players[1],...change}]}),/identity mismatch/);
 });
 test('compact visual contract: shared tier colors, centered scouting, controls adjacent to board',async()=>{
  const html=await renderDesk(packet),markup=html.split('</style>')[1].split('<script>')[0];
@@ -86,6 +94,28 @@ test('compact visual contract: shared tier colors, centered scouting, controls a
  for(const removed of ['class="receipt"','class="round-card"','<pre','Captured board — no live availability claim.','Five strongest values in a plausible','Data status check due. These are saved'])assert(!html.includes(removed),removed);
  assert(!html.includes('opponentCount'));assert(markup.indexOf('class="scout-layout"')<markup.indexOf('class="section-heading"'));
  assert(html.includes('.scout-detail{grid-column:2;grid-row:1 / span 2;'));assert(html.includes('.scout-table td{height:38px}'));assert(html.includes('.scout-detail{grid-column:1;grid-row:auto;'));
+});
+test('public mock desk binds its room, greys confirmed picks, updates tiers and rejects league feeds',async()=>{
+ const input={...packet,leagueId:'PUBLIC_MOCK',rounds:15,opponents:[]};
+ assert.throws(()=>validatePacket({...input,rounds:19}));
+ const html=await renderDesk(input),script=html.match(/<script>([\s\S]*?)<\/script>/)[1];
+ function boot(room){
+  const elements=new Map([...html.matchAll(/id="([^"]+)"/g)].map(m=>[m[1],new Element()]));elements.get('position').value='ALL';
+  const context=vm.createContext({URLSearchParams,location:{search:`?room=${room}`},document:{getElementById:id=>elements.get(id),createElement:tag=>new Element(tag),querySelectorAll:()=>[]},Option:function(label,value){const el=new Element('option');el.textContent=label;el.value=value;return el;},localStorage:{getItem:()=>null},setInterval(){}});
+  vm.runInContext(script,context);return {elements,context};
+ }
+ for(const room of ['','420010','542830','18599','../420010'])assert.throws(()=>boot(room),/mock room/);
+ const {elements,context}=boot('10974223');assert.match(elements.get('identity').textContent,/Mock 10974223.*reference rankings/);
+ vm.runInContext("applyDraftLedger({leagueId:'mock:10974223',season:2026,status:'LIVE',checkedAt:Date.now(),lastConfirmed:1,picks:[{yahooId:'1'}]})",context);
+ assert.equal(elements.get('players').children.filter(r=>r.className.includes('drafted')).length,1);
+ assert.equal(vm.runInContext('tierCounts(packet.players,tiers,drafted).reduce((n,c)=>n+c.remaining,0)',context),249);
+ vm.runInContext("applyDraftLedger({leagueId:'420010',season:2026,picks:[{yahooId:'2'}]})",context);
+ assert.equal(vm.runInContext("drafted.has('1')&&!drafted.has('2')",context),true);
+ elements.get('hideDrafted').checked=true;elements.get('hideDrafted').oninput();assert.equal(elements.get('players').children.length,249);
+ let changed;context.chrome={storage:{local:{get:async key=>{assert.equal(key,'skz.picks:mock:10974223:2026');return{};}},onChanged:{addListener:fn=>{changed=fn;}}}};
+ vm.runInContext(await readFile(new URL('../extension/draft-desk-bridge.js',import.meta.url),'utf8'),context);await new Promise(resolve=>setImmediate(resolve));
+ changed({'skz.picks:mock:10974223:2026':{newValue:{leagueId:'mock:10974223',season:2026,status:'LIVE',checkedAt:Date.now(),lastConfirmed:2,picks:[{yahooId:'1'},{yahooId:'2'}]}}},'local');
+ assert.equal(elements.get('players').children.length,248);
 });
 test('12 seats by 19 rounds produce five value-ordered alternatives without blocked or drafted players',()=>{
  for(let seat=1;seat<=12;seat++)for(let round=1;round<=19;round++){const targets=roundTargets(packet,seat,round);assert.equal(targets.length,5);assert(targets.every((p,i)=>i===0||targets[i-1].vor>=p.vor));}

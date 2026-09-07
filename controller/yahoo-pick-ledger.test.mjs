@@ -8,6 +8,20 @@ const {reconcile,status,readResults}=globalThis.SKRODZKaiPickLedger;
 const leagueId='542830',options={leagueId,now:1000},seat=n=>Math.ceil(n/12)%2?(n-1)%12+1:12-(n-1)%12;
 const rows=n=>Array.from({length:n},(_,i)=>({overall:i+1,yahooId:String(100+i),name:`Player ${i}`,teamName:`Team ${seat(i+1)}`}));
 const observation=(n,extra={})=>({leagueId,season:2026,picks:rows(n),currentPick:n+1,...extra});
+test('public mock observed newest-first rows use exact IDs and reject ambiguous identities',()=>{
+ const cell=(text,ids=[])=>({tagName:'TD',textContent:text,querySelectorAll:()=>ids.map(id=>({getAttribute:()=>id}))});
+ const row=(n,id,name)=>({children:[cell(String(n)),cell(name,[id,id]),cell(n===1?'Nolan':'Abner')]});
+ const captured=[{children:[{tagName:'TH',textContent:'Round 1'}]},row(2,'40055','B. Robinson'),row(1,'40059','J. Gibbs')];
+ const table={querySelectorAll:selector=>selector==='thead th'?['Pick','Player','Team'].map(textContent=>({textContent})):captured};
+ const doc={querySelectorAll:()=>[table]};
+ const parsed=SKRODZKaiPickLedger.readMockResults(doc,{leagueId:'mock:10976187'});
+ const ledger=reconcile(null,{...parsed,currentPick:3},{leagueId:'mock:10976187',rounds:15});
+ assert.equal(ledger.status,'LIVE');assert.deepEqual(ledger.picks.map(p=>p.yahooId),['40059','40055']);
+ captured[1].children[1]=cell('B. Robinson',['40055','40059']);
+ assert.throws(()=>SKRODZKaiPickLedger.readMockResults(doc,{leagueId:'mock:10976187'}),/Unrecognized/);
+ assert.throws(()=>SKRODZKaiPickLedger.readMockResults(doc,{leagueId:'420010'}),/mock identity/);
+ assert.throws(()=>SKRODZKaiPickLedger.readMockResults({querySelectorAll:()=>[]},{leagueId:'mock:10976187'}),/not present/);
+});
 test('all-team snake ledger captures every pick, including 228 selections',()=>{
  let ledger=null;for(let n=0;n<=228;n++){ledger=reconcile(ledger,observation(n),options);assert.equal(ledger.lastConfirmed,n);assert.equal(ledger.status,n===228?'COMPLETE':'LIVE');}
  assert.equal(new Set(ledger.picks.map(x=>x.teamName)).size,12);
@@ -89,6 +103,20 @@ test('room observer survives a competing tab lease and stops only after complete
  await tick();assert.equal(cleared,1);assert.equal(received.length,3);
  assert.ok(received.every(m=>m.type==='draft_ledger'));
 });
+
+test('public observer reads visible history without fetching and reports missing history as a gap',async()=>{
+ let tick,missing=false;const sent=[];
+ const context=vm.createContext({document:{},location:{pathname:'/draftclient/f1/10976187/3',origin:'https://football.fantasysports.yahoo.com'},
+  SKRODZKaiYahooPageReaders:{readCurrentPick:()=>({pick:3})},
+  SKRODZKaiPickLedger:{readMockResults:(_doc,{leagueId})=>{if(missing)throw Error('Mock round results not present');return{leagueId,season:2026,picks:rows(2)};}},
+  fetch:()=>{throw Error('Public observer must not fetch league endpoints');},
+  setInterval:fn=>{tick=fn;return 1;},clearInterval:()=>{},
+  chrome:{runtime:{sendMessage:async message=>{sent.push(message);return{status:'LIVE'};}}}});
+ vm.runInContext(await readFile(new URL('../extension/draft-pick-observer.js',import.meta.url),'utf8'),context);
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(sent[0].observation.leagueId,'mock:10976187');assert.equal(sent[0].observation.currentPick,3);
+ missing=true;await tick();assert.equal(sent[1].type,'draft_ledger_error');assert.equal(sent[1].leagueId,'mock:10976187');
+});
 test('background keeps leagues separate, prefers room observer, persists across restart, and never sends a Yahoo command',async()=>{
  const local={};let listener,now=10000;const opened=[];
  const storage={get:async key=>({[key]:local[key]}),set:async values=>Object.assign(local,values),setAccessLevel:async()=>{}};
@@ -111,4 +139,20 @@ test('background keeps leagues separate, prefers room observer, persists across 
  await send({type:'open_draft_desk',leagueId:'420010'},popup);await send({type:'open_draft_desk',leagueId:'542830'},popup);await send({type:'open_draft_desk',leagueId:'99'},popup);assert.equal(opened.length,2);assert(opened[0].url.includes('/420010/'));assert(opened[1].url.includes('/542830/'));
  assert.match((await send({type:'open_draft_desk',leagueId:''},popup)).error,/league page/);
  missingDesk=true;assert.equal((await send({type:'open_draft_desk',leagueId:'420010'},popup)).ok,false);assert.equal(opened.length,2);
+ missingDesk=false;
+ const mockId='10974223',mockKey=`skz.picks:mock:${mockId}:2026`,waiting={url:`https://football.fantasysports.yahoo.com/f1/mock_waiting?mlid=${mockId}`,tab:{id:3}},mockRoom={url:`https://football.fantasysports.yahoo.com/draftclient/f1/${mockId}/12`,tab:{id:3}};
+ const mockObservation={...observation(3),leagueId:`mock:${mockId}`};
+ assert.equal((await send({type:'draft_ledger',observation:mockObservation},mockRoom)).ok,false);
+ assert.equal((await send({type:'open_draft_desk',leagueId:mockId},popup)).ok,false);
+ await send({type:'state',role:'arm-owner',at:now,snapshot:{mode:'UNKNOWN',context:{roomId:mockId,seat:12}}},waiting);
+ assert.equal(local[`skz.mockFeed:${mockId}`],undefined);
+ await send({type:'state',role:'arm-owner',at:now,snapshot:{mode:'MOCK',context:{roomId:mockId,seat:12}}},waiting);
+ assert.equal(local[`skz.mockFeed:${mockId}`].rounds,15);
+ assert.equal((await send({type:'draft_ledger',observation:mockObservation},{...mockRoom,url:mockRoom.url.replace('/12','/11')})).ok,false);
+ assert.equal((await send({type:'draft_ledger',observation:mockObservation},mockRoom)).status,'LIVE');
+ assert.equal(local[mockKey].lastConfirmed,3);assert.equal(local[key].lastConfirmed,4);assert.equal(local['skz.picks:420010:2026'],undefined);
+ assert.equal((await send({type:'open_draft_desk',leagueId:mockId},popup)).ok,true);assert(opened.at(-1).url.endsWith(`/mock/index.html?room=${mockId}`));
+ assert.equal((await send({type:'draft_ledger',observation:{...observation(180),leagueId:`mock:${mockId}`}},mockRoom)).status,'COMPLETE');
+ const another={...mockRoom,url:mockRoom.url.replace(mockId,'10979999')};
+ assert.equal((await send({type:'draft_ledger',observation:mockObservation},another)).ok,false);assert.equal(local['skz.picks:mock:10979999:2026'],undefined);
 });
