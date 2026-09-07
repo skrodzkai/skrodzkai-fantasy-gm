@@ -52,11 +52,15 @@ function showDetails(p){
  $('detailName').textContent=p.name;const panel=$('detailBody'),injury=injurySummary(p);
  panel.replaceChildren(text('p',`${p.team} · ${p.eligible.join(' / ')} · ${injury.status}`,'detail-meta'));
  const stats=text('div','','detail-stats');for(const [label,value]of [['Value +/−',num(p.vor)],['Points · W1–17',num(p.projection)],['ADP',num(p.marketAdp)],['Projected games · W1–17',injury.games??'—']]){const item=text('div','');item.append(text('small',label),text('strong',value));stats.append(item);}panel.append(stats);
+ const comparison=text('table','','source-table'),head=text('thead',''),tr=text('tr','');for(const [label,tip]of [['Source','Only captured sources; derived position ranks use this board, not publisher rankings'],['Overall','SKRODZKai value rank or captured Yahoo published rank'],['Pos.','SKRODZKai value rank; external position ranks calculated from source projections within the captured board'],['Pts · W1–17','Source league-scored points per game × our projected games; not the publisher’s displayed season total']]){const th=text('th',label);th.title=tip;th.scope='col';tr.append(th);}head.append(tr);comparison.append(head);const body=text('tbody','');for(const entry of sourceComparison(packet,p)){const row=text('tr',''),label=text('td','');label.append(text('strong',entry.name),text('small',entry.basis));row.append(label,text('td',entry.overall??'—','num'),text('td',entry.position??'—','num'),text('td',num(entry.points),'num'));body.append(row);}comparison.append(body);panel.append(comparison);
+ if(injury.clear)panel.append(text('p','No reported injury restriction.','injury-update'));
+ else{
  if(injury.update){const update=text('p','','injury-update');update.append(text('small',`Latest report · ${injury.reportDate}`),text('span',injury.update));panel.append(update);}
  const facts=text('dl','','injury-facts');for(const [label,value]of [['Injury',injury.body],['Practice',injury.practice],['Games missed',injury.missed],...(injury.returnNote?[['Return',injury.returnNote]]:[])])facts.append(text('dt',label),text('dd',value));panel.append(facts,text('p',injury.impact,'injury-impact'));
+ }
  const split=playerWarnings(p).find(w=>w.label==='SPLIT');if(split)panel.append(text('p',split.detail.split(' Diagnostic')[0],'injury-update'));
  if(p.idpModelWarning)panel.append(text('p','IDP estimate uses the Yahoo-based model; tackle-first calibration is unavailable.','injury-update'));
- if(injury.links.length){const sources=text('div','','detail-sources');injury.links.forEach((url,i)=>{const a=text('a',`Link ${i+1}`);a.href=url;a.target='_blank';a.rel='noopener noreferrer';sources.append(a);});panel.append(sources);}
+ if(!injury.clear&&injury.links.length){const sources=text('div','','detail-sources');injury.links.forEach((url,i)=>{const a=text('a',`Link ${i+1}`);a.href=url;a.target='_blank';a.rel='noopener noreferrer';sources.append(a);});panel.append(sources);}
  $('details').showModal();
 }
 function orderContext(card,round){

@@ -5,10 +5,21 @@ import {execFileSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import vm from 'node:vm';
-import {historyWindows,timingWindow,playerTiers,tierCounts,playerWarnings,roundTargets,roundOpponents} from './manual-draft-model.mjs';
+import {historyWindows,timingWindow,playerTiers,tierCounts,playerWarnings,roundTargets,roundOpponents,sourceComparison,injurySummary} from './manual-draft-model.mjs';
 import {renderDesk,renderExtensionDesk,validatePacket} from './build-manual-draft-desk.mjs';
 const players=Array.from({length:250},(_,i)=>({yahooId:String(i+1),name:`Player ${i}`,position:['QB','RB','WR','TE','K','DEF','LB'][i%7],eligible:[['QB','RB','WR','TE','K','DEF','LB'][i%7]],projection:500-i,vor:250-i,marketAdp:i+1,manualEligible:true}));
 const packet={leagueId:'420010',scoringModel:'fixture',teams:12,rounds:19,health:'FAIL',observedAt:'2026-09-06T12:00Z',notice:'Synthetic QA',players};
+test('source comparison separates published ranks from derived projections without changing rankings',()=>{
+ const a={yahooId:'1',position:'RB',eligible:['RB'],manualEligible:true,vor:100,projection:200,expectedGamesThroughWeek17:16,yahooRank:7,sourceFamilyPerGamePoints:{yahoo:10,'espn-clay':12,cbs:11}},b={...a,yahooId:'2',vor:110,projection:210,sourceFamilyPerGamePoints:{yahoo:11,'espn-clay':10}},c={...a,yahooId:'3',manualEligible:false,vor:1000,sourceFamilyPerGamePoints:{yahoo:10}},p={players:[a,b,c]},before=JSON.stringify(p);
+ const rows=sourceComparison(p,a);assert.deepEqual(rows.map(x=>x.name),['SKRODZKai','Yahoo','ESPN / Mike Clay','CBS']);assert.equal(rows[0].overall,2);assert.equal(rows[0].position,2);assert.equal(rows[1].overall,7);assert.equal(rows[1].position,2);assert.equal(rows[1].points,160);assert.equal(rows[2].overall,null);assert.equal(rows[2].position,1);assert.equal(rows[2].points,192);assert.equal(JSON.stringify(p),before);
+ const absent=sourceComparison(p,{yahooId:'9',position:'RB',eligible:['RB'],vor:null,projection:null});assert.equal(absent.length,1);assert.equal(absent[0].overall,null);
+ assert.equal(sourceComparison({players:[a]},{...a,expectedGamesThroughWeek17:null})[1].points,null);assert.equal(sourceComparison({players:[a]},a).some(x=>x.name==='Rotoworld'),false);
+});
+test('only genuinely clear injury state gets a one-line popup',()=>{
+ const clear={status:'ACTIVE',draftAction:'CLEAR',availabilityStatus:'UNSPECIFIED'};assert.equal(injurySummary({injury:clear}).clear,true);
+ for(const change of [{status:'QUESTIONABLE'},{draftAction:'REVIEW'},{conflict:true},{roleUncertain:true},{availabilityStatus:'EXPLICIT'},{bodyParts:['Knee']}])assert.equal(injurySummary({injury:{...clear,...change}}).clear,false);
+ assert.equal(injurySummary({}).clear,false);
+});
 test('median sample windows use actual maximum, exclude nulls, and reveal absent history',()=>{
  const card={seasons:Array.from({length:15},(_,i)=>2011+i),specialty:{QB:{history:Array.from({length:15},(_,i)=>({season:2011+i,round:i<10?1:8})),recent:[]}}};
  assert.deepEqual(historyWindows(card),[5,10,15]);assert.equal(timingWindow(card,'QB',5).median,8);assert.equal(timingWindow(card,'QB',10).median,4.5);assert.equal(timingWindow(card,'QB',15).median,1);

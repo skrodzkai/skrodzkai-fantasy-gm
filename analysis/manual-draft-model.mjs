@@ -65,9 +65,26 @@ export function injurySummary(p) {
   if(injury.roleUncertain)impact='Starting role unresolved; projected points withheld.';
   else if(injury.availabilityStatus==='CONFLICT'){missed='Unknown — reports conflict';impact='Availability reports conflict; projected points withheld.';}
   const links=[...new Set([news,...current].filter(Boolean).map(e=>e.sourceUrl).filter(url=>typeof url==='string'&&/^https?:\/\//i.test(url)))];
-  return {status:injury.status??'Unknown',body:body.join(', ')||'Not specified',practice:practice?`${practice.practice} · ${date(practice)}`:'Not reported',missed,
+  const clear=injury.draftAction==='CLEAR'&&!healthMarker(p)&&!injury.roleUncertain&&!injury.conflict&&injury.availabilityStatus!=='EXPLICIT'&&body.length===0;
+  return {clear,status:injury.status??'Unknown',body:body.join(', ')||'Not specified',practice:practice?`${practice.practice} · ${date(practice)}`:'Not reported',missed,
     returnNote:news?.reportedReturn||(injury.reportedReturns??[]).join('; '),update:news?.note??null,reportDate:news?date(news):null,impact,links,
     games:Number.isFinite(p.expectedGamesThroughWeek17)?p.expectedGamesThroughWeek17:null};
+}
+// Presentation only: no source ranks are invented or written back into the board.
+export function sourceComparison(packet, player) {
+  const position=positionGroup(player),samePosition=p=>positionGroup(p)===position;
+  const eligible=packet.players.filter(p=>p.manualEligible!==false&&Number.isFinite(p.vor)&&Number.isFinite(p.projection));
+  const rank=(pool,p,score)=>Number.isFinite(score(p))?1+pool.filter(x=>Number.isFinite(score(x))&&score(x)>score(p)).length:null;
+  const ours=eligible.some(p=>p.yahooId===player.yahooId);
+  const rows=[{name:'SKRODZKai',basis:'Value',overall:ours?rank(eligible,player,p=>p.vor):null,position:ours?rank(eligible.filter(samePosition),player,p=>p.vor):null,points:player.projection??null}];
+  const sources=[['yahoo','Yahoo'],['espn-clay','ESPN / Mike Clay'],['cbs','CBS'],['razzball','Razzball']];
+  for(const [family,name]of sources){
+    const points=p=>{const rate=p.sourceFamilyPerGamePoints?.[family],games=p.expectedGamesThroughWeek17;return Number.isFinite(rate)&&Number.isFinite(games)&&games>0?rate*games:null;};
+    const published=family==='yahoo'&&Number.isInteger(player.yahooRank)&&player.yahooRank>0?player.yahooRank:null;
+    const total=points(player);if(total===null&&published===null)continue;
+    rows.push({name,basis:family==='yahoo'?'Yahoo rank · derived pos.':'Derived pos.',overall:published,position:total===null?null:rank(packet.players.filter(samePosition),player,points),points:total});
+  }
+  return rows;
 }
 export function rankedPlayers(packet, {position='ALL', search='', sort='value', direction=null} = {}) {
   const query = search.trim().toLowerCase();
