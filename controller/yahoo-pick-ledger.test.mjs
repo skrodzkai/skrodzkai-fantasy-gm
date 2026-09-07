@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
 import './yahoo-pick-ledger.js';
+import './yahoo-page-readers.js';
 const {reconcile,status,readResults}=globalThis.SKRODZKaiPickLedger;
 const leagueId='542830',options={leagueId,now:1000},seat=n=>Math.ceil(n/12)%2?(n-1)%12+1:12-(n-1)%12;
 const rows=n=>Array.from({length:n},(_,i)=>({overall:i+1,yahooId:String(100+i),name:`Player ${i}`,teamName:`Team ${seat(i+1)}`}));
@@ -37,12 +38,29 @@ test('observed Yahoo round table parser requires exact player IDs and offsets',(
  const parsed=readResults({querySelectorAll:()=>[table]},{leagueId});assert.deepEqual(parsed.picks.map(p=>p.overall),[13,14]);assert.deepEqual(parsed.picks.map(p=>p.yahooId),['101','102']);
  assert.throws(()=>readResults({querySelectorAll:()=>[]},{leagueId}));
 });
+test('captured ROUND 18, PICK 214 banner is already overall, not a within-round offset',()=>{
+ const turn=globalThis.SKRODZKaiYahooPageReaders.readOwnedTurn({title:'YOUR TURN',body:{innerText:'YOUR TURN • ROUND 18, PICK 214'},querySelectorAll:()=>[]});
+ assert.equal(turn.round,18);assert.equal(turn.pick,214);
+ assert.equal(reconcile(null,observation(213,{currentPick:turn.pick}),options).status,'LIVE');
+ assert.equal(reconcile(null,observation(213,{currentPick:(turn.round-1)*12+turn.pick}),options).status,'GAP');
+});
+test('observed DEF slug parses and resolves exactly; missing or duplicate names identify the failure',()=>{
+ const cells=[{textContent:'8.'},{textContent:'Texans (Hou - DEF)',querySelector:()=>({textContent:'Texans',getAttribute:()=> 'https://sports.yahoo.com/nfl/teams/houston/'})},{textContent:'Example team'}];
+ const doc={querySelectorAll:()=>[{querySelector:()=>({textContent:'Round 10'}),querySelectorAll:()=>[{querySelectorAll:()=>cells}]}]};
+ const parsed=readResults(doc,{leagueId});assert.equal(parsed.picks[0].defense,'houston');assert.equal(parsed.picks[0].overall,116);
+ const match={position:'DEF',name:'Texans',yahooId:'100034'};
+ assert.equal(SKRODZKaiPickLedger.resolveDefenses(structuredClone(parsed),[match]).picks[0].yahooId,'100034');
+ for(const players of [[],[match,match]])assert.throws(()=>SKRODZKaiPickLedger.resolveDefenses(structuredClone(parsed),players),/Texans \(houston\)/);
+});
 test('background keeps leagues separate, prefers room observer, persists across restart, and never sends a Yahoo command',async()=>{
  const local={};let listener,now=10000;const opened=[];
  const storage={get:async key=>({[key]:local[key]}),set:async values=>Object.assign(local,values),setAccessLevel:async()=>{}};
  const chrome={storage:{local:storage,session:storage},runtime:{getURL:path=>'chrome-extension://fixture/'+path,getManifest:()=>({version:'0.17.0'}),onMessage:{addListener:fn=>{listener=fn;}}},windows:{onRemoved:{addListener(){}}},tabs:{onRemoved:{addListener(){}},create:async options=>opened.push(options),sendMessage:()=>{throw Error('Unexpected Yahoo command');}}};
- const context=vm.createContext({URL,Date:class extends Date{static now(){return now;}},SKRODZKaiPickLedger});
+ const ledgerSource=await readFile(new URL('./yahoo-pick-ledger.js',import.meta.url),'utf8'),imports=[];
+ let missingDesk=false;
+ const context=vm.createContext({URL,Date:class extends Date{static now(){return now;}},fetch:async()=>({ok:!missingDesk,arrayBuffer:async()=>new ArrayBuffer(0)}),importScripts:path=>{imports.push(path);assert.equal(path,'../controller/yahoo-pick-ledger.js');vm.runInContext(ledgerSource,context);}});
  vm.runInContext(await readFile(new URL('../extension/command-center-background.js',import.meta.url),'utf8'),context);context.SKRODZKaiCommandCenterBackground.register(chrome);
+ assert.deepEqual(imports,['../controller/yahoo-pick-ledger.js']);
  const send=(message,sender)=>new Promise(resolve=>{if(listener(message,sender,resolve)===false)resolve({ok:false});});
  const results={url:'https://football.fantasysports.yahoo.com/f1/542830/draftresults',tab:{id:1}},room={url:'https://football.fantasysports.yahoo.com/draftclient/f1/542830/3',tab:{id:2}},key='skz.picks:542830:2026';
  assert.equal((await send({type:'draft_ledger',observation:observation(2,{currentPick:null})},results)).status,'SNAPSHOT');
@@ -54,4 +72,6 @@ test('background keeps leagues separate, prefers room observer, persists across 
  await send({type:'draft_ledger_error',reason:'Disconnected'},room);assert.equal(local[key].status,'GAP');assert.equal(local[key].lastConfirmed,4);
  const popup={url:chrome.runtime.getURL('extension/command-center.html')};
  await send({type:'open_draft_desk',leagueId:'420010'},popup);await send({type:'open_draft_desk',leagueId:'542830'},popup);await send({type:'open_draft_desk',leagueId:'99'},popup);assert.equal(opened.length,2);assert(opened[0].url.includes('/420010/'));assert(opened[1].url.includes('/542830/'));
+ assert.match((await send({type:'open_draft_desk',leagueId:''},popup)).error,/league page/);
+ missingDesk=true;assert.equal((await send({type:'open_draft_desk',leagueId:'420010'},popup)).ok,false);assert.equal(opened.length,2);
 });

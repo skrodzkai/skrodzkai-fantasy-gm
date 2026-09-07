@@ -47,5 +47,13 @@
     }
     return {leagueId,season,picks};
   }
-  root.SKRODZKaiPickLedger={reconcile,status,readResults};
+  function resolveDefenses(observation,players){
+    for(const pick of observation.picks)if(!pick.yahooId){
+      const matches=players.filter(p=>p.position==='DEF'&&p.name===pick.name);
+      if(matches.length!==1)throw Error(`Defense identity unresolved: ${pick.name} (${pick.defense})`);
+      pick.yahooId=matches[0].yahooId;
+    }
+    return observation;
+  }
+  root.SKRODZKaiPickLedger={reconcile,status,readResults,resolveDefenses};
 })(globalThis);

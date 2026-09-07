@@ -1,6 +1,6 @@
 const $=id=>document.getElementById(id),text=(tag,value,cls)=>{const el=document.createElement(tag);el.textContent=value;if(cls)el.className=cls;return el;},num=n=>Number.isFinite(n)?n.toFixed(1):'—';
 const opponents=packet.opponents??[],key=`skrodzkai-draft-order:${packet.leagueId}:${packet.scoringModel}`,favKey=`skrodzkai-favorites:${packet.leagueId}:2026`;
-let order={},selected=opponents[0]??null,sortKey='value',sortDirection='desc',favorites=new Set(),drafted=new Set(),ledger=null,historyLimit=5,tierFilter=null;
+let order=Object.create(null),selected=opponents[0]??null,sortKey='value',sortDirection='desc',favorites=new Set(),drafted=new Set(),ledger=null,historyLimit=5,tierFilter=null;
 const tiers=playerTiers(packet.players),prebuilt=new Map();
 for(let seat=1;seat<=packet.teams;seat++)prebuilt.set(seat,Array.from({length:packet.rounds},(_,i)=>roundTargets(packet,seat,i+1)));
 function message(value){$('message').textContent=value;}
@@ -11,8 +11,8 @@ function connectionStatus(){if(!ledger)return 'OFFLINE';if(ledger.status==='COMP
 function renderHealth(){
  const ready=boardReady(packet);$('health').textContent=ready?'Data review passed':packet.health==='PASS'?'Status check due':'Data review not passed';$('health').className=ready?'':'warn';$('health').title=packet.notice;
  const status=connectionStatus(),last=ledger?.lastConfirmed??0;
- $('connection').textContent=status==='OFFLINE'?'Offline reference':`${status} · last confirmed #${last}`;
- $('connection').className=['LIVE','COMPLETE'].includes(status)?'connected':'warn';
+ $('connection').textContent=status==='OFFLINE'?'Offline reference':`${status} · last confirmed #${last}${status==='COMPLETE'?` · captured ${new Date(ledger.checkedAt).toLocaleString()}`:''}`;
+ $('connection').className=status==='LIVE'?'connected':status==='COMPLETE'?'muted':'warn';
  $('connection').title=ledger?.reason??'This standalone file does not receive Yahoo picks. Open the live desk from the extension.';
  $('feedNote').textContent=status==='LIVE'?'Availability reconciled with Yahoo.':status==='COMPLETE'?'Complete draft results received.':ledger?'Showing confirmed picks only; later picks may be missing. Live availability is not verified.':'Captured board — no live availability claim.';
 }
@@ -86,9 +86,9 @@ function renderStrategy(){
    panel.append(card);
  }
 }
-$('saveOrder').onclick=()=>{try{const candidate={};for(const select of $('orderFields').querySelectorAll('select'))if(select.value)candidate[select.dataset.owner]=Number(select.value);order=validateOrder(candidate,packet);try{localStorage.setItem(key,JSON.stringify(order));$('orderStatus').textContent=Object.keys(order).length===packet.teams?'Complete order saved; plan updated':'Partial order saved; unassigned managers have no seat context';}catch{message('Order saved in this tab only.');}renderCards();renderStrategy();}catch(e){message(e.message);}};
+$('saveOrder').onclick=()=>{try{const candidate=Object.create(null);for(const select of $('orderFields').querySelectorAll('select'))if(select.value)candidate[select.dataset.owner]=Number(select.value);order=validateOrder(candidate,packet);try{localStorage.setItem(key,JSON.stringify(order));$('orderStatus').textContent=Object.keys(order).length===packet.teams?'Complete order saved; plan updated':'Partial order saved; unassigned managers have no seat context';}catch{message('Order saved in this tab only.');}renderCards();renderStrategy();}catch(e){message(e.message);}};
 for(const [value,label]of Object.entries({favorites:'Favorites first',tier:'Positional tier',name:'Player name',position:'Position',team:'NFL team',health:'Health status',adp:'Average draft position',bye:'Bye week'}))$('sort').append(new Option(label,value));
 for(const id of ['search','position','favoritesOnly','hideDrafted'])$(id).addEventListener('input',renderBoard);
 $('sort').onchange=()=>{sortKey=$('sort').value;sortDirection=['value','points','favorites'].includes(sortKey)?'desc':'asc';renderBoard();};
-for(const th of document.querySelectorAll('[data-sort]'))th.onclick=()=>{const next=th.dataset.sort;sortDirection=next===sortKey?(sortDirection==='asc'?'desc':'asc'):['value','points'].includes(next)?'desc':'asc';sortKey=next;$('sort').value=next;renderBoard();};
+for(const th of document.querySelectorAll('[data-sort]'))th.onclick=()=>{const next=th.dataset.sort;sortDirection=next===sortKey?(sortDirection==='asc'?'desc':'asc'):['value','points','favorites'].includes(next)?'desc':'asc';sortKey=next;$('sort').value=next;renderBoard();};
 renderHealth();renderBoard();renderTiers();renderCards();renderStrategy();setInterval(renderHealth,1000);

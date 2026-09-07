@@ -51,7 +51,7 @@ test('scouting uses team buttons and separate details, never the raw Markdown du
 test('snake endpoints, middle, and completion',()=>{assert.deepEqual([1,12,13,24,25,228].map(n=>seatAt(n)),[1,12,12,1,1,12]);assert.deepEqual(nextTurns(1,1).slice(0,3),[1,24,25]);assert.deepEqual(nextTurns(6,6).slice(0,3),[6,19,30]);assert.deepEqual(nextTurns(12,13).slice(0,3),[13,36,37]);assert.deepEqual(nextTurns(null,1),[]);assert.deepEqual(nextTurns(6,229),[]);});
 test('one-time owner-linked order rejects duplicates and unknown or invalid seats',()=>{
  const p={...packet,opponents:[opponent]};for(const value of [null,[],{ours:0},{ours:13},{ours:1,'Example Manager':1},{unknown:5},{ours:'1'}])assert.throws(()=>validateOrder(value,p));
- assert.deepEqual(validateOrder({},p),{});assert.deepEqual(validateOrder({ours:4,'Example Manager':12},p),{ours:4,'Example Manager':12});
+ assert.equal(Object.getPrototypeOf(validateOrder({},p)),null);assert.deepEqual({...validateOrder({},p)},{});assert.deepEqual({...validateOrder({ours:4,'Example Manager':12},p)},{ours:4,'Example Manager':12});
 });
 test('opponent pick windows honor snake reversal and consecutive endpoint turns',()=>{
  const p={...packet,opponents:[opponent]};assert.deepEqual(opponentBetween(opponent,{ours:1,'Example Manager':12},1,p),[12,13]);assert.deepEqual(opponentBetween(opponent,{ours:1,'Example Manager':12},2,p),[]);

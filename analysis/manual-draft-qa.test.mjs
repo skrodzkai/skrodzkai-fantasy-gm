@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFile,mkdtemp,rm} from 'node:fs/promises';
+import {readFile,writeFile,mkdtemp,rm} from 'node:fs/promises';
+import {execFileSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import vm from 'node:vm';
@@ -45,6 +46,7 @@ test('shipped UI favorites, grey rows, hide, reload, tabs and order handlers wor
  const ui=boot(),rows=ui.elements.get('players');assert.equal(rows.children.length,250);
  rows.children[1].children[0].children[0].onclick();ui.elements.get('favoritesOnly').checked=true;ui.elements.get('favoritesOnly').oninput();assert.equal(rows.children.length,1);
  ui.elements.get('favoritesOnly').checked=false;ui.elements.get('favoritesOnly').oninput();
+ ui.headers[0].onclick();assert.equal(rows.children[0].children[0].children[0].attributes['aria-pressed'],'true');
  vm.runInContext("applyDraftLedger({leagueId:'420010',season:2026,status:'SNAPSHOT',checkedAt:Date.now(),lastConfirmed:1,picks:[{yahooId:'1'}]})",ui.context);
  assert(rows.children.some(r=>r.className.includes('drafted')));const sameRow=rows.children[0];vm.runInContext("applyDraftLedger(ledger)",ui.context);assert.equal(rows.children[0],sameRow,'heartbeat must not rebuild interactive rows');
  ui.elements.get('hideDrafted').checked=true;ui.elements.get('hideDrafted').oninput();assert.equal(rows.children.length,249);
@@ -52,6 +54,12 @@ test('shipped UI favorites, grey rows, hide, reload, tabs and order handlers wor
  ui.views[1].onclick();assert.equal(ui.elements.get('scouting').hidden,false);assert.equal(ui.elements.get('board').hidden,true);
  ui.headers[1].onclick();assert.equal(ui.headers[1].attributes['aria-sort'],'ascending');
  const reload=boot();reload.elements.get('favoritesOnly').checked=true;reload.elements.get('favoritesOnly').oninput();assert.equal(reload.elements.get('players').children.length,1);assert.equal(reload.elements.get('strategy').children.filter(e=>e.tagName==='ARTICLE').length,19);
+ let cleared=false,confirmed=false;
+ reload.context.chrome={storage:{local:{get:async()=>({'skz.picks:420010:2026':{leagueId:'420010',season:2026,status:'COMPLETE',checkedAt:1,lastConfirmed:228,picks:[{yahooId:'1'}]}}),remove:async key=>{assert.equal(key,'skz.picks:420010:2026');cleared=true;}},onChanged:{addListener(){}}}};
+ reload.context.confirm=()=>confirmed;
+ vm.runInContext(await readFile(new URL('../extension/draft-desk-bridge.js',import.meta.url),'utf8'),reload.context);await new Promise(resolve=>setImmediate(resolve));
+ assert.match(reload.elements.get('connection').textContent,/COMPLETE.*captured/);assert.equal(reload.elements.get('connection').className,'muted');
+ await reload.elements.get('clearCapture').onclick();assert.equal(cleared,false);confirmed=true;await reload.elements.get('clearCapture').onclick();assert.equal(cleared,true);assert.equal(reload.elements.get('connection').textContent,'Offline reference');
 });
 test('12 seats by 19 rounds produce five value-ordered alternatives without blocked or drafted players',()=>{
  for(let seat=1;seat<=12;seat++)for(let round=1;round<=19;round++){const targets=roundTargets(packet,seat,round);assert.equal(targets.length,5);assert(targets.every((p,i)=>i===0||targets[i-1].vor>=p.vor));}
@@ -69,4 +77,11 @@ test('offline fonts are embedded; extension copy has external script and no unsa
  const html=await renderDesk(packet);assert(html.includes('data:font/ttf;base64,'));assert(html.includes("font-family:'JetBrains Mono'"));assert(!html.includes('<details'));
  const dir=await mkdtemp(join(tmpdir(),'draft-desk-qa-'));
  try{await renderExtensionDesk(packet,dir);const ext=await readFile(join(dir,'index.html'),'utf8'),script=await readFile(join(dir,'desk.js'),'utf8');assert(ext.includes("script-src 'self'"));assert(!ext.includes('<script>'));new vm.Script(script);assert(script.includes('chrome.storage.local.get'));assert(!script.includes("type:'command'"));}finally{await rm(dir,{recursive:true});}
+});
+test('extension CLI builds private assets and refuses implicit overwrite',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'draft-desk-cli-'));
+ try{const input=join(dir,'packet.json'),output=join(dir,'extension');await writeFile(input,JSON.stringify(packet));const cli=new URL('./build-manual-draft-desk.mjs',import.meta.url).pathname;
+ execFileSync(process.execPath,[cli,input,'--extension',output]);assert((await readFile(join(output,'index.html'),'utf8')).includes('src="desk.js"'));
+ assert.throws(()=>execFileSync(process.execPath,[cli,input,'--extension',output],{stdio:'pipe'}),/EEXIST/);
+ }finally{await rm(dir,{recursive:true});}
 });

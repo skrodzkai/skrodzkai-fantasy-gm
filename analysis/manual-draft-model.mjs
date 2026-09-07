@@ -20,7 +20,7 @@ export function nextTurns(seat, pick, teams = 12, rounds = 19) {
 }
 export function validateOrder(value, packet) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('Invalid draft order.');
-  const allowed = new Set(['ours', ...(packet.opponents||[]).map(c=>c.managerId)]), seen = new Set(), result = {};
+  const allowed = new Set(['ours', ...(packet.opponents||[]).map(c=>c.managerId)]), seen = new Set(), result = Object.create(null);
   for (const [owner,seat] of Object.entries(value)) {
     if (!allowed.has(owner) || !Number.isInteger(seat) || seat < 1 || seat > packet.teams || seen.has(seat)) throw Error('Each assigned owner needs a unique snake seat, 1–12.');
     result[owner]=seat; seen.add(seat);
@@ -28,7 +28,7 @@ export function validateOrder(value, packet) {
   return result;
 }
 export function opponentBetween(card, order, round, packet) {
-  const ours=order.ours, theirs=order[card.managerId];
+  const ours=order.ours, theirs=Object.hasOwn(order,card.managerId)?order[card.managerId]:null;
   if (!ours || !theirs || round < 1 || round >= packet.rounds) return [];
   const turns=nextTurns(ours,1,packet.teams,packet.rounds);
   return nextTurns(theirs,turns[round-1]+1,packet.teams,packet.rounds).filter(pick=>pick<turns[round]);

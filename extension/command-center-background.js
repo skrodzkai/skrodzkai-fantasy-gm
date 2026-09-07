@@ -205,8 +205,10 @@
     chromeApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message?.type === 'open_draft_desk') {
         if (sender.url !== chromeApi.runtime.getURL('extension/command-center.html')) return false;
-        if(!['420010','542830'].includes(message.leagueId)){sendResponse({ok:false,error:'No matching league desk; public mock feed is not supported yet.'});return false;}
-        void chromeApi.tabs.create({url:chromeApi.runtime.getURL(`extension/private-draft-desk/${message.leagueId}/index.html`)}).then(()=>sendResponse({ok:true})).catch(error=>sendResponse({ok:false,error:String(error.message)}));
+        if(!message.leagueId){sendResponse({ok:false,error:'Open a supported league page first.'});return false;}
+        if(!['420010','542830'].includes(message.leagueId)){sendResponse({ok:false,error:'Public mock pick feed is not supported yet.'});return false;}
+        const path=`extension/private-draft-desk/${message.leagueId}/index.html`;
+        void fetchRuntimeBytes(chromeApi,path).then(()=>chromeApi.tabs.create({url:chromeApi.runtime.getURL(path)})).then(()=>sendResponse({ok:true})).catch(()=>sendResponse({ok:false,error:'Private league desk is not installed or could not be opened.'}));
         return true;
       }
       if (message?.type === 'draft_ledger' || message?.type === 'draft_ledger_error') {
@@ -218,7 +220,7 @@
           const room=String(sender.url).includes('/draftclient/');
           if(previous?.tabId!==sender.tab.id&&Date.now()-previous?.checkedAt<6000&&(!room||previous?.room)){sendResponse({ok:false,error:'other_observer_active'});return;}
           const ledger=message.type==='draft_ledger'
-            ? root.SKRODZKaiPickLedger.reconcile(previous,message.observation,{leagueId})
+            ? root.SKRODZKaiPickLedger.reconcile(previous,message.observation,{leagueId,teams:12,rounds:19})
             : {...previous,leagueId,season:2026,status:'GAP',reason:String(message.reason??'Read failed').slice(0,200),checkedAt:Date.now()};
           ledger.tabId=sender.tab.id;
           ledger.room=room;

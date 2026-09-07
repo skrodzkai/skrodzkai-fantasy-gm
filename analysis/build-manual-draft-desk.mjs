@@ -58,18 +58,25 @@ export async function renderDesk(input) {
     .replace('/*PACKET*/', () => JSON.stringify(packet).replaceAll('<','\\u003c'));
 }
 // Same UI, packaged behind extension CSP. Generated private data never enters Git.
-export async function renderExtensionDesk(input,outputDirectory){
+export async function renderExtensionDesk(input,outputDirectory,{replace=false}={}){
   const offline=await renderDesk(input);
   const script=offline.match(/<script>([\s\S]*?)<\/script>/)[1];
   const bridge=await readFile(new URL('../extension/draft-desk-bridge.js',import.meta.url),'utf8');
   const html=offline.replace("script-src 'unsafe-inline'","script-src 'self'").replace(/<script>[\s\S]*?<\/script>/,'<script src="desk.js"></script>');
   await mkdir(outputDirectory,{recursive:true});
-  await writeFile(new URL('desk.js',pathToFileURL(outputDirectory+'/')),script+'\n'+bridge,{mode:0o600});
-  await writeFile(new URL('index.html',pathToFileURL(outputDirectory+'/')),html,{mode:0o600});
+  await writeFile(new URL('desk.js',pathToFileURL(outputDirectory+'/')),script+'\n'+bridge,{mode:0o600,flag:replace?'w':'wx'});
+  await writeFile(new URL('index.html',pathToFileURL(outputDirectory+'/')),html,{mode:0o600,flag:replace?'w':'wx'});
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const [input, output] = process.argv.slice(2);
-  if (!input || !output) throw Error('Usage: node analysis/build-manual-draft-desk.mjs packet.json output.html');
+  const [input, output, extensionDirectory] = process.argv.slice(2);
+  if (!input || !output) throw Error('Usage: node analysis/build-manual-draft-desk.mjs packet.json output.html | packet.json --extension output-directory');
+  if(output==='--extension'){
+    if(!extensionDirectory)throw Error('Extension output directory required.');
+    await renderExtensionDesk(JSON.parse(await readFile(input,'utf8')),extensionDirectory);
+    console.log(`Created private extension desk: ${extensionDirectory}`);
+  }else{
+  if(extensionDirectory)throw Error('Unexpected output argument.');
   await writeFile(output, await renderDesk(JSON.parse(await readFile(input,'utf8'))), {flag:'wx', mode:0o600});
   console.log(`Created offline desk: ${output}`);
+  }
 }
