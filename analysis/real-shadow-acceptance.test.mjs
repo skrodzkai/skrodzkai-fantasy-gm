@@ -26,12 +26,12 @@ function boardData() {
   return { ...config.expectedScoring,replacementRoster:{teamCount:12,rosterSlots:config.rosterSlots.filter(s=>s!=="BN")},players, replacementBySlot:{ QB:100, RB:80, WR:80, TE:70, "W/R/T":80, K:30, DEF:30, D:25, DB:25, LB:25 } };
 }
 
-test("passes isolated 19-round real-roster decision stress at snake seats 1, 6, and 12", () => {
+test("enabled release completes isolated decision stress but cannot claim disabled-shadow acceptance", () => {
   assert.deepEqual([...engine.runner.decision.IDP_POSITIONS], ["D", "LB", "CB", "S"]);
   const result = runRealShadowAcceptance({ engine, boardSource:renderExtensionBoard(boardData(),{mode:"REAL"}), settingsSnapshot:{ ready:true }, decisionBudgetMs:2_000 });
-  assert.equal(result.status, "PASS");
+  assert.equal(result.status, "FAIL");
   assert.equal(result.execution, false);
-  assert.equal(result.realExecutionEnabled,false);
+  assert.equal(result.realExecutionEnabled,true);
   assert.equal(result.runnerSourceSha256,engine.runnerSourceSha256);
   assert.match(result.boardSourceSha256,/^[a-f0-9]{64}$/);
   assert.equal(result.clockSeconds, 30);
