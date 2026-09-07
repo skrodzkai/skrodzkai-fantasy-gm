@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SKRODZKai Yahoo Mock Draft Control",
-  "version": "0.16.4",
+  "version": "0.17.0",
   "description": "SKRODZKai command center for MOCK/TEST execution and isolated read-only REAL SHADOW observation.",
   "background": {
     "service_worker": "extension/command-center-background.js"
@@ -49,6 +49,26 @@
         "controller/yahoo-mock-runner.js",
         "extension/yahoo-real-board.js",
         "extension/yahoo-real-shadow.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://football.fantasysports.yahoo.com/draftclient/f1/420010/7",
+        "https://football.fantasysports.yahoo.com/draftclient/f1/420010/7?*",
+        "https://football.fantasysports.yahoo.com/draftclient/f1/420010/7/*",
+        "https://football.fantasysports.yahoo.com/draftclient/f1/542830/3",
+        "https://football.fantasysports.yahoo.com/draftclient/f1/542830/3?*",
+        "https://football.fantasysports.yahoo.com/draftclient/f1/542830/3/*",
+        "https://football.fantasysports.yahoo.com/f1/420010/draftresults*",
+        "https://football.fantasysports.yahoo.com/f1/542830/draftresults*"
+      ],
+      "js": [
+        "controller/yahoo-page-readers.js",
+        "controller/yahoo-pick-ledger.js",
+        "extension/yahoo-real-board.js",
+        "extension/yahoo-mock-board.js",
+        "extension/draft-pick-observer.js"
       ],
       "run_at": "document_idle"
     }

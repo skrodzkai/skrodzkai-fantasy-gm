@@ -235,7 +235,7 @@ for (const { seat, real = false, disabled = false, missingFilter = false, onCloc
   const storage = storageFixture();
   const sessionStorage = storageFixture();
   const activeTimers = new Set();
-  const runtimeAttestation = { ok:true, version:"0.16.4", digest:"a".repeat(64), bootId:"synthetic-boot-1234", bootedAt:1 };
+  const runtimeAttestation = { ok:true, version:"0.17.0", digest:"a".repeat(64), bootId:"synthetic-boot-1234", bootedAt:1 };
   const now = new Date().toISOString();
   const boardData = { ...config.expectedScoring, generatedAt:now, players:board,
     marketAdpReceipt:{ observedAt:now, rows:218 },
@@ -400,10 +400,10 @@ for (const { seat, real = false, disabled = false, missingFilter = false, onCloc
       slot:entry.slot, yahooId:entry.player?.yahooId ?? null, name:entry.player?.name ?? null, empty:!entry.player,
     }));
     const payload = {
-      extensionVersion:"0.16.4", runtimeAttestation, roomId:status.roomId, seat:status.seat, urlSeat:status.urlSeat, status,
+      extensionVersion:"0.17.0", runtimeAttestation, roomId:status.roomId, seat:status.seat, urlSeat:status.urlSeat, status,
       operatorAttestation:{ status:"none", source:"operator_attested", attestedAt:new Date().toISOString(), interventions:[] },
       runnerReceipts:runner.exportReceipts(), controllerReceipts:controllers,
-      extensionReceipts:[...JSON.parse(storage.getItem("skrodzkai-yahoo-mock-extension-receipts-v1")), { at:new Date().toISOString(), version:"0.16.4", roomId:status.roomId, seat:status.seat,
+      extensionReceipts:[...JSON.parse(storage.getItem("skrodzkai-yahoo-mock-extension-receipts-v1")), { at:new Date().toISOString(), version:"0.17.0", roomId:status.roomId, seat:status.seat,
         urlSeat:status.urlSeat, runId:status.runId, kind:"final_roster_readback", valid:true, finalRosterSlots }],
     };
     const result = evaluateTestDraftExport(payload, { requireManualOverride:!onClock, requireRejectedOverride:!onClock });

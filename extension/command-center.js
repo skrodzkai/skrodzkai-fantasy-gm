@@ -1,5 +1,6 @@
 /* global chrome */
 "use strict";
+document.querySelector('[data-open-desk]')?.addEventListener('click',async()=>{const reply=await chrome.runtime.sendMessage({type:'open_draft_desk',leagueId:String(state?.context?.roomId??'')});if(!reply?.ok)document.querySelector('[data-open-desk]').textContent=reply?.error??'Desk unavailable';});
 
 let state = null;
 let board = [];

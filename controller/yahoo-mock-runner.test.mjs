@@ -509,7 +509,7 @@ function discoveryFixture({ owned = false, missingFilter = false, allUnavailable
   const runner = api.create({ configName:"test_league_19_idp", executionMode:"TEST", expectedRoomId:"542830", expectedSeat:6, expectedUrlSeat:3,
     observedTeamCount:12, observedRosterSlots:testConfig.rosterSlots, board, replacementBySlot, scoringIdentity:api.configs.test_league_19_idp.expectedScoring,
     replacementRoster:{teamCount:12,rosterSlots:testConfig.rosterSlots.filter(s=>s!=="BN")},
-    assertRunnerLease:() => true, runtimeAttestation:{ ok:true, version:"0.16.4", digest:"a".repeat(64), bootId:"synthetic-12345678", bootedAt:1 },
+    assertRunnerLease:() => true, runtimeAttestation:{ ok:true, version:"0.17.0", digest:"a".repeat(64), bootId:"synthetic-12345678", bootedAt:1 },
     selectionHoldMs:0, filterDeadlineMs:500,
   }, environment);
   return { runner, calls, select, enterTurn:() => { ownedTurn = true; }, changeQueue:() => { queue = "NONEMPTY_OR_UNKNOWN"; },
@@ -763,7 +763,7 @@ function integrationFixture({ selectionHoldMs = 80, autodraftState = "INACTIVE",
     observedTeamCount:12, observedRosterSlots:mockConfig.rosterSlots, minimumFallbacks:5, pollMs:25,
     filterDeadlineMs:500, selectionHoldMs, replacementBySlot, board,
     assertRunnerLease:() => leaseState.current === true,
-    runtimeAttestation:{ ok:true, version:"0.16.4", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
+    runtimeAttestation:{ ok:true, version:"0.17.0", digest:"a".repeat(64), bootId:"boot-12345678", bootedAt:1 },
   }, environment);
   return { runner, board, getControllerTargets:() => controllerTargets, getControllerOptions:() => controllerOptions, getClearedTimeouts:() => clearedTimeouts, getRowReads:() => rowReads,
     setSignals(values) { ownedSignalState = values.owned ?? ownedSignalState; autodraftState = values.autodraft ?? autodraftState; queueState = values.queue ?? queueState; } };

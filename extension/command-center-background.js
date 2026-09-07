@@ -1,5 +1,6 @@
 (function commandCenterBackground(root) {
   "use strict";
+  if (typeof importScripts === 'function') importScripts('../controller/yahoo-pick-ledger.js');
 
   const HEARTBEAT_TTL_MS = 3000;
   const RELOAD_COOLDOWN_MS = 10000;
@@ -10,6 +11,8 @@
     "controller/yahoo-draft-controller.js",
     "controller/yahoo-mock-runner.js",
     "controller/yahoo-page-readers.js",
+    "controller/yahoo-pick-ledger.js",
+    "extension/draft-pick-observer.js",
     "extension/command-center-background.js",
     "extension/command-center.css",
     "extension/command-center.html",
@@ -200,6 +203,29 @@
     });
     chromeApi.tabs.onRemoved.addListener((tabId) => { void enqueue(() => router.removeTab(tabId)); });
     chromeApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (message?.type === 'open_draft_desk') {
+        if (sender.url !== chromeApi.runtime.getURL('extension/command-center.html')) return false;
+        if(!['420010','542830'].includes(message.leagueId)){sendResponse({ok:false,error:'No matching league desk; public mock feed is not supported yet.'});return false;}
+        void chromeApi.tabs.create({url:chromeApi.runtime.getURL(`extension/private-draft-desk/${message.leagueId}/index.html`)}).then(()=>sendResponse({ok:true})).catch(error=>sendResponse({ok:false,error:String(error.message)}));
+        return true;
+      }
+      if (message?.type === 'draft_ledger' || message?.type === 'draft_ledger_error') {
+        const match=String(sender.url??'').match(/^https:\/\/football\.fantasysports\.yahoo\.com\/(?:draftclient\/f1|f1)\/(420010|542830)(?:\/|$)/);
+        if(!match||!Number.isInteger(sender.tab?.id))return false;
+        const leagueId=match[1],key=`skz.picks:${leagueId}:2026`;
+        void enqueue(async()=>{
+          const previous=(await chromeApi.storage.local.get(key))[key];
+          const room=String(sender.url).includes('/draftclient/');
+          if(previous?.tabId!==sender.tab.id&&Date.now()-previous?.checkedAt<6000&&(!room||previous?.room)){sendResponse({ok:false,error:'other_observer_active'});return;}
+          const ledger=message.type==='draft_ledger'
+            ? root.SKRODZKaiPickLedger.reconcile(previous,message.observation,{leagueId})
+            : {...previous,leagueId,season:2026,status:'GAP',reason:String(message.reason??'Read failed').slice(0,200),checkedAt:Date.now()};
+          ledger.tabId=sender.tab.id;
+          ledger.room=room;
+          await chromeApi.storage.local.set({[key]:ledger});sendResponse({ok:true,status:ledger.status});
+        }).catch(error=>sendResponse({ok:false,error:String(error.message)}));
+        return true;
+      }
       if (message?.type === "version_handshake") {
         void attestor.current().then(sendResponse).catch((error) => sendResponse({ ok:false, error:String(error?.message ?? error) }));
         return true;

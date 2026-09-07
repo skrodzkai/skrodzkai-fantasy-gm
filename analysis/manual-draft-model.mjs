@@ -42,7 +42,7 @@ export function firstPickTiming(rows, managerId, seasons, position) {
     return {season,round:picks.length?Math.min(...picks):null};
   });
   const values=first.map(x=>x.round).filter(n=>n!==null).sort((a,b)=>a-b), mid=Math.floor(values.length/2);
-  return {medianRound:values.length?(values.length%2?values[mid]:(values[mid-1]+values[mid])/2):null,draftedSeasons:values.length,totalSeasons:sample.length,recent:first.filter(x=>x.season>=2021)};
+  return {medianRound:values.length?(values.length%2?values[mid]:(values[mid-1]+values[mid])/2):null,draftedSeasons:values.length,totalSeasons:sample.length,history:first,recent:first.filter(x=>x.season>=2021)};
 }
 export function boardReady(packet, now = Date.now()) {
   return packet.health === 'PASS' && Number.isFinite(Date.parse(packet.expiresAt)) && now < Date.parse(packet.expiresAt);
@@ -90,4 +90,60 @@ export function rankedPlayers(packet, {position='ALL', search='', sort='value', 
     (position === 'ALL' || p.eligible.includes(position) || p.position === position || (position === 'FLEX' && [...p.eligible,p.position].some(x=>['WR','RB','TE'].includes(x))) || (position === 'DL' && p.eligible.some(x => ['DE','DT'].includes(x))) || (position === 'IDP' && p.eligible.some(x => ['D','DL','DE','DT','LB','DB','CB','S'].includes(x)))) &&
     `${p.name} ${p.team??''}`.toLowerCase().includes(query))
     .sort((a,b) => {const x=value(a),y=value(b),mx=missing(x),my=missing(y);if(mx!==my)return mx?1:-1;const order=mx?0:numeric?x-y:String(x).localeCompare(String(y));return (descending?-order:order)||a.yahooId.localeCompare(b.yahooId);});
+}
+
+export function timingWindow(card, position, limit=5) {
+  const history=card.specialty[position].history??card.specialty[position].recent;
+  const seasons=[...card.seasons].sort((a,b)=>b-a).slice(0,limit);
+  const rows=seasons.map(season=>history.find(x=>x.season===season));
+  if(rows.some(x=>!x))return {median:null,sample:0,missing:true};
+  const values=rows.filter(x=>x.round!==null).map(x=>x.round).sort((a,b)=>a-b),m=Math.floor(values.length/2);
+  return {median:values.length?(values.length%2?values[m]:(values[m-1]+values[m])/2):null,sample:values.length,missing:false};
+}
+export function historyWindows(card) {
+  const max=card.seasons.length;
+  return [...new Set([5,10,max].filter(n=>n<=max))].sort((a,b)=>a-b);
+}
+export function positionGroup(p) {
+  return ['QB','RB','WR','TE','K','DEF'].includes(p.position)?p.position:'IDP';
+}
+// Display bands only: T1-T4 within 10% of each leader; T5 is the remaining depth.
+// Fixed from the snapshot, never recomputed when a player is drafted. No score changes.
+export function playerTiers(players) {
+  const result=new Map();
+  for(const pos of SCOUT_POSITIONS){
+    const group=players.filter(p=>positionGroup(p)===pos&&Number.isFinite(p.projection)&&p.projection>0).sort((a,b)=>b.projection-a.projection||a.yahooId.localeCompare(b.yahooId));
+    let tier=0,leader=0;
+    for(const p of group){if(!tier||(tier<5&&p.projection<leader*.9)){tier++;leader=p.projection;}result.set(p.yahooId,{position:pos,tier});}
+  }
+  return result;
+}
+export function tierCounts(players, tiers, drafted=new Set()) {
+  const cells=new Map();
+  for(const p of players){const t=tiers.get(p.yahooId);if(!t)continue;const key=`${t.position}:${t.tier}`,cell=cells.get(key)??{...t,total:0,remaining:0};cell.total++;if(!drafted.has(p.yahooId))cell.remaining++;cells.set(key,cell);}
+  return [...cells.values()];
+}
+export function playerWarnings(p) {
+  const warnings=[];
+  if(p.injury?.roleUncertain||p.validationStatus==='ROLE_UNCERTAIN')warnings.push({label:'ROLE',detail:'Starting role unresolved; review the player details.'});
+  if(healthMarker(p))warnings.push({label:healthMarker(p),detail:'Health or availability needs review. Open the dated injury report.'});
+  const rates=Object.values(p.sourceFamilyPerGamePoints??{}).filter(Number.isFinite);
+  if(rates.length>=2){const low=Math.min(...rates),high=Math.max(...rates);if(high>0&&(high-low)/high>=.25)warnings.push({label:'SPLIT',detail:`Source per-game projections range ${low.toFixed(1)}–${high.toFixed(1)} (25%+ spread). Diagnostic only; no additional ranking penalty.`});}
+  return warnings;
+}
+export function roundTargets(packet, seat, round, drafted=new Set()) {
+  const pick=nextTurns(seat,1,packet.teams,packet.rounds)[round-1];
+  if(!pick)return [];
+  // ADP frames a plausible window, not a probability or an availability guarantee.
+  const candidates=packet.players.filter(p=>!drafted.has(p.yahooId)&&Number.isFinite(p.vor)&&Number.isFinite(p.projection)&&p.manualEligible!==false);
+  const timing=p=>Number.isFinite(p.marketAdp)?p.marketAdp:Number.isFinite(p.yahooRank)?p.yahooRank:null;
+  const nearby=candidates.filter(p=>timing(p)!==null&&timing(p)>=Math.max(1,pick-packet.teams)&&timing(p)<=pick+packet.teams*2);
+  return nearby.sort((a,b)=>b.vor-a.vor||a.yahooId.localeCompare(b.yahooId)).slice(0,5);
+}
+export function roundOpponents(packet,order,round) {
+  const pick=nextTurns(order.ours,1,packet.teams,packet.rounds)[round-1];
+  if(!pick)return {before:null,between:[]};
+  const beforeSeat=pick>1?seatAt(pick-1,packet.teams):null;
+  return {before:beforeSeat===order.ours?'BACK_TO_BACK':(packet.opponents??[]).find(c=>order[c.managerId]===beforeSeat)??null,
+    between:(packet.opponents??[]).filter(c=>opponentBetween(c,order,round,packet).length)};
 }
