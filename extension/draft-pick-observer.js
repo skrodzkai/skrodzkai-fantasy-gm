@@ -1,6 +1,8 @@
 (function(){
   'use strict';
-  const leagueId=location.pathname.match(/^\/(?:draftclient\/f1|f1)\/(420010|542830)(?:\/|$)/)?.[1];
+  const clientId=location.pathname.match(/^\/draftclient\/f1\/([1-9]\d*)\/[1-9]\d*(?:\/|$)/)?.[1];
+  const publicMock=clientId&&!['420010','542830','18599'].includes(clientId);
+  const leagueId=publicMock?`mock:${clientId}`:location.pathname.match(/^\/(?:draftclient\/f1|f1)\/(420010|542830)(?:\/|$)/)?.[1];
   if(!leagueId)return;
   const api=globalThis.SKRODZKaiPickLedger,readers=globalThis.SKRODZKaiYahooPageReaders;
   const room=location.pathname.startsWith('/draftclient/');
@@ -8,6 +10,13 @@
   async function observe(){
     if(busy)return;busy=true;
     try{
+      if(publicMock){
+        const observation=api.readMockResults(document,{leagueId});
+        observation.currentPick=readers?.readCurrentPick(document)?.pick??null;
+        const receipt=await chrome.runtime.sendMessage({type:'draft_ledger',observation});
+        if(receipt?.status==='COMPLETE')clearInterval(timer);
+        return;
+      }
       const board=leagueId==='420010'?globalThis.SKRODZKaiYahooRealBoard:globalThis.SKRODZKaiYahooMockBoard;
       if(!board||String(board.leagueId)!==leagueId)throw Error('Matching league board unavailable');
       let doc=document;

@@ -633,7 +633,13 @@
         :host { all: initial; --ink:#05070b; --panel:#0b1016; --panel-2:#111923; --line:rgba(255,255,255,.10); --cyan:#63d9ff; --blue-accent:#0a84ff; --red:#ff453a; --muted:#98989d; --white:#ffffff; }
         * { box-sizing: border-box; }
         .rail { position: fixed; right: 16px; bottom: 16px; z-index: 2147483647; width: min(380px, calc(100vw - 32px)); overflow: hidden; color: #fff; background: radial-gradient(circle at 12% 0, rgba(10,132,255,.18), transparent 34%), linear-gradient(180deg,#070b11,#05070b); border: 1px solid rgba(10,132,255,.62); border-radius: 10px; box-shadow: 0 18px 54px rgba(0,0,0,.58), inset 0 1px rgba(255,255,255,.05); font: 600 12px/1.35 "Avenir Next", "SF Pro Text", "Helvetica Neue", sans-serif; letter-spacing: .01em; }
-        :host([data-draftclient]) .rail { top:72px; bottom:auto; }
+        :host([data-draftclient]) { display:block; position:relative; height:48px; }
+        :host([data-draftclient]) .rail { position:relative; inset:auto; width:100%; border-radius:0; box-shadow:none; }
+        :host([data-draftclient]) .rail .cap { min-height:46px; height:46px; grid-template-columns:minmax(0,1fr) auto; padding:5px 10px; }
+        :host([data-draftclient]) .brand-lockup,:host([data-draftclient]) .runtime-attestation { display:none; }
+        :host([data-draftclient]) .dock-readout { display:flex; align-items:center; gap:12px; }
+        :host([data-draftclient]) .dock-readout span { margin:0; }
+        :host([data-draftclient]) .dock-actions { display:flex; gap:6px; }
         .rail.expanded,.rail.collapsed { width:min(380px,calc(100vw - 32px)); }
         .cap { min-height: 68px; display: grid; grid-template-columns: 48px minmax(0,1fr) auto; align-items: center; gap: 10px; padding: 9px; border-bottom: 1px solid var(--line); background: rgba(5,8,13,.94); }
         .brand-lockup { display: flex; align-items: center; min-width: 0; }
@@ -761,7 +767,8 @@
           <div class="actions"><button class="primary arm" type="button" disabled>ARM MOCK</button><button class="danger halt" type="button" disabled>KILL SWITCH</button><button class="export" type="button" disabled>EXPORT RECEIPTS</button></div>
         </div>
       </section>`;
-    documentRef.documentElement.appendChild(host);
+    if (host.hasAttribute('data-draftclient')) documentRef.body.prepend(host);
+    else documentRef.documentElement.appendChild(host);
     const rail = shadow.querySelector(".rail");
     const state = shadow.querySelector(".state");
     const detail = shadow.querySelector(".detail");
@@ -863,12 +870,12 @@
       },
       setRecommendations(recommendations = [], meta = {}) {
         if (Array.isArray(meta.fullBoard)) ui.board = meta.fullBoard; const rows = Array.isArray(recommendations) ? recommendations : []; ui.recommendations = rows;
-        data.board.innerHTML = rows.slice(0, 6).map((player, index) => `<button type="button" data-live-choice="${escapeHtml(player.yahooId)}" class="board-row ${index === 0 ? "primary" : ""} ${player.manual ? "pinned" : ""}"><span class="rank">${player.manual ? "PIN" : index < 3 ? `${index + 1}` : `F${index}`}</span><div><div class="player">${escapeHtml(player.name ?? `Yahoo ${player.yahooId}`)} <em>${escapeHtml(player.position ?? "—")} · ${escapeHtml(player.team ?? "—")}</em></div><div class="reason">${escapeHtml(player.reason ?? "verified local ladder")}</div></div><div class="metrics">${escapeHtml(player.edge ?? "—")}<br><span class="dim">${escapeHtml(player.confidence ?? "—")} · ${escapeHtml(player.freshness ?? "—")}</span></div></button>`).join("") || `<div class="event">Ladder resolves on our owned turn after Yahoo availability is validated.</div>`;
+        data.board.innerHTML = rows.slice(0, 6).map((player, index) => `<button type="button" data-live-choice="${escapeHtml(player.yahooId)}" class="board-row ${index === 0 ? "primary" : ""} ${player.manual ? "pinned" : ""}"><span class="rank">${player.manual ? "PIN" : `${index + 1}`}</span><div><div class="player">${escapeHtml(player.name ?? `Yahoo ${player.yahooId}`)} <em>${escapeHtml(player.position ?? "—")} · ${escapeHtml(player.team ?? "—")}</em></div><div class="reason">${escapeHtml(player.reason ?? "verified local ladder")}</div></div><div class="metrics">${escapeHtml(player.edge ?? "—")}<br><span class="dim">${escapeHtml(player.confidence ?? "—")} · ${escapeHtml(player.freshness ?? "—")}</span></div></button>`).join("") || `<div class="event">Ladder resolves on our owned turn after Yahoo availability is validated.</div>`;
         for (const button of data.board.querySelectorAll("[data-live-choice]")) button.addEventListener("click", () => {
           const player = rows.find((candidate) => String(candidate.yahooId) === String(button.dataset.liveChoice));
           if (player && typeof ui.onManualConfirm === "function") ui.onManualConfirm([player], commandIntent());
         });
-        const manual = rows[0]?.manual; ui.ladderState = meta.disagreement ? "MODEL DISAGREEMENT" : manual ? "MANUAL PIN APPLIED" : "BASELINE READY"; data.disagreement.textContent = ui.ladderState; data.disagreement.className = meta.disagreement ? "danger" : ""; redrawManual();
+        const manual = rows[0]?.manual; ui.ladderState = meta.completed ? "DRAFT COMPLETE" : meta.disagreement ? "MODEL DISAGREEMENT" : manual ? "MANUAL PIN APPLIED" : "BASELINE READY"; data.disagreement.textContent = ui.ladderState; data.disagreement.className = meta.disagreement ? "danger" : ""; redrawManual();
       },
       setBetweenTurns(info = {}) {
         ui.between = info;
@@ -1215,14 +1222,14 @@
       return [{
         ...player,
         manual,
-        edge: Number.isFinite(adjusted) ? adjusted.toFixed(1) : "POLICY",
+        edge: Number.isFinite(adjusted) ? adjusted.toFixed(2) : "—",
         confidence: player.confidence ?? "LOCAL_RULE",
         freshness: "TURN",
         reason: (manual
           ? "operator pin validated; baseline fallbacks retained"
           : leader
-            ? leader.valueReason ?? `BPA ${Number(leader.marginalUtility ?? 0).toFixed(1)} · wait ${Number(leader.costOfWaiting ?? 0).toFixed(1)} · Pnext ${Math.round(Number(leader.pAvailableNext ?? 0) * 100)}%`
-            : "verified local ladder; exact Yahoo ID") + draftSignalLabel(player),
+            ? `Roster value ${Number(leader.marginalUtility ?? 0).toFixed(2)} · cost of waiting ${Number(leader.costOfWaiting ?? 0).toFixed(2)}`
+            : "Next available alternative") + draftSignalLabel(player),
       }];
     });
   }
@@ -1288,6 +1295,13 @@
         rail.render("bad", "PREFLIGHT FAILED", snapshot.errors.join(" · "));
         rail.controls.arm.disabled = true;
         rail.addEvent("preflight blocked", snapshot.errors.join(" · "));
+        return false;
+      }
+      const boardFailure = boardHealthGate(environment.SKRODZKaiYahooMockBoard);
+      if (boardFailure) {
+        rail.render("bad", "BOARD REFRESH REQUIRED", boardFailure);
+        rail.controls.arm.disabled = true;
+        rail.setWarnings([{ severity:"danger", text:boardFailure }]);
         return false;
       }
       rail.render(active ? "ok" : "", active ? "ARMED" : "READY TO ARM", `Room ${snapshot.roomId} · seat ${snapshot.seat} · 12 teams · 15 rounds`);
@@ -1709,13 +1723,13 @@
     let last = "";
     const statusTimer = environment.setInterval(() => {
       const status = runner.getStatus();
-      const turn = controllerApi.runtime.readOwnedTurn(environment.document);
+      const turn = environment.SKRODZKaiYahooPageReaders?.readCurrentPick(environment.document);
       const observedClock = controllerApi.runtime.readDraftClock(environment.document);
       const clock = observedClock?.label ?? "--:--";
       const clockVerified = Boolean(observedClock);
       const autodraftState = controllerApi.runtime.readAutodraftState(environment.document);
       const queueState = controllerApi.runtime.readQueueState(environment.document);
-      const marker = JSON.stringify([status.state, status.picks.length, status.failure, status.pendingDecision?.targetYahooIds ?? null, turn?.label ?? null, clock, autodraftState, queueState]);
+      const marker = JSON.stringify([status.state, status.picks.length, status.failure, status.pendingDecision?.targetYahooIds ?? null, turn?.round ?? null, turn?.pick ?? null, clock, autodraftState, queueState]);
       if (marker === last) return;
       last = marker;
       const kind = status.state === "completed" ? "complete" : status.state === "running" ? "ok" : "bad";
@@ -1723,7 +1737,7 @@
       const decision = runner.exportReceipts().filter((entry) => entry.kind === "runner_turn_resolved").at(-1)?.decision ?? null;
       rail.setContext({ roomId: room.roomId, seat: draftSeat, league: leagueLabel, round: turn?.round, pick: turn?.pick, clock, clockVerified, ownedTurn: ownedTurnFromRunnerStatus(status), armed: status.state === "running", autodraftState, queueState, kill: ["halted", "failed"].includes(status.state) });
       rail.setRoster(buildUiRoster(status.picks, rosterSlots), status.picks.at(-1));
-      rail.setRecommendations(buildUiRecommendations(board, decision), { fullBoard: board, disagreement: status.failure?.code?.includes("mismatch") });
+      rail.setRecommendations(status.state === 'completed' ? [] : buildUiRecommendations(board, decision), { fullBoard: board, disagreement: status.failure?.code?.includes("mismatch"), completed:status.state === 'completed' });
       rail.setBetweenTurns(buildUiOpponentWindow(decision, executionMode));
       rail.setWarnings(buildUiWarnings({ room, armRecord, autodraft:autodraftState === "ACTIVE", roster, board, boardData, decision, expectedRosterTotal }));
       rail.render(kind, status.state, `${status.picks.length}/${expectedRosterTotal} confirmed${status.viewFallback ? " · ALL POSITIONS FALLBACK USED — NOT CLEAN" : ""}${status.failure ? ` · ${status.failure.code ?? status.failure}` : ""}`);
@@ -1802,6 +1816,7 @@
       parseSequentialTeamCount,
       parseRosterSlots,
       parseWaitingRoom,
+      bootWaitingRoom,
       makePreflight,
       boardHealthReceipt,
       boardHealthGate,

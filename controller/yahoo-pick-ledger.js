@@ -47,6 +47,24 @@
     }
     return {leagueId,season,picks};
   }
+  // Observed public mock Results > Round by Round, September 7, 2026.
+  // Rows are newest-first and carry exact Yahoo IDs in the player cell.
+  function readMockResults(documentRef,{leagueId,season=2026}={}) {
+    if(!/^mock:[1-9]\d*$/.test(leagueId??''))throw Error('Explicit mock identity required');
+    const tables=[...documentRef.querySelectorAll('table')].filter(table=>
+      [...table.querySelectorAll('thead th')].map(cell=>cell.textContent.trim()).join('|')==='Pick|Player|Team');
+    if(tables.length!==1)throw Error('Mock round results not present');
+    const picks=[];
+    for(const row of tables[0].querySelectorAll('tbody tr')){
+      const cells=[...row.children];
+      if(cells.length===1&&cells[0].tagName==='TH'&&/^ROUND \d+$/i.test(cells[0].textContent.trim()))continue;
+      const overall=Number(cells[0]?.textContent.trim());
+      const ids=[...new Set([...cells[1]?.querySelectorAll('[data-id]')??[]].map(e=>e.getAttribute('data-id')))];
+      if(cells.length!==3||cells.some(c=>c.tagName!=='TD')||!Number.isInteger(overall)||overall<1||overall>180||ids.length!==1||!/^\d+$/.test(ids[0])||!cells[2].textContent.trim())throw Error('Unrecognized mock results row');
+      picks.push({overall,yahooId:ids[0],name:cells[1].textContent.trim().split('\n')[0],teamName:cells[2].textContent.trim()});
+    }
+    return {leagueId,season,picks};
+  }
   function resolveDefenses(observation,players){
     for(const pick of observation.picks)if(!pick.yahooId){
       // Yahoo's team link may display the nickname or city + nickname. Remove
@@ -61,5 +79,5 @@
     }
     return observation;
   }
-  root.SKRODZKaiPickLedger={reconcile,status,readResults,resolveDefenses};
+  root.SKRODZKaiPickLedger={reconcile,status,readResults,readMockResults,resolveDefenses};
 })(globalThis);

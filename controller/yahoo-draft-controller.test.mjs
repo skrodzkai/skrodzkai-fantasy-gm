@@ -352,7 +352,7 @@ for (const { seat, real = false, disabled = false, missingFilter = false, onCloc
     const status = runner.getStatus();
     if (lateSparse) {
       assert.equal(status.state, "failed", JSON.stringify(status.failure));
-      assert.equal(clickedIds.length, 17, "no round-18 click after specialist discovery and fallback fail");
+      assert.equal(clickedIds.length, 17, `no round-18 click after specialist discovery and fallback fail: ${JSON.stringify(status.failure)}`);
       assert.equal(status.picks.length, 17);
       if (real) {
         assert.equal(status.picks.filter(pick => ["LB", "CB"].includes(pick.position)).length, 1);

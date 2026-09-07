@@ -1,11 +1,17 @@
 const $=id=>document.getElementById(id),text=(tag,value,cls)=>{const el=document.createElement(tag);el.textContent=value;if(cls)el.className=cls;return el;},num=n=>Number.isFinite(n)?n.toFixed(1):'—';
+const publicMock=packet.leagueId==='PUBLIC_MOCK';
+if(publicMock){
+ const room=new URLSearchParams(location.search).get('room');
+ if(!/^[1-9]\d+$/.test(room??'')||['420010','542830','18599'].includes(room))throw Error('Explicit public mock room required.');
+ packet.leagueId=`mock:${room}`;
+}
 const opponents=packet.opponents??[],key=`skrodzkai-draft-order:${packet.leagueId}:${packet.scoringModel}`,favKey=`skrodzkai-favorites:${packet.leagueId}:2026`;
 let order=Object.create(null),selected=opponents[0]??null,sortKey='value',sortDirection='desc',favorites=new Set(),drafted=new Set(),ledger=null,historyLimit=5,tierFilter=null,selectedRound=1;
 const tiers=playerTiers(packet.players),prebuilt=new Map();
 for(let seat=1;seat<=packet.teams;seat++)prebuilt.set(seat,Array.from({length:packet.rounds},(_,i)=>roundTargets(packet,seat,i+1)));
 function message(value){$('message').textContent=value;}
 try{const saved=localStorage.getItem(key);if(saved)order=validateOrder(JSON.parse(saved),packet);const f=JSON.parse(localStorage.getItem(favKey)??'[]');if(!Array.isArray(f))throw Error();favorites=new Set(f.filter(id=>packet.players.some(p=>p.yahooId===id)));}catch{message('Saved preferences could not be read; verify your seat and favorites.');}
-$('identity').textContent=`${packet.leagueId==='420010'?'2 Minute Drillers':'League Two · TEST'} · ${packet.teams} teams · ${packet.rounds} rounds`;
+$('identity').textContent=publicMock?`Mock ${packet.leagueId.slice(5)} · reference rankings · live picks`:`${packet.leagueId==='420010'?'2 Minute Drillers':'League Two · TEST'} · ${packet.teams} teams · ${packet.rounds} rounds`;
 $('snapshot').textContent=`Snapshot ${new Date(packet.observedAt).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}`;
 function connectionStatus(){if(!ledger)return 'OFFLINE';if(ledger.status==='COMPLETE')return 'COMPLETE';return Date.now()-ledger.checkedAt>6000||Date.now()<ledger.checkedAt?'DISCONNECTED':ledger.status;}
 function renderHealth(){
@@ -44,7 +50,7 @@ function renderBoard(){
 }
 function renderTiers(){
  const counts=tierCounts(packet.players,tiers,drafted),grid=$('tierGrid');grid.replaceChildren();
- for(const pos of SCOUT_POSITIONS){const column=text('div','','tier-column');column.append(text('strong',pos));for(const c of counts.filter(x=>x.position===pos).sort((a,b)=>a.tier-b.tier)){const b=text('button','','tier-box');b.dataset.tier=String(c.tier);if(c.remaining===1)b.classList.add('scarce');const id=`${pos}:${c.tier}`;b.setAttribute('aria-pressed',String(tierFilter===id));b.setAttribute('aria-label',`${pos} tier ${c.tier}: ${c.remaining} remaining`);b.title=`${c.remaining} of ${c.total} not recorded drafted; ${ledger?'check feed status':'snapshot only'}`;b.append(text('small',`TIER ${c.tier}`),text('strong',`${c.remaining}`));b.onclick=()=>{tierFilter=tierFilter===id?null:id;renderTiers();renderBoard();};column.append(b);}grid.append(column);}
+ for(const pos of SCOUT_POSITIONS){const column=text('div','','tier-column');column.append(text('strong',pos));for(const c of counts.filter(x=>x.position===pos).sort((a,b)=>a.tier-b.tier)){const b=text('button','','tier-box');b.dataset.tier=String(c.tier);if(c.remaining===1&&c.tier<5)b.classList.add('scarce');const id=`${pos}:${c.tier}`;b.setAttribute('aria-pressed',String(tierFilter===id));b.setAttribute('aria-label',`${pos} tier ${c.tier}: ${c.remaining} remaining`);b.title=`${c.remaining} of ${c.total} not recorded drafted; ${ledger?'check feed status':'snapshot only'}`;b.append(text('small',`TIER ${c.tier}`),text('strong',`${c.remaining}`));b.onclick=()=>{tierFilter=tierFilter===id?null:id;renderTiers();renderBoard();};column.append(b);}grid.append(column);}
  $('clearTier').hidden=!tierFilter;
 }
 $('clearTier').onclick=()=>{tierFilter=null;renderTiers();renderBoard();};

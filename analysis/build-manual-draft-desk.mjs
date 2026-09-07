@@ -4,7 +4,8 @@ import {pathToFileURL} from 'node:url';
 import {SCOUT_POSITIONS} from './manual-draft-model.mjs';
 
 export function validatePacket(p) {
-  if (!p || !['420010','542830'].includes(p.leagueId) || !p.scoringModel || p.teams !== 12 || !Number.isInteger(p.rounds) || p.rounds < 1 || p.rounds > 30) throw Error('Explicit supported league, scoring model, and draft shape required.');
+  if (!p || !['420010','542830','PUBLIC_MOCK'].includes(p.leagueId) || !p.scoringModel || p.teams !== 12 || !Number.isInteger(p.rounds) || p.rounds < 1 || p.rounds > 30) throw Error('Explicit supported league, scoring model, and draft shape required.');
+  if (p.leagueId==='PUBLIC_MOCK' && (p.rounds!==15 || p.opponents?.length)) throw Error('Public mock requires 15 rounds and no league opponent history.');
   if (!['PASS','FAIL','UNREVIEWED'].includes(p.health) || !Number.isFinite(Date.parse(p.observedAt)) || !Array.isArray(p.players) || !p.players.length || typeof p.notice !== 'string') throw Error('Missing data receipt.');
   if (p.health === 'PASS' && (!Number.isFinite(Date.parse(p.expiresAt)) || Date.parse(p.expiresAt) <= Date.parse(p.observedAt))) throw Error('Passing data needs an explicit freshness deadline.');
   if (p.opponents != null) {
@@ -39,7 +40,17 @@ export function validatePacket(p) {
     if (row.sourceFamilyPerGamePoints != null && (typeof row.sourceFamilyPerGamePoints !== 'object' || Array.isArray(row.sourceFamilyPerGamePoints) || !Object.values(row.sourceFamilyPerGamePoints).every(Number.isFinite))) throw Error('Invalid source disagreement evidence.');
     seen.add(row.yahooId);
   }
-  return {...p, players:p.players.map(row=>({...row,position:row.position??row.eligible[0]??'—',team:row.team??'—'})), boardId:createHash('sha256').update(JSON.stringify(p)).digest('hex')};
+  return {...p, players:p.players.map(row=>{
+    const display={...row,position:row.position??row.eligible[0]??'—',team:row.team??'—'};
+    if(['99001','99002'].includes(row.yahooId) && (row.name!=='Travis Hunter'||row.team!=='JAX')) throw Error('Hunter role identity mismatch; rebuild the captured packet.');
+    // Two observed Yahoo records; preserve both IDs for capture, never merge
+    // their scores. Existing identity overrides map 99002 to the defensive role.
+    if(row.name==='Travis Hunter' && ['99001','99002'].includes(row.yahooId)){
+      display.name += row.yahooId==='99001'?' · offense':' · defense (unverified)';
+      if(row.yahooId==='99002')Object.assign(display,{position:'CB',eligible:['CB'],projection:null,vor:null,sourceFamilyPerGamePoints:{},expectedGamesThroughWeek17:null,marketAdp:null,adpLow:null,adpHigh:null,manualEligible:false,automaticEligible:false,validationStatus:'DUAL_ROLE_SCORING_UNVERIFIED'});
+    }
+    return display;
+  }), boardId:createHash('sha256').update(JSON.stringify(p)).digest('hex')};
 }
 export async function renderDesk(input) {
   const packet = validatePacket(input);

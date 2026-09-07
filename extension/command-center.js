@@ -82,13 +82,13 @@ function render() {
   elements.latest.textContent = text(state.latestText,"No confirmed selection yet.");
 
   const ladder = Array.isArray(state.recommendations) ? state.recommendations : [];
-  elements.ladder.innerHTML = ladder.length ? ladder.slice(0,6).map((player,index) => `<button type="button" data-live-choice="${esc(player.yahooId)}" class="ladder-row ${player.manual ? "pinned" : ""}"><div class="rank">${player.manual ? "PIN" : index < 3 ? `${index + 1}` : `F${index}`}</div><div><div class="player">${esc(player.name,`Yahoo ${player.yahooId}`)}</div><div class="meta">${esc(player.position)} · ${esc(player.team)}</div><div class="reason">${esc(player.reason,"verified local ladder")}</div></div><div class="score">${esc(player.edge)}<br>${esc(player.confidence)}</div></button>`).join("") : `<div class="ladder-empty">Ladder resolves on our owned turn after Yahoo availability is validated.</div>`;
+  elements.ladder.innerHTML = ladder.length ? ladder.slice(0,6).map((player,index) => `<button type="button" data-live-choice="${esc(player.yahooId)}" class="ladder-row ${player.manual ? "pinned" : ""}"><div class="rank">${player.manual ? "PIN" : `${index + 1}`}</div><div><div class="player">${esc(player.name,`Yahoo ${player.yahooId}`)}</div><div class="meta">${esc(player.position)} · ${esc(player.team)}</div><div class="reason">${esc(player.reason,"verified local ladder")}</div></div><div class="score">${esc(player.edge)}<br>Draft value</div></button>`).join("") : `<div class="ladder-empty">${state.label === "completed" ? "Draft complete" : "Waiting for our turn"}</div>`;
   for (const button of elements.ladder.querySelectorAll("[data-live-choice]")) button.addEventListener("click", () => {
     const player = ladder.find((candidate) => String(candidate.yahooId) === String(button.dataset.liveChoice));
     if (player) void command("pin", { targets:[player], intent:commandIntent() });
   });
   elements.ladderState.textContent = text(state.ladderState,"BASELINE READY");
-  elements.topTarget.textContent = ladder[0] ? `${text(ladder[0].name)} · ${text(ladder[0].position)} · ${text(ladder[0].edge)}` : "Waiting for Yahoo availability";
+  elements.topTarget.textContent = ladder[0] ? `${text(ladder[0].name)} · ${text(ladder[0].position)} · ${text(ladder[0].edge)}` : state.label === "completed" ? "Draft complete" : "Waiting for Yahoo availability";
   elements.pinState.textContent = text(state.pinText,"No pin staged. Five verified fallbacks remain active.");
   elements.pinStateLabel.textContent = text(state.pinLabel,"BASELINE");
   elements.clearPin.disabled = !state.pinned;

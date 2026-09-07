@@ -206,21 +206,38 @@
       if (message?.type === 'open_draft_desk') {
         if (sender.url !== chromeApi.runtime.getURL('extension/command-center.html')) return false;
         if(!message.leagueId){sendResponse({ok:false,error:'Open a supported league page first.'});return false;}
-        if(!['420010','542830'].includes(message.leagueId)){sendResponse({ok:false,error:'Public mock pick feed is not supported yet.'});return false;}
+        if(!['420010','542830'].includes(message.leagueId)){
+          const id=String(message.leagueId);
+          if(!/^[1-9]\d+$/.test(id)||id==='18599'){sendResponse({ok:false,error:'Invalid mock room.'});return false;}
+          void chromeApi.storage.session.get(`skz.mockFeed:${id}`).then(async stored=>{
+            if(!stored[`skz.mockFeed:${id}`])throw Error('Public mock waiting-room identity not verified.');
+            const path='extension/private-draft-desk/mock/index.html';
+            await fetchRuntimeBytes(chromeApi,path);
+            await chromeApi.tabs.create({url:chromeApi.runtime.getURL(path)+`?room=${id}`});
+            sendResponse({ok:true});
+          }).catch(error=>sendResponse({ok:false,error:String(error.message)}));
+          return true;
+        }
         const path=`extension/private-draft-desk/${message.leagueId}/index.html`;
         void fetchRuntimeBytes(chromeApi,path).then(()=>chromeApi.tabs.create({url:chromeApi.runtime.getURL(path)})).then(()=>sendResponse({ok:true})).catch(()=>sendResponse({ok:false,error:'Private league desk is not installed or could not be opened.'}));
         return true;
       }
       if (message?.type === 'draft_ledger' || message?.type === 'draft_ledger_error') {
-        const match=String(sender.url??'').match(/^https:\/\/football\.fantasysports\.yahoo\.com\/(?:draftclient\/f1|f1)\/(420010|542830)(?:\/|$)/);
+        const match=String(sender.url??'').match(/^https:\/\/football\.fantasysports\.yahoo\.com\/(?:draftclient\/f1|f1)\/(\d+)(?:\/|$)/);
         if(!match||!Number.isInteger(sender.tab?.id))return false;
-        const leagueId=match[1],key=`skz.picks:${leagueId}:2026`;
+        const publicMock=!['420010','542830'].includes(match[1]);
+        const leagueId=publicMock?`mock:${match[1]}`:match[1],key=`skz.picks:${leagueId}:2026`;
         void enqueue(async()=>{
+          if(publicMock){
+            const registered=(await chromeApi.storage.session.get(`skz.mockFeed:${match[1]}`))[`skz.mockFeed:${match[1]}`];
+            const route=new URL(sender.url).pathname.match(/^\/draftclient\/f1\/(\d+)\/(\d+)\/?$/);
+            if(!registered||!route||Number(route[2])!==registered.seat){sendResponse({ok:false,error:'Public mock source not registered'});return;}
+          }
           const previous=(await chromeApi.storage.local.get(key))[key];
           const room=String(sender.url).includes('/draftclient/');
           if(previous?.tabId!==sender.tab.id&&Date.now()-previous?.checkedAt<6000&&(!room||previous?.room)){sendResponse({ok:false,error:'other_observer_active'});return;}
           const ledger=message.type==='draft_ledger'
-            ? root.SKRODZKaiPickLedger.reconcile(previous,message.observation,{leagueId,teams:12,rounds:19})
+            ? root.SKRODZKaiPickLedger.reconcile(previous,message.observation,{leagueId,teams:12,rounds:publicMock?15:19})
             : {...previous,leagueId,season:2026,status:'GAP',reason:String(message.reason??'Read failed').slice(0,200),checkedAt:Date.now()};
           ledger.tabId=sender.tab.id;
           ledger.room=room;
@@ -240,7 +257,17 @@
         return true;
       }
       if (message?.type === "state") {
-        void enqueue(() => router.handleState(message, sender)).then((ok) => sendResponse({ ok })).catch((error) => sendResponse({ ok:false, error:String(error?.message ?? error) }));
+        void enqueue(async()=>{
+          const ok=await router.handleState(message,sender);
+          const senderUrl=String(sender.url??sender.tab?.url??'');
+          if(!URL.canParse(senderUrl))return ok;
+          const url=new URL(senderUrl);
+          const id=url.searchParams.get('mlid'),snapshot=message.snapshot;
+          if(ok&&url.protocol==='https:'&&url.hostname==='football.fantasysports.yahoo.com'&&!url.port&&url.pathname==='/f1/mock_waiting'&&/^[1-9]\d+$/.test(id??'')&&!['420010','542830','18599'].includes(id)&&snapshot?.mode==='MOCK'&&snapshot.context?.roomId===id&&Number.isInteger(snapshot.context.seat)&&snapshot.context.seat>=1&&snapshot.context.seat<=12){
+            await chromeApi.storage.session.set({[`skz.mockFeed:${id}`]:{roomId:id,seat:snapshot.context.seat,teams:12,rounds:15}});
+          }
+          return ok;
+        }).then((ok) => sendResponse({ ok })).catch((error) => sendResponse({ ok:false, error:String(error?.message ?? error) }));
         return true;
       }
       if (message?.type === "open_command_center") {

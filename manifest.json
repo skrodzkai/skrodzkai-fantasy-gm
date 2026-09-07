@@ -72,6 +72,16 @@
       ],
       "run_at": "document_idle"
     }
+    ,{
+      "matches": ["https://football.fantasysports.yahoo.com/draftclient/f1/*"],
+      "exclude_matches": [
+        "https://football.fantasysports.yahoo.com/draftclient/f1/420010*",
+        "https://football.fantasysports.yahoo.com/draftclient/f1/542830*",
+        "https://football.fantasysports.yahoo.com/draftclient/f1/18599*"
+      ],
+      "js": ["controller/yahoo-page-readers.js", "controller/yahoo-pick-ledger.js", "extension/draft-pick-observer.js"],
+      "run_at": "document_idle"
+    }
   ],
   "web_accessible_resources": [
     {

@@ -1626,6 +1626,43 @@
       }
     }
 
+    // Public Results are unmounted while Players is selected (observed Yahoo UI).
+    // Only the runner changes views; the ledger observer remains read-only.
+    function publicView(view, beforeClick = () => true) {
+      const tabs = Array.from(documentRef.querySelectorAll('button[role="tab"]'));
+      const matches = tabs.filter(tab => tab.getAttribute('data-id') === view);
+      if (matches.length !== 1 || matches[0].disabled) throw new Error(`public_view_unavailable:${view}`);
+      if (matches[0].getAttribute('aria-selected') === 'true') return true;
+      if (beforeClick()) matches[0].click();
+      return false;
+    }
+
+    let publicViewPick = null;
+    let publicViewAttempts = new Set();
+    function observePublicView() {
+      const current = environment.SKRODZKaiYahooPageReaders?.readCurrentPick(documentRef);
+      if (!current) return;
+      if (current.pick !== publicViewPick) { publicViewPick = current.pick; publicViewAttempts = new Set(); }
+      // Restore Players one opponent pick ahead, before the owned-turn budget.
+      const near = overallPick(picks.length + 1, expectedSeat, config.teams) - current.pick <= 1;
+      const request = view => {
+        try {
+          return publicView(view, () => {
+            if (publicViewAttempts.has(view)) return false;
+            publicViewAttempts.add(view);
+            receipt('public_view_requested', {view, currentPick:current.pick});
+            return true;
+          });
+        } catch (error) {
+          if (!publicViewAttempts.has(view)) receipt('public_capture_paused', {view, currentPick:current.pick, reason:String(error.message)});
+          publicViewAttempts.add(view);
+          return false;
+        }
+      };
+      if (near) request('players');
+      else if (request('results')) request('round');
+    }
+
     async function resolveOwnedTurn(turn) {
       if (state !== "running") return;
       const detectedAt = Date.now();
@@ -1636,7 +1673,36 @@
       }
       assertEmptyOrConfirmedRoster("owned_turn");
       let filterLabel = filterLabelForRound(turn.round, picks, config, expectedSeat);
-      const clockAtDecision = assertOwnedClock("at_detection");
+      // Public mock 10979161 failed at R3P35 before any mutation while the
+      // following status frame showed 00:30. Let the turn/clock DOM settle
+      // under the existing 250ms observation window, not a new pick budget.
+      let clockAtDecision = controllerApi.runtime.readDraftClock(documentRef);
+      if (executionMode === "MOCK" && (!clockAtDecision || clockAtDecision.seconds < MINIMUM_OWNED_CLOCK_SECONDS)) {
+        receipt("owned_clock_observation_paused", { turn:turn.label, clock:clockAtDecision, maximumMs:250 });
+        do {
+          await delay(25);
+          if (state !== "running" || controllerApi.runtime.readOwnedTurnState(documentRef)?.turn?.label !== turn.label) throw new Error("owned_turn_changed_during_clock_read");
+          assertDraftSafety("clock_read");
+          assertEmptyOrConfirmedRoster("clock_read");
+          if (Date.now() - detectedAt >= 250) throw new Error("draft_clock_margin_exhausted_at_detection");
+          clockAtDecision = controllerApi.runtime.readDraftClock(documentRef);
+        } while (!clockAtDecision || clockAtDecision.seconds < MINIMUM_OWNED_CLOCK_SECONDS);
+        receipt("owned_clock_observation_resumed", { turn:turn.label, elapsedMs:Date.now() - detectedAt, clock:clockAtDecision });
+      }
+      clockAtDecision = assertOwnedClock("at_detection");
+      if (executionMode === "MOCK") {
+        const selected = publicView('players');
+        if (!selected) {
+          while (!Array.from(documentRef.querySelectorAll('button[role="tab"]')).some(tab => tab.getAttribute('data-id') === 'players' && tab.getAttribute('aria-selected') === 'true') || !findFilter(documentRef, 'All Positions')) {
+            await delay(25);
+            if (state !== 'running' || controllerApi.runtime.readOwnedTurnState(documentRef)?.turn?.label !== turn.label) throw new Error('owned_turn_changed_during_view_read');
+            assertDraftSafety('players_view');
+            assertEmptyOrConfirmedRoster('players_view');
+            assertOwnedClock('players_view');
+            if (Date.now() - detectedAt >= PANEL_BUDGET_MS) throw new Error('panel_ready_budget_exhausted');
+          }
+        }
+      }
       let fallbackReason = null;
       if (["TEST", "REAL"].includes(executionMode)) {
         // At a snake endpoint there is no opponent turn in which to rediscover.
@@ -1740,6 +1806,9 @@
         const turn = turnSignal?.state === "OWNED" ? turnSignal.turn : null;
         if (!turn) {
           try {
+            if (executionMode === "MOCK" && turnSignal?.state === "OFF_TURN") {
+              observePublicView();
+            }
             if (["TEST", "REAL"].includes(executionMode) && discoveryRound !== picks.length + 1) {
               busy = true;
               await discoverViews();
