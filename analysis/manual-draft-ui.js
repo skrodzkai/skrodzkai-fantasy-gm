@@ -76,7 +76,6 @@ function selectOpponent(card){
  for(const pos of SCOUT_POSITIONS){const summary=timingWindow(card,pos,historyLimit),row=text('tr','');row.append(text('td',pos),text('td',summary.missing?'Unavailable':summary.median===null?'—':`R${summary.median}`,'median num'));for(const year of recent){const value=(card.specialty[pos].history??card.specialty[pos].recent).find(x=>x.season===year);row.append(text('td',value?.round==null?'—':`R${value.round}`,'num'));}body.append(row);}table.append(body);const wrap=text('div','','scout-table-wrap');wrap.append(table);panel.append(wrap,text('p',orderContext(card,Number($('planningRound').value)),'order-context'));
 }
 function renderCards(){
- $('opponentCount').textContent=`${opponents.length} opponents`;
  $('opponentTeams').replaceChildren(...opponents.map(card=>{const b=text('button','','team-card');b.dataset.teamId=card.teamId;b.setAttribute('aria-controls','opponentDetail');b.setAttribute('aria-pressed','false');b.append(text('small',`${card.managerId}${order[card.managerId]?` · Seat ${order[card.managerId]}`:''}`),text('strong',card.teamName),text('span',opponentSummary(card).headline));b.onclick=()=>selectOpponent(card);return b;}));
  if(selected)selectOpponent(selected);
 }

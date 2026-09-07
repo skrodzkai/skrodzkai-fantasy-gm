@@ -73,6 +73,8 @@ test('compact visual contract: shared tier colors, centered scouting, controls a
  for(const [tier,rgb]of [[1,'65,192,132'],[2,'41,182,255'],[3,'228,197,68'],[4,'232,143,59'],[5,'225,89,105']])assert(html.includes(`[data-tier="${tier}"]{--tier-rgb:${rgb}}`));
  assert(html.includes('.tier-box.scarce{border-color:var(--red)'));assert(html.includes('.scout-table th,.scout-table td{text-align:center'));assert(html.includes('.scout-table td:nth-child(even)'));assert(html.includes('.board-table td:not(.namecell){width:1%}'));
  for(const removed of ['class="receipt"','class="round-card"','<pre','Captured board — no live availability claim.','Five strongest values in a plausible','Data status check due. These are saved'])assert(!html.includes(removed),removed);
+ assert(!html.includes('opponentCount'));assert(markup.indexOf('class="scout-layout"')<markup.indexOf('class="section-heading"'));
+ assert(html.includes('.scout-detail{grid-column:2;grid-row:1 / span 2;'));assert(html.includes('.scout-table td{height:38px}'));assert(html.includes('.scout-detail{grid-column:1;grid-row:auto;'));
 });
 test('12 seats by 19 rounds produce five value-ordered alternatives without blocked or drafted players',()=>{
  for(let seat=1;seat<=12;seat++)for(let round=1;round<=19;round++){const targets=roundTargets(packet,seat,round);assert.equal(targets.length,5);assert(targets.every((p,i)=>i===0||targets[i-1].vor>=p.vor));}
