@@ -49,8 +49,14 @@
   }
   function resolveDefenses(observation,players){
     for(const pick of observation.picks)if(!pick.yahooId){
-      const matches=players.filter(p=>p.position==='DEF'&&p.name===pick.name);
-      if(matches.length!==1)throw Error(`Defense identity unresolved: ${pick.name} (${pick.defense})`);
+      // Yahoo's team link may display the nickname or city + nickname. Remove
+      // only the exact city prefix carried by that link, never a fuzzy suffix.
+      const normalize=root.SKRODZKaiYahooPageReaders.normalize;
+      const city=normalize(pick.defense);
+      const nickname=name=>{const value=normalize(name);return city&&value.startsWith(`${city} `)?value.slice(city.length+1):value;};
+      const name=nickname(pick.name);
+      const matches=players.filter(p=>p.position==='DEF'&&name&&nickname(p.name)===name);
+      if(matches.length!==1||!/^\d+$/.test(matches[0].yahooId))throw Error(`Defense identity unresolved: ${pick.name} (${pick.defense})`);
       pick.yahooId=matches[0].yahooId;
     }
     return observation;

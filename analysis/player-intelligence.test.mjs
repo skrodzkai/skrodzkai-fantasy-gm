@@ -118,7 +118,45 @@ test("joint replacement reassigns multi-position players across flex and IDP slo
     ],
   });
   assert.equal(result.assignments.length, 10);
-  assert.deepEqual(result.replacementBySlot, { WR: 90, "W/R/T": 75, D: 50, DB: 45, LB: 48, CB: 45, S: 45 });
+  assert.deepEqual(result.replacementBySlot, { WR: 75, "W/R/T": 75, D: 50, DB: 45, LB: 48, CB: 45, S: 45 });
+});
+
+test("replacement is the optimal-total marginal, not the cheapest arbitrarily assigned starter", () => {
+  const players = [
+    {playerId:'a',position:'RB',consensusPoints:100},
+    {playerId:'b',position:'RB',consensusPoints:95},
+    {playerId:'c',position:'RB',consensusPoints:80},
+    {playerId:'d',position:'WR',consensusPoints:90},
+  ];
+  for (const rosterSlots of [['RB','W/R/T'],['W/R/T','RB']]) {
+    for (const rows of [players,[...players].reverse(),[players[2],players[3],players[0],players[1]]]) {
+      const result=deriveJointReplacementLevels({players:rows,teamCount:2,rosterSlots});
+      assert.equal(result.replacementBySlot.RB,80);
+      assert.equal(result.replacementBySlot['W/R/T'],80);
+    }
+  }
+});
+
+test("replacement marginals agree with exhaustive offensive and IDP reallocations, including ties and negatives", () => {
+  const accepts=(slot,p)=>slot==='W/R/T'?['RB','WR','TE'].includes(p.position):slot==='D'?['LB','DB','DL'].includes(p.position):p.eligible.includes(slot);
+  const best=(players,slots,used=new Set(),index=0)=>{
+    if(index===slots.length)return 0;
+    let score=-Infinity;
+    players.forEach((p,i)=>{if(!used.has(i)&&accepts(slots[index],p)){used.add(i);score=Math.max(score,p.consensusPoints+best(players,slots,used,index+1));used.delete(i);}});
+    return score;
+  };
+  for(const [positions,rosterSlots]of [[['RB','WR','TE'],['RB','W/R/T']],[['DB','LB','DL'],['DB','D']]]) {
+    for(let sample=0;sample<24;sample++){
+      const players=Array.from({length:7},(_,i)=>({playerId:String(i),position:positions[i%3],eligible:[positions[i%3]],consensusPoints:((i*17+sample*11)%37)-8}));
+      if(sample%2===0)players[1].eligible.push(positions[0]);
+      const slots=rosterSlots.flatMap(s=>[s,s]),total=best(players,slots);
+      for(const rows of [players,[...players].reverse()]){
+        const result=deriveJointReplacementLevels({players:rows,teamCount:2,rosterSlots});
+        assert.equal(result.assignments.reduce((n,p)=>n+p.points,0),total);
+        for(const slot of rosterSlots){const reduced=[...slots];reduced.splice(reduced.indexOf(slot),1);assert.equal(result.replacementBySlot[slot],total-best(players,reduced),`${sample}: ${slot}`);}
+      }
+    }
+  }
 });
 
 test("derives replacement ranks while exposing every roster-share assumption", () => {

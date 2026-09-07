@@ -143,6 +143,28 @@ function addFlowEdge(graph, from, to, capacity, cost, metadata = null) {
   graph[to].push(reverse);
 }
 
+function residualDistances(graph, start) {
+  const distance = Array(graph.length).fill(Infinity);
+  const parentNode = Array(graph.length).fill(-1);
+  const parentEdge = Array(graph.length).fill(-1);
+  distance[start] = 0;
+  for (let pass = 0; pass < graph.length - 1; pass += 1) {
+    let changed = false;
+    for (let node = 0; node < graph.length; node += 1) {
+      if (!Number.isFinite(distance[node])) continue;
+      graph[node].forEach((edge, edgeIndex) => {
+        if (edge.capacity <= 0 || distance[node] + edge.cost >= distance[edge.to]) return;
+        distance[edge.to] = distance[node] + edge.cost;
+        parentNode[edge.to] = node;
+        parentEdge[edge.to] = edgeIndex;
+        changed = true;
+      });
+    }
+    if (!changed) break;
+  }
+  return { distance, parentNode, parentEdge };
+}
+
 /**
  * Jointly fills every league starter slot. Residual edges allow an already
  * assigned multi-position player to move when that produces a better global
@@ -182,24 +204,7 @@ export function deriveJointReplacementLevels({ players, teamCount, rosterSlots, 
   const requestedFlow = Object.values(slotCounts).reduce((sum, count) => sum + count, 0);
   let flow = 0;
   while (flow < requestedFlow) {
-    const distance = Array(graph.length).fill(Infinity);
-    const parentNode = Array(graph.length).fill(-1);
-    const parentEdge = Array(graph.length).fill(-1);
-    distance[source] = 0;
-    for (let pass = 0; pass < graph.length - 1; pass += 1) {
-      let changed = false;
-      for (let node = 0; node < graph.length; node += 1) {
-        if (!Number.isFinite(distance[node])) continue;
-        graph[node].forEach((edge, edgeIndex) => {
-          if (edge.capacity <= 0 || distance[node] + edge.cost >= distance[edge.to]) return;
-          distance[edge.to] = distance[node] + edge.cost;
-          parentNode[edge.to] = node;
-          parentEdge[edge.to] = edgeIndex;
-          changed = true;
-        });
-      }
-      if (!changed) break;
-    }
+    const { parentNode, parentEdge } = residualDistances(graph, source);
     if (parentNode[sink] < 0) break;
     for (let node = sink; node !== source; node = parentNode[node]) {
       const edge = graph[parentNode[node]][parentEdge[node]];
@@ -217,9 +222,13 @@ export function deriveJointReplacementLevels({ players, teamCount, rosterSlots, 
     }
   });
   const replacementBySlot = {};
-  for (const slot of slotNames) {
-    const points = assignments.filter((entry) => entry.slot === slot).map((entry) => entry.points);
-    replacementBySlot[slot] = points.length ? Math.min(...points) : null;
+  for (const [index, slot] of slotNames.entries()) {
+    // Remove one filled slot and optimally reassign the remaining players.
+    // The cheapest residual path back to source is the points sacrificed by
+    // reducing this slot's capacity by one, independent of the chosen matching.
+    const marginal = residualDistances(graph, firstSlot + index).distance[source];
+    if (!Number.isFinite(marginal)) throw new Error(`replacement marginal unavailable for ${slot}`);
+    replacementBySlot[slot] = marginal;
   }
   if (replacementBySlot.DB != null) {
     replacementBySlot.CB ??= replacementBySlot.DB;

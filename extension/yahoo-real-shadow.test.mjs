@@ -142,23 +142,68 @@ test("REAL row mismatches quarantine only exact IDs and subtract availability be
   assert.equal(helpers.buildSnapshot(f.input).recommendations.length,0,"fewer than five legal IDs still halts advice");
 });
 
-test("REAL roster overlap halts even when that row also mismatches identity", () => {
+test("REAL confirmed roster overlap is quarantined, never recommended, even with a row mismatch", () => {
   const f = advisoryFixture({ownedIds:["101"]});
   f.rows[0].node.innerText = "Player 0\nWR\nSEA";
   const result = helpers.buildSnapshot(f.input);
-  assert.equal(result.shadow.adviceError, "real_roster_available_overlap");
-  assert.equal(result.recommendations.length, 0);
-  assert.equal(result.shadow.quarantinedPlayers.length, 0);
+  assert.equal(result.shadow.adviceError, null);
+  assert.equal(result.recommendations.length, 5);
+  assert.ok(result.recommendations.every(p=>p.yahooId!=="101"));
+  assert.equal(result.shadow.quarantinedPlayers[0].reason, "real_roster_available_overlap");
+  assert.equal(result.context.armed,false);
 });
 
-test("REAL quarantine count survives a later roster-overlap halt", () => {
+test("REAL overlap and identity quarantines both subtract availability and retain the minimum-target gate", () => {
   const f = advisoryFixture({ownedIds:["102"]});
   f.rows[0].node.innerText = "Player 0\nWR\nSEA";
   const result = helpers.buildSnapshot(f.input);
-  assert.equal(result.shadow.adviceError, "real_roster_available_overlap");
+  assert.equal(result.shadow.adviceError, "fewer_than_5_eligible_targets");
   assert.equal(result.recommendations.length, 0);
-  assert.equal(result.shadow.availablePlayerCount, 5);
-  assert.deepEqual(Array.from(result.shadow.quarantinedPlayers, row => row.yahooId), ["101"]);
+  assert.equal(result.shadow.availablePlayerCount, 4);
+  assert.deepEqual(Array.from(result.shadow.quarantinedPlayers, row => row.yahooId), ["101","102"]);
+});
+
+test("REAL unmodelled roster identity preserves visible reference values without inventing optimizer inputs", () => {
+  const f=advisoryFixture({ownedIds:["999"]});
+  const result=helpers.buildSnapshot(f.input);
+  assert.equal(result.shadow.adviceError,"real_roster_model_incomplete");
+  assert.equal(result.shadow.decision,null);
+  assert.deepEqual(Array.from(result.shadow.unmodelledRosterIds),["999"]);
+  assert.equal(result.roster[0].player.yahooId,"999");
+  assert.equal(result.roster[0].player.projection,undefined);
+  assert.equal(result.roster[0].player.eligible,undefined);
+  assert.equal(result.recommendations.length,5);
+  assert.ok(result.recommendations.every(p=>p.confidence==='ROSTER MODEL INCOMPLETE'&&p.reason.includes('not roster-adjusted')));
+  assert.match(result.ladderState,/BOARD VALUE ONLY/);
+  assert.match(result.warnings[0].text,/999/);
+  assert.equal(result.controls.arm.disabled,true);
+  f.input.settings=null;
+  assert.equal(helpers.buildSnapshot(f.input).recommendations.length,0);
+});
+
+test("REAL unmodelled roster overlap and malformed visible rows never enter reference targets",()=>{
+  const f=advisoryFixture({ownedIds:["999"]});
+  f.rows[0].node.getAttribute=()=>"999";
+  f.rows[1].node.innerText="Player 1\nWR\nSEA";
+  f.players[2].manualEligible=false;
+  const result=helpers.buildSnapshot(f.input);
+  assert.ok(result.recommendations.length>0);
+  assert.ok(result.recommendations.every(p=>!["999","102","103"].includes(p.yahooId)));
+  assert.equal(result.shadow.decision,null);
+  assert.equal(result.shadow.quarantinedPlayers.length,2);
+});
+
+test("REAL off-turn progress uses the observed general banner without granting ownership",()=>{
+  const f=advisoryFixture();
+  f.document.title="Live NFL Draft";
+  f.document.body.innerText="YOUR TEAM (0/19)\nYOUR QUEUE IS EMPTY\nOpponent's Pick • You're up in 2 Picks • Round 1, Pick 4";
+  const result=helpers.buildSnapshot(f.input);
+  assert.equal(result.context.pick,4);
+  assert.equal(result.context.round,1);
+  assert.equal(result.between.currentPick,4);
+  assert.equal(result.context.ownedTurn,false);
+  assert.equal(result.context.armed,false);
+  assert.equal(result.controls.arm.disabled,true);
 });
 
 test("REAL visible-pool advice labels unmodelled rows and accepts Yahoo name abbreviations", () => {

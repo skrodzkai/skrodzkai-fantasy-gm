@@ -81,6 +81,17 @@
     return match ? { label: `R${match[1]}P${match[2]}`, round: Number(match[1]), pick: Number(match[2]) } : null;
   }
 
+  function readCurrentPick(documentRef) {
+    // Observed off-turn header: "<manager>'s Pick • You're up in 2 Picks •
+    // Round 19, Pick 217" (Aug 23 capture). Pick is already the overall pick.
+    const matches = textLines(draftSurfaceText(documentRef))
+      .map(line => line.match(/(?:^| • )ROUND (\d+), PICK (\d+)$/i)).filter(Boolean);
+    if (matches.length !== 1) return null;
+    const round = Number(matches[0][1]), pick = Number(matches[0][2]);
+    if (!Number.isInteger(pick) || round < 1 || round > 19 || Math.ceil(pick / 12) !== round) return null;
+    return { round, pick };
+  }
+
   function readOwnedTurnState(documentRef) {
     const titleOwned = String(documentRef.title ?? "").startsWith("YOUR TURN");
     const banners = textLines(draftSurfaceText(documentRef))
@@ -261,7 +272,7 @@
   }
 
   root.SKRODZKaiYahooPageReaders = Object.freeze({
-    normalize, textLines, draftSurfaceText, parseRoom, parseRosterCount, readRosterCount, parseRosterSlots, scoringTableErrors, readOwnedTurn, readOwnedTurnState,
+    normalize, textLines, draftSurfaceText, parseRoom, parseRosterCount, readRosterCount, parseRosterSlots, scoringTableErrors, readOwnedTurn, readOwnedTurnState, readCurrentPick,
     buttonText, readAutodraftState, isAutodraftActive, readQueueState, readDraftClock,
     isVisible, blockers, readPlayerRow, readAvailablePlayerRows, readDiscoveryRows, readProjectedOrder, readTeamRosterPlayerIds, boardHealthReceipt, boardHealthGate,
   });
