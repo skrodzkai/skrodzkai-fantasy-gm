@@ -150,7 +150,7 @@ test("fresh REVIEW specialists remain visible for manual selection while blocked
     manualEligible: true,
     validationStatus: "INJURY_REVIEW",
     availabilityAssumption: "MANUAL_REVIEW_ASSUMES_AVAILABLE_EXCEPT_BYE",
-    injury: { status:"QUESTIONABLE", draftAction:"REVIEW", conflict:false, evidence:[{ fresh:true, sourceKind:"yahoo" }] },
+    injury: { status:"QUESTIONABLE", draftAction:"REVIEW", conflict:false, availabilityStatus:"UNSPECIFIED", evidence:[{ fresh:true, sourceKind:"yahoo" },{fresh:true,sourceKind:"reported_news",narrativeOnly:true,publishedAt:"2026-09-02",note:"Returned to practice.",draftImpact:"Wait for clearance.",sourceUrl:"https://example.com/report"}] },
   });
   kickers.push(player("K", 13, {
     automaticEligible: false,
@@ -172,13 +172,17 @@ test("fresh REVIEW specialists remain visible for manual selection while blocked
   assert.equal(review.manualEligible, true);
   assert.equal(review.automaticEligible, false);
   assert.equal(review.injury.draftAction, "REVIEW");
+  assert.equal(review.injury.availabilityStatus, "UNSPECIFIED");
+  assert.equal(review.injury.evidence[1].publishedAt, "2026-09-02");
+  assert.equal(review.injury.evidence[1].narrativeOnly, true);
+  assert.equal(review.injury.evidence[1].draftImpact, "Wait for clearance.");
   assert.equal(review.availabilityAssumption, "MANUAL_REVIEW_ASSUMES_AVAILABLE_EXCEPT_BYE");
   assert.equal(board.kickers.some((entry) => entry.yahooId === "K-13"), false);
 });
 
 test("eligible-player injury coverage uses the bye denominator and missing evidence fails closed", () => {
   const offense = Array.from({ length: 100 }, (_, index) => player("RB", index + 1));
-  offense[0].injury = null;
+  offense[0].injury = {draftAction:'REVIEW',evidence:[{fresh:true,sourceKind:'reported_news',narrativeOnly:true}]};
   const board = extensionBoardFromV5({
     generatedAt: "2026-08-27T00:00:00Z",
     projectionHorizon: "WEEKS_1_17",

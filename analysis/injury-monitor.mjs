@@ -16,6 +16,7 @@ const STATUS_PRIORITY = Object.freeze({
 });
 
 const SOURCE_PRIORITY = Object.freeze({
+  reported_news: 0,
   nfl_official: 4,
   team_official: 3,
   yahoo: 2,
@@ -69,11 +70,22 @@ export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36, maxAgeHour
       throw new Error("every injury report requires playerId, sourceId, and a supported sourceKind");
     }
     const observedAt = parseTimestamp(report.observedAt, `report ${sourceId} observedAt`);
+    const narrativeOnly = report.sourceKind === "reported_news";
+    if (narrativeOnly && (!report.note || !report.sourceUrl ||
+        report.status != null || report.expectedGamesThroughWeek17 != null || report.unavailableWeeks?.length)) {
+      throw new Error(`report ${sourceId} news requires dated linked narrative, not a status or availability override`);
+    }
+    if (report.publishedAt && parseTimestamp(report.publishedAt, `report ${sourceId} publishedAt`) > observedAt) {
+      throw new Error(`report ${sourceId} publication is after observation`);
+    }
     const ageHours = (now - observedAt) / 3_600_000;
     const normalized = {
       playerId,
       sourceId,
       sourceKind,
+      narrativeOnly,
+      publishedAt: report.publishedAt ?? null,
+      draftImpact: report.draftImpact ? String(report.draftImpact) : null,
       sourcePriority: SOURCE_PRIORITY[sourceKind],
       observedAt: report.observedAt,
       ageHours,
@@ -99,7 +111,8 @@ export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36, maxAgeHour
   }
 
   const players = [...grouped.entries()].map(([playerId, playerReports]) => {
-    const freshReports = playerReports.filter((report) => report.fresh);
+    // News explains the flag; it cannot clear it or invent missed games.
+    const freshReports = playerReports.filter((report) => report.fresh && !report.narrativeOnly);
     const ordered = [...freshReports].sort(
       (left, right) =>
         right.sourcePriority - left.sourcePriority ||
@@ -193,14 +206,14 @@ export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36, maxAgeHour
 
   const expectedSet = new Set(expectedIds);
   const freshChecked = new Set(players
-    .filter((player) => player.evidence.some((report) => report.fresh))
+    .filter((player) => player.evidence.some((report) => report.fresh && !report.narrativeOnly))
     .map((player) => player.playerId)
     .filter((playerId) => expectedSet.size === 0 || expectedSet.has(playerId)));
   const sourceKinds = Object.keys(SOURCE_PRIORITY);
   const bySourceKind = Object.fromEntries(sourceKinds.map((sourceKind) => {
     const checked = new Set();
     for (const player of players) {
-      if (player.evidence.some((report) => report.fresh && report.sourceKind === sourceKind)) checked.add(player.playerId);
+      if (player.evidence.some((report) => report.fresh && !report.narrativeOnly && report.sourceKind === sourceKind)) checked.add(player.playerId);
     }
     return [sourceKind, {
       checkedPlayers: expectedSet.size ? [...checked].filter((playerId) => expectedSet.has(playerId)).length : checked.size,

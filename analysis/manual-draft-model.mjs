@@ -54,11 +54,26 @@ export function healthMarker(p) {
 export function injuryNotes(p) {
   const injury=p.injury;
   if (!injury) return 'Injury details unavailable. Availability has not been confirmed.';
-  const lines=[`Status: ${injury.status??'UNKNOWN'}`,`Injury: ${(injury.bodyParts??[]).join(', ')||'Body part not supplied'}`];
-  const returns=(injury.reportedReturns??[]).filter(Boolean);
-  lines.push(`Expected return: ${returns.length?returns.join('; '):'Not confirmed by these sources'}`);
-  lines.push(`Draft impact: ${injury.draftAction==='CLEAR'?'No injury restriction in this snapshot.':injury.blockReason||'Review current availability before drafting.'}`);
-  for (const e of injury.evidence??[]) lines.push(`\n${e.sourceId??'Source'} · ${e.observedAt??'Date unavailable'}${e.fresh===false?' · STALE':''}\n${[e.status,e.bodyPart,e.practice,e.reportedReturn,e.note].filter(Boolean).join(' · ')||'No narrative supplied.'}${e.sourceUrl?`\n${e.sourceUrl}`:''}`);
+  const evidence=injury.evidence??[];
+  const news=evidence.filter(e=>e.narrativeOnly && e.fresh===true && e.note)
+    .sort((a,b)=>Date.parse(b.publishedAt??b.observedAt)-Date.parse(a.publishedAt??a.observedAt))[0];
+  const lines=[];
+  if(news){
+    lines.push(`Latest researched update · ${news.publishedAt??`publication date unavailable; checked ${news.observedAt}`}`,news.note);
+    if(news.reportedReturn)lines.push(`Availability: ${news.reportedReturn}`);
+    if(news.draftImpact)lines.push(`Draft takeaway (analysis): ${news.draftImpact}`);
+  } else if(injury.draftAction!=='CLEAR') lines.push('No current researched update attached. The status flag alone does not establish severity or missed games.');
+  lines.push(`\nFeed status: ${injury.status??'UNKNOWN'}`);
+  const body=(injury.bodyParts??[]).filter(x=>!/^undisclosed$/i.test(x));
+  if(!news && body.length)lines.push(`Reported area: ${body.join(', ')}`);
+  if(!news)lines.push(`Expected return: ${(injury.reportedReturns??[]).join('; ')||'Not confirmed by these sources'}`);
+  if(Number.isFinite(p.expectedGamesThroughWeek17))lines.push(`Points use ${p.expectedGamesThroughWeek17} expected games through Week 17 (bye excluded).`);
+  lines.push(injury.availabilityStatus==='EXPLICIT'
+    ? 'Availability adjustment: explicit reported estimate or missed weeks is applied.'
+    : 'No researched injury-specific missed-game adjustment is applied. Source projections may already embed health or role assumptions; the news note does not change points.');
+  if(injury.conflict)lines.push('Sources conflict; availability remains unresolved.');
+  if(injury.draftAction!=='CLEAR')lines.push('Automatic selection remains blocked.');
+  for (const e of evidence) lines.push(`\n${e.sourceId??'Source'} · reported ${e.publishedAt??'date not supplied'} · checked ${e.observedAt??'Date unavailable'}${e.fresh===false?' · STALE':''}\n${[e.narrativeOnly?null:e.status,e.bodyPart,e.practice,e.reportedReturn,e.note].filter(Boolean).join(' · ')||'No narrative supplied.'}${e.sourceUrl?`\n${e.sourceUrl}`:''}`);
   if (!(injury.evidence?.length)) lines.push(`Last checked: ${injury.freshestAt??'Unavailable'}; source narrative unavailable.`);
   return lines.join('\n');
 }

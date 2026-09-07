@@ -393,7 +393,7 @@ export function assembleV5Board({
   const injuryBoard = compileInjuryBoard({
     reports,
     asOf,
-    maxAgeHoursBySourceKind: { yahoo: 6, sleeper: 24, nfl_official: 24, team_official: 24 },
+    maxAgeHoursBySourceKind: { yahoo: 6, sleeper: 24, nfl_official: 24, team_official: 24, reported_news: 24 },
     expectedPlayerIds: yahooRows.map((player) => String(player.yahooId)),
   });
   const injuryByPlayer = new Map(injuryBoard.players.map((player) => [player.playerId, player]));
@@ -412,7 +412,7 @@ export function assembleV5Board({
       splitDualRoleIdentities.has(identityKey(player.name, player.team)) ||
       (player.eligible.some((position) => ["QB", "RB", "WR", "TE"].includes(position)) &&
       player.eligible.some((position) => ["DL", "LB", "DB", "CB", "S", "D"].includes(position)));
-    const freshInjuryEvidence = injury.evidence.some((entry) => entry?.fresh === true);
+    const freshInjuryEvidence = injury.evidence.some((entry) => entry?.fresh === true && !entry.narrativeOnly);
     const manualHealthEligible = injury.draftAction === "CLEAR" ||
       (injury.draftAction === "REVIEW" && injury.conflict !== true && freshInjuryEvidence);
     const reviewedAvailabilityAssumption = injury.draftAction === "REVIEW" && manualHealthEligible ? 16 : null;

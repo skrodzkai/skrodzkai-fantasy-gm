@@ -134,6 +134,7 @@ test("keeps history and market data out of projection evidence", () => {
     yahoo: 6,
     sleeper: 24,
     nfl_official: 24,
+    reported_news: 24,
     team_official: 24,
   });
 });
