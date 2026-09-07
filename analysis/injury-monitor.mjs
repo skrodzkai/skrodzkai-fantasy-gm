@@ -16,6 +16,7 @@ const STATUS_PRIORITY = Object.freeze({
 });
 
 const SOURCE_PRIORITY = Object.freeze({
+  reported_news: 0,
   nfl_official: 4,
   team_official: 3,
   yahoo: 2,
@@ -69,16 +70,27 @@ export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36, maxAgeHour
       throw new Error("every injury report requires playerId, sourceId, and a supported sourceKind");
     }
     const observedAt = parseTimestamp(report.observedAt, `report ${sourceId} observedAt`);
+    const narrativeOnly = sourceKind === "reported_news";
+    if (narrativeOnly && (!report.note || !report.sourceUrl ||
+        report.status != null || report.expectedGamesThroughWeek17 != null || report.unavailableWeeks?.length)) {
+      throw new Error(`report ${sourceId} news requires dated linked narrative, not a status or availability override`);
+    }
+    if (report.publishedAt && parseTimestamp(report.publishedAt, `report ${sourceId} publishedAt`) > observedAt) {
+      throw new Error(`report ${sourceId} publication is after observation`);
+    }
     const ageHours = (now - observedAt) / 3_600_000;
     const normalized = {
       playerId,
       sourceId,
       sourceKind,
+      narrativeOnly,
+      publishedAt: report.publishedAt ?? null,
+      draftImpact: report.draftImpact ? String(report.draftImpact) : null,
       sourcePriority: SOURCE_PRIORITY[sourceKind],
       observedAt: report.observedAt,
       ageHours,
       fresh: ageHours >= 0 && ageHours <= Number(maxAgeHoursBySourceKind[sourceKind] ?? maxAgeHours),
-      status: normalizeStatus(report.status),
+      status: narrativeOnly ? null : normalizeStatus(report.status),
       bodyPart: report.bodyPart ? String(report.bodyPart) : null,
       practice: report.practice ? String(report.practice) : null,
       reportedReturn: report.reportedReturn ? String(report.reportedReturn) : null,
@@ -99,7 +111,8 @@ export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36, maxAgeHour
   }
 
   const players = [...grouped.entries()].map(([playerId, playerReports]) => {
-    const freshReports = playerReports.filter((report) => report.fresh);
+    // News explains the flag; it cannot clear it or invent missed games.
+    const freshReports = playerReports.filter((report) => report.fresh && !report.narrativeOnly);
     const ordered = [...freshReports].sort(
       (left, right) =>
         right.sourcePriority - left.sourcePriority ||
@@ -107,7 +120,9 @@ export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36, maxAgeHour
     );
     const primary = ordered[0] ?? null;
     const freshStatuses = [...new Set(freshReports.map((report) => report.status))];
-    const severityValues = freshStatuses.map((status) => STATUS_PRIORITY[status]);
+    const roleUncertain = freshStatuses.includes('ROLE_UNCERTAIN');
+    // A starting-role hold is not a contradiction between health statuses.
+    const severityValues = freshStatuses.filter(status=>status!=='ROLE_UNCERTAIN').map((status) => STATUS_PRIORITY[status]);
     const statusConflict =
       severityValues.length > 1 && Math.max(...severityValues) - Math.min(...severityValues) >= 2;
     const gamesValues = freshReports
@@ -135,7 +150,9 @@ export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36, maxAgeHour
         draftAction = "EXCLUDE";
         blockReason = "status SUSPENDED without a reported return";
       }
-    } else if (["DOUBTFUL", "HOLDOUT", "QUESTIONABLE", "ROLE_UNCERTAIN", "LIMITED"].includes(worstStatus)) {
+    } else if (roleUncertain) {
+      blockReason = 'starting role unresolved; projection withheld';
+    } else if (["DOUBTFUL", "HOLDOUT", "QUESTIONABLE", "LIMITED"].includes(worstStatus)) {
       blockReason = `manual health decision required for ${worstStatus}`;
     } else if (["ACTIVE", "FULL", "CLEAR"].includes(worstStatus)) {
       draftAction = "CLEAR";
@@ -150,17 +167,18 @@ export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36, maxAgeHour
       executable: draftAction === "CLEAR",
       blockReason,
       conflict,
+      roleUncertain,
       primarySourceId: primary?.sourceId ?? null,
       freshestAt: ordered[0]?.observedAt ?? null,
       bodyParts: [...new Set(freshReports.map((report) => report.bodyPart).filter(Boolean))],
       reportedReturns: [...new Set(freshReports.map((report) => report.reportedReturn).filter(Boolean))],
-      expectedGamesThroughWeek17: conflict
+      expectedGamesThroughWeek17: conflict || roleUncertain
         ? null
         : ordered.find((report) => report.expectedGamesThroughWeek17 != null)?.expectedGamesThroughWeek17 ?? null,
-      unavailableWeeks: conflict
+      unavailableWeeks: conflict || roleUncertain
         ? []
         : ordered.find((report) => report.unavailableWeeks.length)?.unavailableWeeks ?? [],
-      availabilityStatus: conflict
+      availabilityStatus: roleUncertain ? 'ROLE_UNCERTAIN' : conflict
         ? "CONFLICT"
         : ordered.some((report) => report.expectedGamesThroughWeek17 != null || report.unavailableWeeks.length)
           ? "EXPLICIT"
@@ -193,17 +211,18 @@ export function compileInjuryBoard({ reports, asOf, maxAgeHours = 36, maxAgeHour
 
   const expectedSet = new Set(expectedIds);
   const freshChecked = new Set(players
-    .filter((player) => player.evidence.some((report) => report.fresh))
+    .filter((player) => player.evidence.some((report) => report.fresh && !report.narrativeOnly))
     .map((player) => player.playerId)
     .filter((playerId) => expectedSet.size === 0 || expectedSet.has(playerId)));
   const sourceKinds = Object.keys(SOURCE_PRIORITY);
   const bySourceKind = Object.fromEntries(sourceKinds.map((sourceKind) => {
     const checked = new Set();
     for (const player of players) {
-      if (player.evidence.some((report) => report.fresh && report.sourceKind === sourceKind)) checked.add(player.playerId);
+      if (player.evidence.some((report) => report.fresh && !report.narrativeOnly && report.sourceKind === sourceKind)) checked.add(player.playerId);
     }
     return [sourceKind, {
       checkedPlayers: expectedSet.size ? [...checked].filter((playerId) => expectedSet.has(playerId)).length : checked.size,
+      // Narrative count is informational; checkedPlayers deliberately remains zero.
       freshReports: players.reduce((sum, player) => sum + player.evidence.filter((report) => report.fresh && report.sourceKind === sourceKind).length, 0),
     }];
   }));

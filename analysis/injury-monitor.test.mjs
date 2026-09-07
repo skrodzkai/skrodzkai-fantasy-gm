@@ -1,7 +1,39 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import {readFile} from 'node:fs/promises';
 
 import { buildDraftWatchlist, compileInjuryBoard } from "./injury-monitor.mjs";
+test('dated research packet contains 36 distinct narrative profiles and three analyst role holds from official reporting', async()=>{
+  const reports=JSON.parse(await readFile(new URL('./injury-research-20260906.json',import.meta.url),'utf8'));
+  const news=reports.filter(r=>r.sourceKind==='reported_news');
+  assert.equal(news.length,36);assert.equal(new Set(news.map(r=>r.playerId)).size,36);
+  assert(reports.filter(r=>r.status==='ROLE_UNCERTAIN').every(r=>r.note.startsWith('Analyst role-review classification')));
+  for(const row of news){assert(/^\d+$/.test(row.playerId));assert(row.name&&row.draftImpact&&/^https:\/\//.test(row.sourceUrl));}
+  const board=compileInjuryBoard({reports,asOf:'2026-09-07T00:10:00Z'});
+  assert.equal(board.players.filter(p=>p.status==='ROLE_UNCERTAIN').length,3);
+  assert(board.players.every(p=>!p.executable));
+});
+
+test('researched news is dated context, never health clearance or coverage', () => {
+  const news={playerId:'p1',sourceId:'beat-report',sourceKind:'reported_news',publishedAt:'2026-08-22',observedAt:'2026-08-23T10:00:00Z',sourceUrl:'https://example.com/report',note:'Coach expects participation.',reportedReturn:'Week 1 expected, not confirmed.',draftImpact:'Watch the final report.'};
+  const compile=reports=>compileInjuryBoard({reports,asOf:'2026-08-23T12:00:00Z',expectedPlayerIds:['p1']});
+  const only=compile([news]);assert.equal(only.players[0].draftAction,'REVIEW');assert.equal(only.coverage.complete,false);
+  const result=compile([report({status:'Q',sourceKind:'yahoo'}),news]);
+  assert.equal(result.players[0].executable,false);
+  assert.equal(result.players[0].evidence.find(e=>e.narrativeOnly).publishedAt,'2026-08-22');
+  for(const invalid of [{status:'ACTIVE'},{expectedGamesThroughWeek17:16},{unavailableWeeks:[1]},{publishedAt:'2026-08-24'},{sourceUrl:null}])assert.throws(()=>compile([{...news,...invalid}]));
+  assert.equal(compile([report({status:'QUESTIONABLE'}),news]).players[0].conflict,false);
+  const spaced={...news,sourceKind:' reported_news '};
+  assert.throws(()=>compile([{...spaced,status:'ACTIVE'}]));
+  const normalized=compile([spaced]);assert.equal(normalized.coverage.complete,false);assert.equal(normalized.players[0].evidence[0].status,null);
+});
+
+test('role uncertainty is separate from health disagreement and withholds availability consistently',()=>{
+  for(const status of ['CLEAR','ACTIVE','QUESTIONABLE']){
+    const p=compileInjuryBoard({asOf:'2026-08-23T12:00:00Z',reports:[report({status}),report({sourceId:'team',sourceKind:'team_official',status:'ROLE_UNCERTAIN'})]}).players[0];
+    assert.equal(p.roleUncertain,true);assert.equal(p.conflict,false);assert.equal(p.draftAction,'REVIEW');assert.equal(p.expectedGamesThroughWeek17,null);assert.equal(p.availabilityStatus,'ROLE_UNCERTAIN');
+  }
+});
 
 function report(overrides = {}) {
   return {

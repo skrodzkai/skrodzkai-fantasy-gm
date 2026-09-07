@@ -5,6 +5,18 @@ import {renderDesk,validatePacket} from './build-manual-draft-desk.mjs';
 import vm from 'node:vm';
 const input={leagueId:'420010',scoringModel:'fixture',teams:12,rounds:19,health:'FAIL',observedAt:'2026-09-06T05:00:00Z',notice:'Fixture, not current data',players:[{yahooId:'1',name:'One',eligible:['WR'],position:'WR',vor:10,projection:100},{yahooId:'2',name:'Two',eligible:['CB','WR'],position:'CB',vor:20,projection:90}]};
 const packet=validatePacket(input);
+test('researched injury note leads with latest published facts and honest point impact',()=>{
+ const base={sourceId:'reporter',sourceKind:'reported_news',sourceUrl:'https://example.com/report',narrativeOnly:true,observedAt:'2026-09-06T23:00Z',publishedAt:'2026-09-06',fresh:true,note:'Psoas soreness; coach expects Week 1.',reportedReturn:'Week 1 expected, not confirmed.',draftImpact:'Keep on shortlist; check final participation.'};
+ const note=injuryNotes({expectedGamesThroughWeek17:15,injury:{status:'QUESTIONABLE',draftAction:'REVIEW',availabilityStatus:'UNSPECIFIED',evidence:[base,{...base,publishedAt:'2026-09-01',note:'Older update'},{...base,publishedAt:'2026-09-05',fresh:false,note:'Stale update'}]}});
+ assert(note.startsWith('Latest researched update · 2026-09-06\nPsoas'));
+ for(const fact of ['analysis','15 expected games','does not change points','Automatic selection remains blocked','STALE'])assert(note.includes(fact));
+ const stale=injuryNotes({injury:{status:'QUESTIONABLE',draftAction:'REVIEW',evidence:[{...base,fresh:false}]}});assert(!stale.startsWith('Latest researched update'));
+ const undated=injuryNotes({injury:{bodyParts:['Knee'],reportedReturns:['Week 2'],evidence:[{...base,publishedAt:null}]}});
+ for(const fact of ['publication date unavailable','Knee','Week 2','Reported timeline (not confirmed)'])assert(undated.includes(fact));
+ for(const injury of [{roleUncertain:true},{availabilityStatus:'CONFLICT'}]){
+   const withheld=injuryNotes({injury:{...injury,evidence:[base]}});assert(withheld.includes('points withheld'));assert(!withheld.includes('does not change points'));
+ }
+});
 test('all eight columns sort both ways, with missing numeric values always last',async()=>{
  const a={yahooId:'1',name:'Alpha',position:'QB',team:'BUF',projection:10,vor:2,marketAdp:3,bye:4,injury:{status:'DOUBTFUL',draftAction:'REVIEW'}},b={yahooId:'2',name:'Beta',position:'WR',team:'NYJ',projection:20,vor:4,marketAdp:6,bye:8,injury:{status:'QUESTIONABLE',draftAction:'REVIEW'}};
  for(const sort of ['name','position','team','health','points','value','adp','bye']){
