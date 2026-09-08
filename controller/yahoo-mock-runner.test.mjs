@@ -480,7 +480,10 @@ test("filtered rows are not opponent-pick evidence; TEST requires a verified sco
   for (const key of Object.keys(expectedScoring)) assert.equal(helpers.scoringFailure(fixture, { ...expectedScoring, [key]:"wrong" }), "test_board_scoring_identity_mismatch");
 });
 
-function discoveryFixture({ owned = false, missingFilter = false, allUnavailable = false } = {}) {
+function discoveryFixture({ owned = false, missingFilter = false, allUnavailable = false, real = false, clock = 30 } = {}) {
+  const config = real ? api.configs.real_league_19_idp : testConfig;
+  const roomId = real ? "420010" : "542830";
+  const urlTeamId = real ? 7 : 3;
   const board = boardForConfig(testConfig);
   const calls = [];
   let ownedTurn = owned;
@@ -493,28 +496,58 @@ function discoveryFixture({ owned = false, missingFilter = false, allUnavailable
     : select.value === "Kickers" ? player.position === "K" : select.value === "Team Defenses" ? player.position === "DEF" : ["D", "LB", "CB", "S"].includes(player.position));
   const turn = { label:"R1P6", round:1, pick:6 };
   const runtime = {
-    parseRoom:() => ({ roomId:"542830", seat:3 }), readOwnedTurn:() => ownedTurn ? turn : null,
+    parseRoom:() => ({ roomId, seat:urlTeamId }), readOwnedTurn:() => ownedTurn ? turn : null,
     readOwnedTurnState:() => ({ state:ownedTurn ? "OWNED" : "OFF_TURN", turn:ownedTurn ? turn : null }),
     readRosterCount:() => ({ filled:roster, total:19 }), readAutodraftState:() => "INACTIVE", readQueueState:() => queue,
-    readDraftClock:() => ({ label:"00:30", seconds:30 }), readAvailablePlayerRows:players,
+    readDraftClock:() => ({ label:`00:${clock}`, seconds:clock }), readAvailablePlayerRows:players,
   };
   const controller = { runtime, create() { controllerCreated++; return {
     start() { return this; }, stop() {}, getStatus:() => ({ state:"running", confirmedPicks:0 }), exportReceipts:() => [],
   }; } };
-  const api = loadRunner(controller);
-  const environment = { document:{ querySelectorAll:() => [select] }, location:{ pathname:"/draftclient/f1/542830/3" },
+  const runnerApi = loadRunner(controller);
+  const environment = { document:{ querySelectorAll:() => [select] }, location:{ pathname:`/draftclient/f1/${roomId}/${urlTeamId}` },
     localStorage:storageFixture(), crypto, setTimeout, clearTimeout, setInterval, clearInterval,
     Event:class Event { constructor(type) { this.type = type; } }, SKRODZKaiYahooDraftController:controller,
     SKRODZKaiYahooPageReaders:{ readDiscoveryRows:players, readProjectedOrder:() => ({ descending:true }) } };
-  const runner = api.create({ configName:"test_league_19_idp", executionMode:"TEST", expectedRoomId:"542830", expectedSeat:6, expectedUrlSeat:3,
-    observedTeamCount:12, observedRosterSlots:testConfig.rosterSlots, board, replacementBySlot, scoringIdentity:api.configs.test_league_19_idp.expectedScoring,
-    replacementRoster:{teamCount:12,rosterSlots:testConfig.rosterSlots.filter(s=>s!=="BN")},
+  const runner = runnerApi.create({ configName:real ? "real_league_19_idp" : "test_league_19_idp", executionMode:real ? "REAL" : "TEST", expectedRoomId:roomId, expectedSeat:6, expectedUrlSeat:urlTeamId,
+    observedTeamCount:12, observedRosterSlots:config.rosterSlots, board, replacementBySlot, scoringIdentity:config.expectedScoring,
+    replacementRoster:{teamCount:12,rosterSlots:config.rosterSlots.filter(s=>s!=="BN")},
     assertRunnerLease:() => true, runtimeAttestation:{ ok:true, version:"0.17.0", digest:"a".repeat(64), bootId:"synthetic-12345678", bootedAt:1 },
     selectionHoldMs:0, filterDeadlineMs:500,
   }, environment);
   return { runner, calls, select, enterTurn:() => { ownedTurn = true; }, changeQueue:() => { queue = "NONEMPTY_OR_UNKNOWN"; },
-    changeRoster:() => { roster = 1; }, controllers:() => controllerCreated };
+    changeRoster:() => { roster = 1; }, controllers:() => controllerCreated,
+    setClock:value => { clock = value; }, leaveTurn:() => { ownedTurn = false; } };
 }
+
+for (const outcome of ["resume", "timeout", "turn-change"]) test(`REAL stale clock uses the existing 250ms observation window: ${outcome}`, async () => {
+  const f = discoveryFixture({real:true, clock:0});
+  f.runner.start();
+  try {
+    await waitFor(() => f.runner.exportReceipts().filter(r => r.kind === "view_discovered").length === 4);
+    f.calls.length = 0;
+    f.enterTurn();
+    await waitFor(() => f.runner.exportReceipts().some(r => r.kind === "owned_clock_observation_paused"));
+    assert.equal(f.controllers(), 0);
+    assert.equal(f.calls.length, 0);
+    if (outcome === "resume") {
+      f.setClock(30);
+      await waitFor(() => f.controllers() === 1 || f.runner.getStatus().state === "failed");
+      assert.equal(f.controllers(), 1, JSON.stringify(f.runner.getStatus().failure));
+      const resumed = f.runner.exportReceipts().find(r => r.kind === "owned_clock_observation_resumed");
+      const resolved = f.runner.exportReceipts().find(r => r.kind === "runner_turn_resolved");
+      assert.ok(resumed.elapsedMs > 0 && resumed.elapsedMs < 250);
+      assert.ok(resolved.panelReadyMs >= resumed.elapsedMs);
+      assert.equal(resolved.clockAtDecision.seconds, 30);
+    } else {
+      if (outcome === "turn-change") f.leaveTurn();
+      await waitFor(() => f.runner.getStatus().state === "failed");
+      assert.equal(f.runner.getStatus().failure.code, outcome === "timeout" ? "draft_clock_margin_exhausted_at_detection" : "owned_turn_changed_during_clock_read");
+      assert.equal(f.controllers(), 0);
+      assert.equal(f.calls.length, 0);
+    }
+  } finally { f.runner.halt(); }
+});
 
 test("incomplete discovery uses exactly one receipted pre-click All Positions fallback with five fresh targets", async () => {
   const f = discoveryFixture({ owned:true }); f.runner.start();

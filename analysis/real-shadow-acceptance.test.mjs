@@ -36,6 +36,7 @@ test("enabled release completes isolated decision stress but cannot claim disabl
   assert.match(result.boardSourceSha256,/^[a-f0-9]{64}$/);
   assert.equal(result.clockSeconds, 30);
   assert.deepEqual(result.seats.map((seat) => seat.decisions), [19, 19, 19]);
+  assert.ok(result.seats.every((seat) => seat.legalRoster && seat.pass));
   assert.ok(result.seats.every((seat) => seat.idpCount <= 3 && (seat.counts.K ?? 0) <= 1 && (seat.counts.DEF ?? 0) <= 1));
   assert.ok(result.seats.every((seat) => seat.attachChecks.every((check) => check.pass)));
 });
