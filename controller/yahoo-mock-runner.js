@@ -3,7 +3,7 @@
 
   const VERSION = "2.3.0";
   // Release-owned gate. Never read activation from page, storage or operator input.
-  const REAL_EXECUTION_ENABLED = false;
+  const REAL_EXECUTION_ENABLED = true;
   const GLOBAL_KEY = "__skrodzkaiYahooMockRunnerV1";
   const RECEIPT_KEY = "skrodzkai-yahoo-mock-runner-receipts-v1";
   const OFFENSE = ["QB", "RB", "WR", "TE"];
@@ -882,20 +882,41 @@
     // not every player pair. This removes the repeated slot loops that exceeded
     // 1s in the full fresh-board rehearsal, without removing any alternative.
     const pairExclusions = new Map();
+    // Pair lineup utility is symmetric. The profiled full-board decision spent
+    // most of its time evaluating both A+B and B+A; reuse only this decision's
+    // exact result. NaN leaves zero-point pairs cacheable as well.
+    const pairUtilities = new Float64Array(entries.length * entries.length);
+    pairUtilities.fill(NaN);
+    entries.forEach((entry, index) => {
+      entry.pairIndex = index;
+      entry.identityKey = rosterIdentityKey(entry.player);
+    });
     const utilityWithPair = (leftEntry, rightEntry) => {
+      const pairIndex = Math.min(leftEntry.pairIndex, rightEntry.pairIndex) * entries.length + Math.max(leftEntry.pairIndex, rightEntry.pairIndex);
+      if (!Number.isNaN(pairUtilities[pairIndex])) return pairUtilities[pairIndex];
       const key = `${leftEntry.feasibilityKey}|${rightEntry.feasibilityKey}`;
       let exclusions = pairExclusions.get(key);
       if (!exclusions) {
-        exclusions = periodContexts.map((context) => {
+        const values = periodContexts.map((context) => {
           let best = Number.NEGATIVE_INFINITY;
           for (const left of leftEntry.slotIndexes) for (const right of rightEntry.slotIndexes) {
             if (left !== right) best = Math.max(best, context.utilityWithoutPair(left, right));
           }
           return best;
         });
+        exclusions = { values, additive:values.every((value, index) => value === periodContexts[index].baseUtility) };
         pairExclusions.set(key, exclusions);
       }
-      return periodContexts.reduce((total, context, contextIndex) => {
+      // The reproduced R17 pool had three empty IDP slots. If excluding two
+      // distinct eligible slots loses no existing lineup value in ANY week,
+      // both players contribute their full single-player gains independently.
+      // This avoids the profiled week/group loop without dropping any option.
+      if (exclusions.additive) {
+        const utility = leftEntry.utilityAfter + rightEntry.utilityAfter - baseUtility;
+        pairUtilities[pairIndex] = utility;
+        return utility;
+      }
+      const utility = periodContexts.reduce((total, context, contextIndex) => {
         // Intersect the already-grouped week sets instead of allocating and
         // string-keying a new 17-week Map for every pair. This is exact even
         // when the two players have different byes or weekly point profiles.
@@ -908,12 +929,14 @@
             const periodUtility = Math.max(context.baseUtility,
               leftEntry.contextValueGroups[contextIndex].withoutCandidate + leftGroup.value,
               rightEntry.contextValueGroups[contextIndex].withoutCandidate + rightGroup.value,
-              exclusions[contextIndex] + leftGroup.value + rightGroup.value);
+              exclusions.values[contextIndex] + leftGroup.value + rightGroup.value);
             total += periodUtility * count;
           }
         }
         return total;
       }, 0);
+      pairUtilities[pairIndex] = utility;
+      return utility;
     };
     const remainingAfterPair = config.rounds - Array.from(picks ?? []).length - 2;
     const currentEntries = entries.filter((entry) => automaticCandidateAllowed({ player: entry.player, round, picks, config }));
@@ -952,7 +975,7 @@
       // let same-position leaders hide complementary starters. Keep the full
       // survival chain: low-survival leaders must not discard the remaining mass.
       const alternatives = nextOptions
-        .filter(({ candidate }) => candidate !== entry && !sameRosterIdentity(candidate.player, entry.player))
+        .filter(({ candidate }) => candidate !== entry && !(candidate.identityKey && candidate.identityKey === entry.identityKey))
         .map(({ candidate, lineupMultiplier, benchOpportunityValue }) => ({
           player:candidate.player,
           pAvailableNext:candidate.pAvailableNext,
@@ -1674,10 +1697,11 @@
       assertEmptyOrConfirmedRoster("owned_turn");
       let filterLabel = filterLabelForRound(turn.round, picks, config, expectedSeat);
       // Public mock 10979161 failed at R3P35 before any mutation while the
-      // following status frame showed 00:30. Let the turn/clock DOM settle
+      // following status frame showed 00:30. REAL uses the same turn/clock DOM.
+      // Let both settle
       // under the existing 250ms observation window, not a new pick budget.
       let clockAtDecision = controllerApi.runtime.readDraftClock(documentRef);
-      if (executionMode === "MOCK" && (!clockAtDecision || clockAtDecision.seconds < MINIMUM_OWNED_CLOCK_SECONDS)) {
+      if (["MOCK", "REAL"].includes(executionMode) && (!clockAtDecision || clockAtDecision.seconds < MINIMUM_OWNED_CLOCK_SECONDS)) {
         receipt("owned_clock_observation_paused", { turn:turn.label, clock:clockAtDecision, maximumMs:250 });
         do {
           await delay(25);
