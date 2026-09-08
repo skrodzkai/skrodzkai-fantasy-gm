@@ -897,14 +897,24 @@
       const key = `${leftEntry.feasibilityKey}|${rightEntry.feasibilityKey}`;
       let exclusions = pairExclusions.get(key);
       if (!exclusions) {
-        exclusions = periodContexts.map((context) => {
+        const values = periodContexts.map((context) => {
           let best = Number.NEGATIVE_INFINITY;
           for (const left of leftEntry.slotIndexes) for (const right of rightEntry.slotIndexes) {
             if (left !== right) best = Math.max(best, context.utilityWithoutPair(left, right));
           }
           return best;
         });
+        exclusions = { values, additive:values.every((value, index) => value === periodContexts[index].baseUtility) };
         pairExclusions.set(key, exclusions);
+      }
+      // The reproduced R17 pool had three empty IDP slots. If excluding two
+      // distinct eligible slots loses no existing lineup value in ANY week,
+      // both players contribute their full single-player gains independently.
+      // This avoids the profiled week/group loop without dropping any option.
+      if (exclusions.additive) {
+        const utility = leftEntry.utilityAfter + rightEntry.utilityAfter - baseUtility;
+        pairUtilities[pairIndex] = utility;
+        return utility;
       }
       const utility = periodContexts.reduce((total, context, contextIndex) => {
         // Intersect the already-grouped week sets instead of allocating and
@@ -919,7 +929,7 @@
             const periodUtility = Math.max(context.baseUtility,
               leftEntry.contextValueGroups[contextIndex].withoutCandidate + leftGroup.value,
               rightEntry.contextValueGroups[contextIndex].withoutCandidate + rightGroup.value,
-              exclusions[contextIndex] + leftGroup.value + rightGroup.value);
+              exclusions.values[contextIndex] + leftGroup.value + rightGroup.value);
             total += periodUtility * count;
           }
         }

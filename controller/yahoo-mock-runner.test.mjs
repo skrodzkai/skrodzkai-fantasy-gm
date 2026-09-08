@@ -375,6 +375,28 @@ test("grouped weekly scoring matches the ungrouped exact lineup reference", () =
   }
 });
 
+test("late empty IDP slots match independent weekly pair assignments", () => {
+  const config = api.configs.real_league_19_idp;
+  const make = (position, index) => player(position, index, index + 1, {
+    weeklyPoints:Array.from({length:17}, (_, week) => week === index % 17 ? 0 : 12 + index / 10),
+  });
+  const picks = helpers.validateBoard(["QB","RB","RB","RB","WR","WR","TE","WR","WR","WR","RB","TE","QB","RB","K","DEF"].map(make));
+  const pool = helpers.validateBoard(["LB","CB","S","LB","CB","S"].map((position, index) => make(position, index + 20)));
+  const result = helpers.scoreCandidates({round:17, seat:11, picks, pool, config});
+  const base = helpers.optimalRosterUtility(picks, config);
+  for (const entry of result.ranked) {
+    const roster = [...picks, entry.player];
+    const utility = helpers.optimalRosterUtility(roster, config);
+    assert.ok(Math.abs(entry.marginalUtility - (utility - base)) < 1e-9);
+    const alternatives = result.ranked.filter(other => other !== entry).map(other => ({
+      ...other, gain:helpers.optimalRosterUtility([...roster, other.player], config) - utility,
+    })).sort((a,b) => b.gain - a.gain || a.player.rank - b.player.rank);
+    let mass = 1, expected = 0;
+    for (const other of alternatives) { expected += mass * other.pAvailableNext * other.gain; mass *= 1 - other.pAvailableNext; }
+    assert.ok(Math.abs(entry.expectedNextUtility - expected) < 1e-9);
+  }
+});
+
 for (const weekly of [false, true]) test(`conditional lookahead retains complementary starters and full survival tail (${weekly ? "weekly" : "season"})`, () => {
   const config = { ...mockConfig, rounds:15, rosterSlots:["QB", "WR", ...Array(13).fill("BN")], positionLimits:{ QB:2, WR:14 } };
   const make = (position, n, points) => player(position, n, n, {
