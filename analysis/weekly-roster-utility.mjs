@@ -2,9 +2,11 @@ import {
   scoreOffenseStatLine,
   scoreIdpStatLine,
   scoreKickerStatLine,
+  scoreTeamDefenseStatLine,
   OFFENSE_SCORING,
   IDP_SCORING,
   KICKER_SCORING,
+  TEAM_DEFENSE_SCORING,
 } from "./player-intelligence.mjs";
 
 const FIRST_WEEK = 1;
@@ -144,16 +146,18 @@ const SCORERS = {
   offense: (line, scoring) => scoreOffenseStatLine(line, scoring.offense),
   idp: (line, scoring) => scoreIdpStatLine(line, scoring.idp),
   kicker: (line, scoring) => scoreKickerStatLine(line, scoring.kicker),
+  teamdef: (line, scoring) => scoreTeamDefenseStatLine(line, scoring.teamDefense),
 };
 
 /**
  * Score a single Week 1 (or any single game) league-schema stat line under the exact
- * league rules. `scoringKind` selects the offense / idp / kicker scorer.
+ * league rules. `scoringKind` selects the offense / idp / kicker / teamdef scorer.
  */
 export function scoreWeeklyLeaguePoints(statLine, scoringKind = "offense", scoring = {
   offense: OFFENSE_SCORING,
   idp: IDP_SCORING,
   kicker: KICKER_SCORING,
+  teamDefense: TEAM_DEFENSE_SCORING,
 }) {
   const kind = String(scoringKind ?? "offense").toLowerCase();
   const scorer = SCORERS[kind];
@@ -290,7 +294,7 @@ export function buildWeeklyPlayerProjection({
   availabilityProbability = null,
   availabilityStatus = null,
   yahooWeek2Projection = null,
-  scoring = { offense: OFFENSE_SCORING, idp: IDP_SCORING, kicker: KICKER_SCORING },
+  scoring = { offense: OFFENSE_SCORING, idp: IDP_SCORING, kicker: KICKER_SCORING, teamDefense: TEAM_DEFENSE_SCORING },
 } = {}) {
   if (!finite(week1Weight) || Number(week1Weight) < 0 || Number(week1Weight) > 1) {
     throw new Error("week1Weight must be between 0 and 1");
@@ -419,7 +423,7 @@ export function buildWeeklyProjectionReport({
   generatedAt = null,
   targetWeek = null,
   provenance = null,
-  scoring = { offense: OFFENSE_SCORING, idp: IDP_SCORING, kicker: KICKER_SCORING },
+  scoring = { offense: OFFENSE_SCORING, idp: IDP_SCORING, kicker: KICKER_SCORING, teamDefense: TEAM_DEFENSE_SCORING },
 } = {}) {
   if (!Array.isArray(players) || players.length === 0) {
     throw new Error("players must be a nonempty array");
@@ -446,8 +450,9 @@ export function buildWeeklyProjectionReport({
       availability:
         "no generic status haircut; confirmed-inactive statuses are a factual zero; QUESTIONABLE/DOUBTFUL are flagged but NOT discounted because the prior already assumes availability and no player-specific evidence justifies a second discount; only an explicit availabilityProbability discounts",
       matchup: "neutral (1.0) unless a quantitative opponent-strength source is supplied; one game cannot establish opponent strength",
-      priorOnly: "a prior-only row (e.g. team defenses with unreconstructed Week-1 buckets) exposes NO weekly projection; its prior is kept separate and never presented as a Week-2 number",
-      scoringSource: "analysis/player-intelligence.mjs OFFENSE/IDP/KICKER scoring (league-authoritative, not redefined)",
+      teamDefense: "team defenses have no legitimate per-team custom prior (the draft board's DEF number is a single-source Yahoo season projection, excluded to avoid substituting Yahoo as our model). Their Week-1 DST line IS scored under the exact league DST rules (Sleeper weekly buckets) and REGRESSED toward the Week-1 league DST mean (derived from the actuals, not fabricated) using week1Weight; this is a one-game defensive-form comparison, uncalibrated, with NO matchup factor — not a calibrated Week-2 projection",
+      priorOnly: "a prior-only row (a player with no Week-1 record) exposes NO weekly projection; its prior is kept separate and never presented as a Week-2 number",
+      scoringSource: "analysis/player-intelligence.mjs OFFENSE/IDP/KICKER/TEAM_DEFENSE scoring (league-authoritative, not redefined)",
     }),
     coverage,
     provenance,

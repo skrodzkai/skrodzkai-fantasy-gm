@@ -46,6 +46,32 @@ export const KICKER_SCORING = Object.freeze({
   extraPointsMissed: -1,
 });
 
+// Team Defense / Special Teams scoring. Values are the exact league settings (Yahoo league
+// 420010 "2-minute-drillers-2026", Defense/Special Teams section), independently captured in
+// tests/fixtures/real-league-settings.mjs. The pointsAllowed* fields are mutually-exclusive
+// one-hot band indicators (exactly one is 1 for a given game); a stat-line adapter sets the band
+// the team actually landed in. This constant is NOT part of the draft-board SCORING_SCHEMA_HASH:
+// the draft board deliberately leaves team defense as YAHOO_PRESEASON_RANK because pre-season
+// SEASON aggregates cannot be decomposed into weekly buckets. Weekly ACTUALS (Sleeper box scores)
+// do carry those buckets, so an in-season weekly DST line can be scored under the exact rules.
+export const TEAM_DEFENSE_SCORING = Object.freeze({
+  sacks: 1,
+  interceptions: 1,
+  fumbleRecoveries: 2,
+  defensiveTouchdowns: 6,
+  safeties: 2,
+  blockedKicks: 2,
+  returnTouchdowns: 6,
+  extraPointReturns: 2,
+  pointsAllowed0: 10,
+  pointsAllowed1To6: 7,
+  pointsAllowed7To13: 4,
+  pointsAllowed14To20: 2,
+  pointsAllowed21To27: 0,
+  pointsAllowed28To34: -1,
+  pointsAllowed35Plus: -4,
+});
+
 const REQUIRED_PLAYER_FIELDS = ["playerId", "name", "position"];
 const DEFAULT_PROJECTION_GAMES = 17;
 
@@ -107,6 +133,10 @@ export function scoreKickerStatLine(stats, scoring = KICKER_SCORING) {
   return finite(stats?.fieldGoalsMade) * scoring.fieldGoalsMade +
     finite(stats?.extraPointsMade) * scoring.extraPointsMade +
     missedExtraPoints * scoring.extraPointsMissed;
+}
+
+export function scoreTeamDefenseStatLine(stats, scoring = TEAM_DEFENSE_SCORING) {
+  return Object.entries(scoring).reduce((points, [field, value]) => points + finite(stats?.[field]) * value, 0);
 }
 
 function normalizePosition(value) {

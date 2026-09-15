@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { buildWeeklyProjectionReport, deriveOpportunityRates, opportunityExpectedPoints } from "./weekly-roster-utility.mjs";
-import { scoreOffenseStatLine, OFFENSE_SCORING } from "./player-intelligence.mjs";
+import { scoreOffenseStatLine, scoreTeamDefenseStatLine, OFFENSE_SCORING } from "./player-intelligence.mjs";
 
 // Public read-only Sleeper actuals. Registered source "sleeper" (injury_and_identity /
 // weekly actuals cross-check). Season-scoped weekly box-score stats keyed by Sleeper id.
@@ -67,16 +67,59 @@ export function sleeperKickerLine(stats) {
   };
 }
 
+// Sleeper team-defense weekly box score -> exact league DST stat line. Team defenses are keyed in
+// the Sleeper stats map by NFL team abbreviation (e.g. "NE"). The pointsAllowed* fields are
+// Sleeper's own mutually-exclusive one-hot band flags, whose bands (0 / 1-6 / 7-13 / 14-20 /
+// 21-27 / 28-34 / 35+) match the league bands exactly. Sleeper's generic team `td` total is
+// deliberately NOT scored — only `def_td` (defensive TDs) and kick/punt return TDs are; Sleeper's
+// own default DST score (`pts_std`) adds bonus categories the league does not use and is never read.
+export function sleeperTeamDefenseLine(stats) {
+  if (!stats || typeof stats !== "object") return null;
+  return {
+    sacks: num(stats.sack),
+    interceptions: num(stats.int),
+    fumbleRecoveries: num(stats.fum_rec) + num(stats.def_st_fum_rec),
+    defensiveTouchdowns: num(stats.def_td) + num(stats.def_st_td),
+    safeties: num(stats.safe),
+    blockedKicks: num(stats.blk_kick),
+    returnTouchdowns: num(stats.def_kr_td) + num(stats.def_pr_td),
+    extraPointReturns: 0, // no distinct Sleeper field; scored 0 (did not occur), never fabricated
+    pointsAllowed0: num(stats.pts_allow_0) > 0 ? 1 : 0,
+    pointsAllowed1To6: num(stats.pts_allow_1_6) > 0 ? 1 : 0,
+    pointsAllowed7To13: num(stats.pts_allow_7_13) > 0 ? 1 : 0,
+    pointsAllowed14To20: num(stats.pts_allow_14_20) > 0 ? 1 : 0,
+    pointsAllowed21To27: num(stats.pts_allow_21_27) > 0 ? 1 : 0,
+    pointsAllowed28To34: num(stats.pts_allow_28_34) > 0 ? 1 : 0,
+    pointsAllowed35Plus: num(stats.pts_allow_35p) > 0 ? 1 : 0,
+  };
+}
+
+// Week-1 league-scored DST mean across every NFL team defense present in the capture (the full
+// 32-team population). This is the shrinkage target for the one-game DST signal: derived from the
+// actuals under the exact league rules, not fabricated, and independent of any Yahoo number. Team
+// defenses are the abbreviation-keyed entries (e.g. "NE"); the "TEAM_*" duplicates and numeric
+// player ids are skipped by requiring a pts_allow field.
+export function teamDefenseWeek1LeagueMean(sleeperStats) {
+  const scores = [];
+  for (const [key, value] of Object.entries(sleeperStats ?? {})) {
+    if (!/^[A-Z]{2,3}$/.test(key) || !value || value.pts_allow === undefined) continue;
+    scores.push(scoreTeamDefenseStatLine(sleeperTeamDefenseLine(value)));
+  }
+  const mean = scores.length ? scores.reduce((sum, value) => sum + value, 0) / scores.length : null;
+  return { mean, sampledTeams: scores.length };
+}
+
 const SLEEPER_ADAPTERS = {
   offense: sleeperOffenseLine,
   idp: sleeperIdpLine,
   kicker: sleeperKickerLine,
+  teamdef: sleeperTeamDefenseLine,
 };
 
 export function week1LineFor(scoringKind, stats) {
   if (!stats || typeof stats !== "object") return null;
   const adapter = SLEEPER_ADAPTERS[String(scoringKind ?? "offense").toLowerCase()];
-  return adapter ? adapter(stats) : null; // teamdef weekly buckets are unreconstructed
+  return adapter ? adapter(stats) : null;
 }
 
 const OFFENSE_POSITIONS = new Set(["QB", "RB", "WR", "TE", "FB"]);
@@ -212,6 +255,7 @@ export async function buildWeeklyRefresh({
   board,
   sleeperStats,
   opportunityRates,
+  teamDefenseMean,
   week1Weight,
   opportunityShare,
   targetWeek,
@@ -229,12 +273,13 @@ export async function buildWeeklyRefresh({
       continue;
     }
     const scoringKind = String(input.scoringKind ?? "offense").toLowerCase();
+    const isTeamDef = scoringKind === "teamdef";
     const sleeperId = boardPlayer.sleeperId == null ? null : String(boardPlayer.sleeperId);
     const stats = sleeperId ? sleeperStats[sleeperId] : null;
-    const week1StatLine = scoringKind === "teamdef" ? null : week1LineFor(scoringKind, stats);
-    // Opportunity-anchored Week-1 signal only applies to offense skill volume. IDP/kicker have no
-    // volume model (their scoring is already largely opportunity/volume based); team defenses have
-    // no reconstructed Week-1 line at all.
+    // Team defenses: score the Week-1 DST line under the exact league rules. Offense/IDP/kicker use
+    // their own adapters. Opportunity-anchored decomposition only applies to offense skill volume;
+    // IDP/kicker/teamdef have no volume model and use the observed league-scored result directly.
+    const week1StatLine = week1LineFor(scoringKind, stats);
     const channels = scoringKind === "offense" ? offenseWeek1Channels(stats) : null;
     const week1OpportunityPoints = channels && opportunityRates
       ? opportunityExpectedPoints({
@@ -245,6 +290,13 @@ export async function buildWeeklyRefresh({
           otherPoints: channels.other,
         }, opportunityRates)
       : null;
+    // Team defenses have NO legitimate per-team custom prior: the draft board's DEF perGamePoints is
+    // a single-source Yahoo season projection. Using it would substitute Yahoo as our model, so it is
+    // excluded (kept only for transparency). Instead the noisy one-game DST signal is regressed toward
+    // the Week-1 league DST mean (derived from the actuals, not fabricated) via the same week1Weight.
+    const priorPerGame = isTeamDef
+      ? (finite(teamDefenseMean) ? Number(teamDefenseMean) : null)
+      : (finite(boardPlayer.perGamePoints) ? Number(boardPlayer.perGamePoints) : null);
     modelPlayers.push({
       playerId: yahooId,
       name: boardPlayer.name,
@@ -252,18 +304,18 @@ export async function buildWeeklyRefresh({
       team: boardPlayer.team,
       group: input.group ?? null,
       opponent: input.opponent ?? null,
-      priorPerGame: finite(boardPlayer.perGamePoints) ? Number(boardPlayer.perGamePoints) : null,
-      scoringKind: scoringKind === "teamdef" ? "offense" : scoringKind,
+      priorPerGame,
+      priorBasis: isTeamDef ? "WEEK1_LEAGUE_DST_MEAN" : "PRESEASON_MULTI_SOURCE_BLEND",
+      excludedYahooSeasonPrior: isTeamDef && finite(boardPlayer.perGamePoints) ? Number(boardPlayer.perGamePoints) : null,
+      scoringKind,
       week1StatLine,
       week1OpportunityPoints,
       week1Opportunity: channels
         ? { passAttempts: channels.passAttempts, carries: channels.carries, targets: channels.targets, otherPoints: Number(channels.other.toFixed(4)) }
         : null,
-      week1SourceStatus: scoringKind === "teamdef"
-        ? "TEAM_DEF_WEEKLY_BUCKETS_UNRECONSTRUCTED"
-        : stats
-          ? "SLEEPER_WEEK1_ACTUAL"
-          : "NO_WEEK1_RECORD",
+      week1SourceStatus: isTeamDef
+        ? (stats ? "SLEEPER_WEEK1_DST_ACTUAL" : "NO_WEEK1_RECORD")
+        : (stats ? "SLEEPER_WEEK1_ACTUAL" : "NO_WEEK1_RECORD"),
       availabilityStatus: input.availabilityStatus ?? null,
       availabilityProbability: input.availabilityProbability ?? null,
       yahooWeek2Projection: input.yahooWeek2Projection ?? null,
@@ -288,6 +340,8 @@ export async function buildWeeklyRefresh({
       group: context.group ?? null,
       week1SourceStatus: context.week1SourceStatus ?? null,
       week1Opportunity: context.week1Opportunity ?? null,
+      priorBasis: context.priorBasis ?? null,
+      excludedYahooSeasonPrior: context.excludedYahooSeasonPrior ?? null,
     };
   });
   return { ...report, players, identityGaps };
@@ -314,10 +368,12 @@ function renderMarkdown(report) {
   lines.push(`- Week 1 actuals: ${week1.sourceId ?? "n/a"} season ${week1.season ?? "?"} week ${week1.week ?? "?"} — capture ${week1.captureMode ?? "n/a"}, source retrievedAt ${week1.retrievedAt ?? (week1.captureObservedMtime ? `unknown (file mtime ${week1.captureObservedMtime})` : "n/a")}, sha256 ${String(week1.contentSha256 ?? "").slice(0, 12)}`);
   lines.push(`  (source acquisition time is recorded separately from report generation time and is never backdated to it)`);
   lines.push(`- Comparison/context: ${report.provenance?.comparison ?? "n/a"}`);
+  const teamDef = report.provenance?.teamDefense ?? {};
+  lines.push(`- Team defense: each defense's Week-1 DST line scored under the EXACT league DST rules, then regressed to the Week-1 league DST mean ${money(teamDef.week1LeagueMean)} across ${teamDef.sampledTeams ?? "?"} defenses; the draft-board single-source Yahoo DEF prior is EXCLUDED (${teamDef.priorBasis ?? "n/a"}). One-game defensive form, NOT a calibrated projection.`);
   lines.push("");
   lines.push("Coverage: " + Object.entries(report.coverage).map(([k, v]) => `${k}=${v}`).join(", "));
   lines.push("");
-  lines.push("Unavailable inputs (not fabricated): Week 2 opponent-strength matchup factor (neutral 1.0); 2026 weekly calibration (none — weights are documented choices). Team-defense weekly projections are UNAVAILABLE (Week-1 defensive buckets unreconstructed) — see below.");
+  lines.push("Unavailable inputs (not fabricated): Week 2 opponent-strength matchup factor held at neutral 1.0 — no Week-2 opponent-strength/implied-total source was captured, and one game cannot establish opponent strength. No 2026 weekly outcome calibration exists — the blend weights are documented, uncalibrated model choices. Team defenses have no legitimate per-team custom prior (draft-board DEF is a single-source Yahoo season projection, excluded); their Custom Wk2 is a one-game Week-1 DST form read regressed to the Week-1 league mean — see the team-defense sections.");
   lines.push("");
   for (const [group, title] of groups) {
     const rows = report.players.filter((row) => row.group === group);
@@ -328,19 +384,21 @@ function renderMarkdown(report) {
       .sort((a, b) => (b.weeklyExpectation ?? -1) - (a.weeklyExpectation ?? -1));
     const priorOnly = [...rows].filter((row) => !row.weeklyProjectionAvailable)
       .sort((a, b) => (b.priorPerGame ?? -1) - (a.priorPerGame ?? -1));
-    if (group === "available-def" && !available.length) {
-      lines.push("**Weekly projection UNAVAILABLE for all team defenses.** Week-1 defensive scoring buckets");
-      lines.push("(points/yards allowed bands, sacks, takeaways, return TDs) are not reconstructed, so there is no");
-      lines.push("Week-1 update to apply. The values below are the STALE pre-season prior, shown for reference only —");
-      lines.push("NOT a Week-2 projection and NOT rankable as one. **The Patriots / Buccaneers streaming decision is");
-      lines.push("BLOCKED on this model** and needs a real Week-2 defensive projection source.");
+    if (group === "available-def") {
+      const mean = money(report.provenance?.teamDefense?.week1LeagueMean);
+      lines.push(`**Custom Wk2 for defenses = each team's Week-1 DST line scored under the EXACT league rules, regressed toward the`);
+      lines.push(`Week-1 league DST mean (${mean}) at weight ${report.week1Weight}.** For DEF the "Prior/g" column IS that league mean (the`);
+      lines.push("shrinkage target), NOT a per-team season prior — the draft-board Yahoo DEF projection is deliberately excluded from");
+      lines.push("the custom number and appears only in the Yahoo Wk2 column. This is a ONE-GAME defensive-form comparison, high");
+      lines.push("variance, with NO opponent matchup factor — a lean, not a calibrated Week-2 projection. Read the Patriots vs these");
+      lines.push("available defenses on the Custom Wk2 column with that caveat.");
       lines.push("");
     }
     lines.push("| Player | Pos | Prior/g | Wk1 (league) | Wk1 signal | Custom Wk2 | Yahoo Wk2 | Δ vs Yahoo | Confidence | Notes |");
     lines.push("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
     const flagsFor = (row) => {
       const flags = [];
-      if (row.week1SourceStatus === "TEAM_DEF_WEEKLY_BUCKETS_UNRECONSTRUCTED") flags.push("team-def prior-only");
+      if (row.week1SourceStatus === "SLEEPER_WEEK1_DST_ACTUAL") flags.push("DST: Wk1 actual → regressed to Wk1 league mean; 1 game; no matchup");
       if (row.week1SourceStatus === "NO_WEEK1_RECORD") flags.push("no Wk1 record");
       if (row.availabilityBasis === "UNCERTAIN_FLAGGED_NO_DISCOUNT") flags.push(`${row.availabilityStatus.toLowerCase()} (flagged, no haircut)`);
       else if (row.availabilityProbability < 1) flags.push(`${row.availabilityStatus.toLowerCase()} x${row.availabilityProbability}`);
@@ -398,6 +456,7 @@ async function main() {
   });
 
   const { rates: opportunityRates, sampledPlayers } = buildOpportunityRates(board, sleeperStats);
+  const { mean: teamDefenseMean, sampledTeams: teamDefenseSampledTeams } = teamDefenseWeek1LeagueMean(sleeperStats);
 
   const provenance = {
     prior: { path: args.board, generatedAt: board.generatedAt ?? null, leagueId: board.leagueId ?? null, scoringModel: board.scoringModel ?? null, note: "pre-season custom multi-source per-game blend; legitimate prior, pre-Week1" },
@@ -409,6 +468,17 @@ async function main() {
       overall: opportunityRates.overall,
       minSample: opportunityRates.minSample,
     },
+    teamDefense: {
+      week1LeagueMean: teamDefenseMean,
+      sampledTeams: teamDefenseSampledTeams,
+      priorBasis: "REGRESSED_TO_WEEK1_LEAGUE_MEAN",
+      scoringSource: "analysis/player-intelligence.mjs TEAM_DEFENSE_SCORING — exact league DST rules (Sack 1, INT 1, Fumble Recovery 2, Def TD 6, Safety 2, Block Kick 2, Kick/Punt Return TD 6, Extra Point Returned 2; Points Allowed 0/1-6/7-13/14-20/21-27/28-34/35+ = 10/7/4/2/0/-1/-4), authoritatively captured in tests/fixtures/real-league-settings.mjs",
+      note: "no legitimate per-team custom prior exists for team defense: the draft board DEF perGamePoints is a single-source Yahoo season projection, EXCLUDED here to avoid substituting Yahoo as our model. Each defense's Week-1 DST line is scored under the exact league rules (Sleeper weekly buckets) and regressed toward the Week-1 league DST mean; one-game defensive-form comparison, uncalibrated, with NO matchup factor — not a calibrated Week-2 projection. Sleeper's generic team `td` total and its own default DST score are never used.",
+    },
+    matchup: {
+      status: "UNSOURCED_NEUTRAL",
+      note: "no Week-2 opponent-strength / implied-total source was captured, and one game cannot establish opponent strength; matchupFactor held at neutral 1.0 for every row. Opponent identity is recorded where the snapshot supplied it, with no quantitative adjustment.",
+    },
   };
 
   const report = await buildWeeklyRefresh({
@@ -416,6 +486,7 @@ async function main() {
     board,
     sleeperStats,
     opportunityRates,
+    teamDefenseMean,
     week1Weight: week1Weight ?? undefined,
     opportunityShare: opportunityShare ?? undefined,
     targetWeek,

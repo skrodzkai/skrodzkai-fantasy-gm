@@ -187,6 +187,43 @@ test("deriveOpportunityRates falls back to the all-position rate below the minim
   assert.ok(Math.abs(rates.ratesByPosition.TE.rec - 205 / 105) < 1e-9);
 });
 
+test("scores a Week 1 team-defense line under the exact league DST rules", () => {
+  // Patriots Week 1: 2 sacks, 13 points allowed (7-13 band). League: sack 1, band 7-13 = 4.
+  const patriots = scoreWeeklyLeaguePoints(
+    { sacks: 2, pointsAllowed7To13: 1 },
+    "teamdef",
+  );
+  assert.ok(Math.abs(patriots - (2 * 1 + 4)) < 1e-9);
+  // A takeaway-heavy shutout: 3 sacks, 2 INT, 1 fumble recovery, 1 def TD, 0 allowed (band 0 = 10).
+  const dominant = scoreWeeklyLeaguePoints(
+    { sacks: 3, interceptions: 2, fumbleRecoveries: 1, defensiveTouchdowns: 1, pointsAllowed0: 1 },
+    "teamdef",
+  );
+  assert.ok(Math.abs(dominant - (3 * 1 + 2 * 1 + 1 * 2 + 1 * 6 + 10)) < 1e-9); // 23
+});
+
+test("team defense regresses its one-game DST signal toward the league Week-1 mean, not Yahoo", () => {
+  // No opportunity model for DST: the Week-1 signal is the observed league-scored result. The prior
+  // is the Week-1 league DST mean (shrinkage target), never the excluded Yahoo season number.
+  const leagueMean = 5.44;
+  const projection = buildWeeklyPlayerProjection({
+    name: "Patriots",
+    position: "DEF",
+    priorPerGame: leagueMean,
+    week1StatLine: { sacks: 2, pointsAllowed7To13: 1 },
+    scoringKind: "teamdef",
+    week1Weight: 0.25,
+    yahooWeek2Projection: 6.5,
+  });
+  assert.equal(projection.week1Points, 6); // exact league DST score
+  assert.equal(projection.week1SignalBasis, "OBSERVED_ONLY_NO_OPPORTUNITY_MODEL");
+  assert.equal(projection.confidence, "PRIOR_AND_WEEK1");
+  assert.equal(projection.weeklyProjectionAvailable, true);
+  assert.ok(Math.abs(projection.weeklyBaseline - (0.25 * 6 + 0.75 * leagueMean)) < 1e-9);
+  assert.equal(projection.matchupFactor, 1); // no matchup factor
+  assert.notEqual(projection.weeklyExpectation, projection.yahooWeek2Projection);
+});
+
 test("assembles a report with coverage counts and preserved provenance", () => {
   const report = buildWeeklyProjectionReport({
     generatedAt: "2026-09-15T18:00:00Z",
