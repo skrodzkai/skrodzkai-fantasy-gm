@@ -460,6 +460,52 @@ export function buildWeeklyProjectionReport({
   });
 }
 
+/**
+ * Rank a full universe of weekly projection rows. A row is RANKABLE when it has a current-week
+ * weekly expectation and a nonzero play probability; those rows get an `overallRank` (by
+ * weeklyExpectation desc, prior then playerId as deterministic tiebreakers) and a `positionRank`
+ * within their position. Every other row is returned with `rankable=false` and an explicit
+ * `unrankableReason` — confirmed inactive (OUT/IR/bye), no completed-week actual (PRIOR_ONLY), or
+ * neither a prior nor an actual (INSUFFICIENT) — so a missing/benched/injured player is surfaced
+ * with a reason and NEVER silently dropped. Pure: returns new row objects in the input order; the
+ * input rows are untouched.
+ */
+export function assignFullRanks(rows) {
+  if (!Array.isArray(rows)) throw new Error("rows must be an array");
+  const annotated = rows.map((row) => {
+    const expectation = finite(row.weeklyExpectation) ? Number(row.weeklyExpectation) : null;
+    const playProbability = finite(row.availabilityProbability) ? Number(row.availabilityProbability) : 1;
+    let rankable = false;
+    let unrankableReason = null;
+    if (row.weeklyProjectionAvailable && expectation != null && playProbability > 0) {
+      rankable = true;
+    } else if (playProbability <= 0) {
+      unrankableReason = `CONFIRMED_INACTIVE_${String(row.availabilityStatus ?? "INACTIVE").toUpperCase()}`;
+    } else if (row.confidence === "PRIOR_ONLY") {
+      unrankableReason = "NO_COMPLETED_WEEK_ACTUAL";
+    } else if (row.confidence === "INSUFFICIENT") {
+      unrankableReason = "NO_PRIOR_OR_COMPLETED_WEEK_ACTUAL";
+    } else {
+      unrankableReason = "WEEKLY_PROJECTION_UNAVAILABLE";
+    }
+    return { ...row, rankable, unrankableReason, overallRank: null, positionRank: null };
+  });
+  const ranked = annotated.filter((row) => row.rankable);
+  ranked.sort((a, b) =>
+    (Number(b.weeklyExpectation) - Number(a.weeklyExpectation)) ||
+    ((finite(b.priorPerGame) ? Number(b.priorPerGame) : -Infinity) - (finite(a.priorPerGame) ? Number(a.priorPerGame) : -Infinity)) ||
+    String(a.playerId ?? "").localeCompare(String(b.playerId ?? "")));
+  const positionCounters = new Map();
+  ranked.forEach((row, index) => {
+    row.overallRank = index + 1;
+    const pos = String(row.position ?? "UNK").toUpperCase();
+    const next = (positionCounters.get(pos) ?? 0) + 1;
+    positionCounters.set(pos, next);
+    row.positionRank = next;
+  });
+  return annotated;
+}
+
 export {
   FIRST_WEEK,
   LAST_WEEK,
