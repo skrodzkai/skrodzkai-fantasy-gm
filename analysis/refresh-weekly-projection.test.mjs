@@ -22,6 +22,10 @@ test("assertReceiptPeriod binds source and period, rejecting a relabeled capture
   const seasonScoped = { sourceId: "sleeper-players", season: 2026, week: null, retrievedAt: "t", contentSha256: "x" };
   assert.doesNotThrow(() => assertReceiptPeriod(seasonScoped, { sourceId: "sleeper-players", season: 2026, week: null }));
   assert.throws(() => assertReceiptPeriod({ contentSha256: null }, { sourceId: "x", season: 2026, week: 1 }), /matching/);
+  // A receipt MISSING the requested source/period bindings is rejected, not silently accepted.
+  assert.throws(() => assertReceiptPeriod({ contentSha256: "abc", retrievedAt: "2026-09-16" }, { sourceId: "espn-schedule", season: 2026, week: 2 }), /sourceId/);
+  assert.throws(() => assertReceiptPeriod({ contentSha256: "abc", retrievedAt: "t", sourceId: "espn-schedule" }, { sourceId: "espn-schedule", season: 2026, week: 2 }), /season/);
+  assert.throws(() => assertReceiptPeriod({ contentSha256: "abc", retrievedAt: "t", sourceId: "espn-schedule", season: 2026 }, { sourceId: "espn-schedule", season: 2026, week: 2 }), /week/);
 });
 
 function scheduleEvents(count, { season = 2026, week = 2 } = {}) {
@@ -29,30 +33,37 @@ function scheduleEvents(count, { season = 2026, week = 2 } = {}) {
   const events = [];
   for (let i = 0; i < count; i += 1) {
     events.push({
-      id: String(i), date: "2026-09-20T17:00Z", season: { year: season }, week: { number: week },
+      id: String(i), date: "2026-09-20T17:00Z", season: { year: season, type: 2 }, week: { number: week },
       competitions: [{ competitors: [
         { team: { abbreviation: teams[i * 2] }, homeAway: "home" },
         { team: { abbreviation: teams[i * 2 + 1] }, homeAway: "away" },
       ] }],
     });
   }
-  return { season: { year: season }, week: { number: week }, events };
+  return { season: { year: season, type: 2 }, week: { number: week }, events };
 }
 
-test("verifySchedulePayload rejects a wrong-period capture", () => {
+test("verifySchedulePayload rejects a wrong-period or preseason capture", () => {
   const payload = scheduleEvents(13, { week: 3 });
   assert.throws(() => verifySchedulePayload(payload, { season: 2026, week: 2 }), /week/);
   assert.throws(() => verifySchedulePayload(scheduleEvents(13, { season: 2025 }), { season: 2026, week: 2 }), /season/);
+  assert.throws(() => verifySchedulePayload({ season: { year: 2026, type: 1 }, week: { number: 2 }, events: [] }, { season: 2026, week: 2 }), /season type/);
   assert.throws(() => verifySchedulePayload({ season: { year: 2026 }, week: { number: 2 }, events: [] }, { season: 2026, week: 2 }), /no games/);
 });
 
-test("verifySchedulePayload trusts byes only when the schedule is complete", () => {
-  const full = verifySchedulePayload(scheduleEvents(14), { season: 2026, week: 2 });
-  assert.equal(full.gamesParsed, 14);
+test("verifySchedulePayload trusts byes ONLY when all 32 teams are present", () => {
+  // A full 16-game week = 32 teams present -> complete -> byes trustable.
+  const full = verifySchedulePayload(scheduleEvents(16), { season: 2026, week: 2 });
+  assert.equal(full.gamesParsed, 16);
+  assert.equal(full.teamsPlayingCount, 32);
   assert.equal(full.byeTrusted, true);
   assert.equal(full.byTeam.get("AAA").opponent, "BBB");
   assert.equal(full.byTeam.get("BBB").homeAway, "away");
-  // A partial capture (below the minimum) must NOT let absent teams be read as byes.
+  // A 14-game capture (28 teams) or a 12-of-16 truncation cannot be proven complete: a game count
+  // alone never proves the schedule -> byes NOT trusted, absent teams stay UNKNOWN.
+  const fourteen = verifySchedulePayload(scheduleEvents(14), { season: 2026, week: 2 });
+  assert.equal(fourteen.teamsPlayingCount, 28);
+  assert.equal(fourteen.byeTrusted, false);
   const partial = verifySchedulePayload(scheduleEvents(3), { season: 2026, week: 2 });
   assert.equal(partial.gamesParsed, 3);
   assert.equal(partial.byeTrusted, false);
@@ -133,13 +144,18 @@ test("currentPlayerStatus flags confirmed-out injuries but never invents a proba
   assert.equal(currentPlayerStatus({ status: "Active", team: "BUF" }).availabilityStatus, "HEALTHY");
 });
 
-test("completedWeeksSignal distinguishes an absent actual from a real zero", () => {
+test("completedWeeksSignal distinguishes an absent actual from a real zero and counts participation/returns", () => {
   const rates = { ratesByPosition: {}, overall: { pass: 0, rush: 1, rec: 1 } };
-  // A player with an all-zero (no-volume) row has NO completed-game record -> null (absent, not 0).
+  // No row / no participation -> ABSENT (null), not a zero.
   const absent = completedWeeksSignal({ scoringKind: "offense", position: "RB", statsKey: "9" }, [{ stats: { 9: { rush_att: 0, rush_yd: 0 } } }], rates);
   assert.equal(absent, null);
-  // A player who played (volume) but scored little is a real observation.
-  const played = completedWeeksSignal({ scoringKind: "offense", position: "RB", statsKey: "9" }, [{ stats: { 9: { rush_att: 5, rush_yd: 12 } } }], rates);
-  assert.ok(played && played.games === 1);
-  assert.ok(Number.isFinite(played.week1Points));
+  // Participation with an empty box score (off_snp>0, gp 1) is a REAL zero: game counts, points 0, not produced.
+  const playedZero = completedWeeksSignal({ scoringKind: "offense", position: "WR", statsKey: "9" }, [{ stats: { 9: { gp: 1, off_snp: 32 } } }], rates);
+  assert.ok(playedZero && playedZero.games === 1);
+  assert.equal(playedZero.week1Points, 0);
+  assert.equal(playedZero.produced, false);
+  // A returner with kick/punt return yards PRODUCED points (returns score) and is not dropped.
+  const returner = completedWeeksSignal({ scoringKind: "offense", position: "WR", statsKey: "9" }, [{ stats: { 9: { st_snp: 6, kr: 3, kr_yd: 82, pr: 2, pr_yd: 10 } } }], rates);
+  assert.ok(returner && returner.games === 1 && returner.produced === true);
+  assert.ok(returner.week1Points > 0);
 });
