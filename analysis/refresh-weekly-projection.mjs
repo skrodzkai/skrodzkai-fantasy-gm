@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { buildWeeklyProjectionReport, deriveOpportunityRates, opportunityExpectedPoints, scoreWeeklyLeaguePoints, assignFullRanks } from "./weekly-roster-utility.mjs";
+import { buildWeeklyProjectionReport, deriveOpportunityRates, opportunityExpectedPoints, scoreWeeklyLeaguePoints, assignFullRanks, CONFIRMED_INACTIVE_STATUS } from "./weekly-roster-utility.mjs";
 import { scoreOffenseStatLine, scoreTeamDefenseStatLine, OFFENSE_SCORING } from "./player-intelligence.mjs";
 import { scoreHistoricalStatRow } from "./historical-player-calibration.mjs";
 import { parseCsv } from "./opponent-calibration.mjs";
@@ -756,6 +756,7 @@ export function currentPlayerStatus(entry) {
 
 const FULL_CONTEXT_FIELDS = [
   "universe", "group", "sleeperId", "priorBasis", "priorGated", "gatedPriorPerGame",
+  "depthChartOrder", "currentStarter", "roleLimitedPrior",
   "scorableSourceFamilyCount", "scorableSourceFamilies", "evidenceStatus", "availabilityAssumption",
   "excludedYahooSeasonPrior", "week1Opportunity",
   "completedGames", "week1SourceStatus", "bye", "kickoff", "homeAway", "boardTeam", "currentTeam",
@@ -847,21 +848,44 @@ export function buildFullWeeklyRankings({
     const onBye = byeTrusted && Boolean(team) && !schedule.byTeam.has(team);
     const opponent = sched?.opponent ?? null;
     const matchup = resolveMatchup(matchupProvider, { scoringKind, opponent, position });
-    // Prior = the board's ROLE per-game rate (perGamePoints), which is HEALTH-independent: the stale
-    // preseason availability/expected-games cap (the source of the old weeklyPoints haircut) is NOT
-    // applied here — current-week health comes from the fresh feed instead, so a now-HEALTHY player
-    // is not penalized for a preseason injury flag. The prior is GATED on projection source quality:
-    // a single-scorable-family (e.g. Yahoo-only) board number is not a trusted prior. A gated prior is
-    // dropped (null); the player can still rank on observed league-scored form, and the raw board
-    // number + its source families are exposed so the weak-evidence basis is visible. DEF uses the
-    // league DST mean (derived, not a single-family number), so it is never gated.
+    // Prior is HEALTH-conditioned vs ROLE-conditioned, resolved explicitly:
+    //  - DEFAULT (backup / limited / unknown role): the board's ROLE-LIMITED weekly expectation
+    //    weeklyPoints[week-1]. This retains a genuine limited-role prior — a multi-family BACKUP is
+    //    NOT re-inflated (perGamePoints = consensus / expectedGames is a CONDITIONAL per-game
+    //    performance rate, not a weekly role expectation).
+    //  - RESTORE the undiscounted perGamePoints ONLY for a CURRENT healthy STARTER, evidenced by the
+    //    fresh Sleeper depth chart (depth_chart_order === 1) and no confirmed-inactive status. This
+    //    removes the stale preseason HEALTH cap (e.g. CMC's expected-games haircut) without inventing
+    //    starter workload for backups (Mariota depth 2, Beck no depth entry -> stay role-limited).
+    //  - GATE on projection source quality: a single-scorable-family (e.g. Yahoo-only) board number is
+    //    not a trusted prior; it is dropped (null) and the player ranks on observed form, with the raw
+    //    number + families exposed. DEF uses the league DST mean (never gated).
     const scorableFamilies = Number(player.scorableSourceFamilyCount ?? 0);
-    const rolePerGame = finite(player.perGamePoints) ? Number(player.perGamePoints) : null;
-    const priorSupported = isTeamDef || (rolePerGame != null && scorableFamilies >= 2);
-    const priorGated = !isTeamDef && rolePerGame != null && !priorSupported;
-    const priorPerGame = isTeamDef
-      ? (finite(teamDefenseMean) ? Number(teamDefenseMean) : null)
-      : (priorSupported ? rolePerGame : null);
+    const boardWeekly = Array.isArray(player.weeklyPoints) ? player.weeklyPoints[targetWeek - 1] : undefined;
+    const roleLimitedPrior = finite(boardWeekly) ? Number(boardWeekly)
+      : (finite(player.perGamePoints) ? Number(player.perGamePoints) : null);
+    const undiscountedRate = finite(player.perGamePoints) ? Number(player.perGamePoints) : null;
+    const sleeperEntry = (!isTeamDef && player.sleeperId != null) ? playersMap[String(player.sleeperId)] : null;
+    const depthChartOrder = sleeperEntry && sleeperEntry.depth_chart_order != null ? Number(sleeperEntry.depth_chart_order) : null;
+    const confirmedInactive = statusInfo.availabilityStatus != null && CONFIRMED_INACTIVE_STATUS.has(String(statusInfo.availabilityStatus).toUpperCase());
+    const healthyStarter = !isTeamDef && depthChartOrder === 1 && !confirmedInactive;
+    const priorSupported = isTeamDef || (roleLimitedPrior != null && scorableFamilies >= 2);
+    const priorGated = !isTeamDef && roleLimitedPrior != null && !priorSupported;
+    let priorPerGame;
+    let priorBasis;
+    if (isTeamDef) {
+      priorPerGame = finite(teamDefenseMean) ? Number(teamDefenseMean) : null;
+      priorBasis = "WEEK_LEAGUE_DST_MEAN";
+    } else if (!priorSupported) {
+      priorPerGame = null;
+      priorBasis = "PRIOR_GATED_INSUFFICIENT_SOURCE_FAMILIES";
+    } else if (healthyStarter && undiscountedRate != null) {
+      priorPerGame = undiscountedRate;
+      priorBasis = "PRESEASON_STARTER_ROLE_PER_GAME";
+    } else {
+      priorPerGame = roleLimitedPrior;
+      priorBasis = "PRESEASON_WEEKLY_ROLE_LIMITED";
+    }
     modelPlayers.push({
       playerId,
       name: player.name,
@@ -881,9 +905,12 @@ export function buildFullWeeklyRankings({
       universe: "board",
       group: overlay?.group ?? null,
       sleeperId: player.sleeperId != null ? String(player.sleeperId) : null,
-      priorBasis: isTeamDef ? "WEEK_LEAGUE_DST_MEAN" : (priorSupported ? "PRESEASON_ROLE_PER_GAME_MULTIFAMILY" : "PRIOR_GATED_INSUFFICIENT_SOURCE_FAMILIES"),
+      priorBasis,
       priorGated,
-      gatedPriorPerGame: priorGated ? rolePerGame : null,
+      gatedPriorPerGame: priorGated ? undiscountedRate : null,
+      depthChartOrder: isTeamDef ? null : depthChartOrder,
+      currentStarter: isTeamDef ? null : healthyStarter,
+      roleLimitedPrior: isTeamDef ? null : roleLimitedPrior,
       scorableSourceFamilyCount: isTeamDef ? null : scorableFamilies,
       scorableSourceFamilies: isTeamDef ? null : (player.scorableSourceFamilies ?? null),
       evidenceStatus: isTeamDef ? null : (player.evidenceStatus ?? null),
@@ -964,6 +991,9 @@ export function buildFullWeeklyRankings({
         priorBasis: "NONE_NO_PRESEASON_PRIOR",
         priorGated: false,
         gatedPriorPerGame: null,
+        depthChartOrder: entry.depth_chart_order != null ? Number(entry.depth_chart_order) : null,
+        currentStarter: false,
+        roleLimitedPrior: null,
         scorableSourceFamilyCount: 0,
         scorableSourceFamilies: null,
         evidenceStatus: "NO_PRESEASON_PROJECTION",
@@ -1033,12 +1063,18 @@ export function buildFullWeeklyRankings({
     // Reconcile the row's own metadata with the resolved disposition (finding: no contradictory
     // weeklyProjectionAvailable=false + "UNAVAILABLE" note on a ranked row).
     merged.weeklyProjectionAvailable = rankable;
+    // The prior kind for the human note: a current-starter undiscounted role rate vs a role-limited
+    // (backup/unknown) weekly expectation vs a DEF league mean.
+    const priorKind = ctx.priorBasis === "PRESEASON_STARTER_ROLE_PER_GAME" ? "current-starter undiscounted role rate (depth_chart_order 1)"
+      : ctx.priorBasis === "PRESEASON_WEEKLY_ROLE_LIMITED" ? "role-limited preseason weekly expectation (no current-starter evidence — weak role)"
+        : ctx.priorBasis === "WEEK_LEAGUE_DST_MEAN" ? "league DST mean"
+          : "preseason prior";
     const dispositionNote = rankable
       ? (rankBasis === "PRIOR_ONLY_NO_ACTUAL"
-          ? "ranked on the trusted multi-family preseason ROLE prior; no completed-week actual yet (weak evidence)"
+          ? `ranked on the trusted ${priorKind}; no completed-week actual yet (weak evidence)`
           : rankBasis === "CURRENT_FORM_NO_PRIOR"
             ? `ranked on observed completed-week league-scored form; no trusted preseason prior${ctx.priorGated ? " (single-family board prior gated as unsupported)" : ""}`
-            : "ranked on the trusted preseason ROLE prior blended with completed-week form")
+            : `ranked on the trusted ${priorKind} blended with completed-week form`)
       : `unrankable this week: ${unrankableReason}${ctx.priorGated && unrankableReason === "PRIOR_UNSUPPORTED_NO_ACTUAL" ? ` (board prior was single-scorable-family, gatedPriorPerGame=${ctx.gatedPriorPerGame})` : ""}`;
     merged.notes = [...(row.notes ?? []).filter((note) => !STALE_NOTE.test(note)), dispositionNote];
     merged.weeklyExpectation = weeklyExpectation;
@@ -1299,14 +1335,16 @@ export function renderFullRankingsHtml(report) {
     const raw = row.rawInjuryStatus ? ` (${row.rawInjuryStatus})` : "";
     return escapeHtml(`${row.availabilityStatus ?? row.sleeperStatus ?? "—"}${raw}`);
   };
-  // Prior source quality: multi-family trusted prior, a gated single-family board prior (ranked on
-  // form instead), a DEF league-mean baseline, or a missing-active player with no preseason prior.
+  // Prior source quality + role basis: a trusted multi-family prior tagged starter (undiscounted
+  // role rate, depth_chart_order 1) or role-limited (backup/unknown weekly expectation), a gated
+  // single-family board prior (ranked on form), a DEF league-mean baseline, or a missing player.
   const priorSrc = (row) => {
     if (row.universe === "missing-active") return "form(no-prior)";
     if (row.position === "DEF") return "dst-mean";
     if (row.priorGated) return `gated(${row.scorableSourceFamilyCount ?? 0}fam)`;
-    if (row.scorableSourceFamilyCount != null) return `${row.scorableSourceFamilyCount}fam`;
-    return "—";
+    if (row.scorableSourceFamilyCount == null) return "—";
+    const role = row.priorBasis === "PRESEASON_STARTER_ROLE_PER_GAME" ? "starter" : row.priorBasis === "PRESEASON_WEEKLY_ROLE_LIMITED" ? "role-ltd" : "";
+    return `${row.scorableSourceFamilyCount}fam${role ? "·" + role : ""}`;
   };
   const week1 = report.provenance?.week1List ?? [];
   const teamDef = report.provenance?.teamDefense ?? {};
@@ -1480,7 +1518,7 @@ async function runFullRankings(args, { season, targetWeek, week1Weight, opportun
   }
 
   const provenance = {
-    prior: { path: args.board, generatedAt: board.generatedAt ?? null, leagueId: board.leagueId ?? null, scoringModel: board.scoringModel ?? null, note: "pre-season custom multi-source blend; the per-player prior is the board's ROLE per-game rate perGamePoints (health-INDEPENDENT — the stale preseason expected-games/health cap is NOT applied; current health comes from the fresh feed). The prior is GATED on projection source quality: only a prior backed by >=2 scorable source families is trusted; a single-family (e.g. Yahoo-only) board number is dropped and the player ranks on observed form instead (raw number + families exposed per row). DEF uses the league DST mean (never a single-family board number, so never gated)." },
+    prior: { path: args.board, generatedAt: board.generatedAt ?? null, leagueId: board.leagueId ?? null, scoringModel: board.scoringModel ?? null, note: "pre-season custom multi-source blend, HEALTH-conditioned vs ROLE-conditioned. Default per-player prior = the board's ROLE-LIMITED weekly expectation weeklyPoints[targetWeek] (a backup/limited-role player keeps a small prior — perGamePoints=consensus/expectedGames is a CONDITIONAL performance rate, NOT a role-independent weekly expectation). The undiscounted perGamePoints role rate is RESTORED only for a CURRENT healthy STARTER, evidenced by the fresh Sleeper depth chart (depth_chart_order===1) and no confirmed-inactive status — this removes the stale preseason health/expected-games cap for genuine starters without re-inflating multi-family backups. Prior is GATED on projection source quality: only a >=2 scorable-family prior is trusted; a single-family (e.g. Yahoo-only) board number is dropped and the player ranks on observed form (raw number + families + depth-chart evidence exposed per row). DEF uses the league DST mean (never gated, never role-restored)." },
     week1List: weekStatsList.map(({ receipt }) => receipt),
     schedule: scheduleReceipt,
     identity: identityReceipt,

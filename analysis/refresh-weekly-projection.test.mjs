@@ -9,6 +9,7 @@ import {
   buildOpponentMatchup,
   currentPlayerStatus,
   completedWeeksSignal,
+  buildFullWeeklyRankings,
 } from "./refresh-weekly-projection.mjs";
 
 test("assertReceiptPeriod binds source and period, rejecting a relabeled capture", () => {
@@ -129,6 +130,54 @@ test("buildOpponentMatchup produces a measured, shrunk factor and flags unsuppor
   assert.equal(vsWeakOffense.supported, true);
   assert.ok(vsWeakOffense.factor > 1, `DEF vs a 3-pt offense should be favorable, got ${vsWeakOffense.factor}`);
   assert.equal(provider.meta.seasonsUsed[0], 2025);
+});
+
+test("prior is role-conditioned: starter restores undiscounted rate; backup/no-evidence stays role-limited; single-family gated", () => {
+  const board = { players: [
+    // Healthy STARTER with a preseason health cap (weeklyPoints[wk2] discounted below perGame); fresh
+    // depth_chart_order 1 -> RESTORE the undiscounted role rate (no stale 15/16 haircut).
+    { yahooId: "cmc", sleeperId: "s_cmc", gsisId: "g_cmc", name: "Star RB", position: "RB", team: "SF", perGamePoints: 17.10, weeklyPoints: [16.03, 16.03], scorableSourceFamilyCount: 4 },
+    // Multi-family BACKUP (depth 2) -> keep the role-limited weeklyPoints, NOT the inflated perGame.
+    { yahooId: "mar", sleeperId: "s_mar", gsisId: "g_mar", name: "Backup QB", position: "QB", team: "WAS", perGamePoints: 1.95, weeklyPoints: [0.12, 0.12], scorableSourceFamilyCount: 3 },
+    // Multi-family with NO fresh depth entry (unknown role) -> keep role-limited weeklyPoints.
+    { yahooId: "beck", sleeperId: null, gsisId: "g_beck", name: "No Entry QB", position: "QB", team: "CLE", perGamePoints: 12.94, weeklyPoints: [3.23, 3.23], scorableSourceFamilyCount: 3 },
+    // Single scorable family -> prior gated (dropped); no actual -> unrankable.
+    { yahooId: "solo", sleeperId: "s_solo", gsisId: "g_solo", name: "Yahoo Only", position: "WR", team: "BUF", perGamePoints: 10, weeklyPoints: [9, 9], scorableSourceFamilyCount: 1 },
+  ] };
+  const playersMap = {
+    s_cmc: { full_name: "Star RB", team: "SF", position: "RB", status: "Active", active: true, depth_chart_order: 1 },
+    s_mar: { full_name: "Backup QB", team: "WAS", position: "QB", status: "Active", active: true, depth_chart_order: 2 },
+    s_solo: { full_name: "Yahoo Only", team: "BUF", position: "WR", status: "Active", active: true, depth_chart_order: 1 },
+  };
+  const schedule = {
+    byTeam: new Map([
+      ["SF", { opponent: "MIA", homeAway: "home", kickoff: "t" }],
+      ["WAS", { opponent: "DAL", homeAway: "away", kickoff: "t" }],
+      ["CLE", { opponent: "BAL", homeAway: "home", kickoff: "t" }],
+      ["BUF", { opponent: "NYJ", homeAway: "home", kickoff: "t" }],
+    ]),
+    byeTrusted: false,
+  };
+  const rankings = buildFullWeeklyRankings({
+    board, rosterInputs: { players: [] }, weekStatsList: [{ week: 1, stats: {} }],
+    playersMap, schedule, matchupProvider: null, opportunityRates: null,
+    teamDefenseMean: 5, targetWeek: 2, generatedAt: "t", provenance: {},
+  });
+  const byId = Object.fromEntries(rankings.players.map((p) => [p.playerId, p]));
+  // Starter: undiscounted perGame restored (NOT the health-capped weeklyPoints 16.03).
+  assert.ok(Math.abs(byId.cmc.priorPerGame - 17.10) < 1e-9, `cmc prior ${byId.cmc.priorPerGame}`);
+  assert.equal(byId.cmc.priorBasis, "PRESEASON_STARTER_ROLE_PER_GAME");
+  assert.equal(byId.cmc.currentStarter, true);
+  // Multi-family backup: role-limited weeklyPoints retained (NOT perGame 1.95).
+  assert.ok(Math.abs(byId.mar.priorPerGame - 0.12) < 1e-9, `mariota prior ${byId.mar.priorPerGame}`);
+  assert.equal(byId.mar.priorBasis, "PRESEASON_WEEKLY_ROLE_LIMITED");
+  // No fresh depth entry -> unknown role -> role-limited weeklyPoints (NOT perGame 12.94).
+  assert.ok(Math.abs(byId.beck.priorPerGame - 3.23) < 1e-9, `beck prior ${byId.beck.priorPerGame}`);
+  assert.equal(byId.beck.priorBasis, "PRESEASON_WEEKLY_ROLE_LIMITED");
+  // Single-family gating still works.
+  assert.equal(byId.solo.priorPerGame ?? null, null);
+  assert.equal(byId.solo.rankable, false);
+  assert.equal(byId.solo.unrankableReason, "PRIOR_UNSUPPORTED_NO_ACTUAL");
 });
 
 test("currentPlayerStatus flags confirmed-out injuries but never invents a probability", () => {
