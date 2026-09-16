@@ -180,6 +180,38 @@ test("prior is role-conditioned: starter restores undiscounted rate; backup/no-e
   assert.equal(byId.solo.unrankableReason, "PRIOR_UNSUPPORTED_NO_ACTUAL");
 });
 
+test("multi-family with NO weekly role prior gets NO prior (perGamePoints never substituted): form-only or unrankable", () => {
+  const board = { players: [
+    // Penix: multi-family, fresh depth 2 (backup), perGame 10.02, NO weeklyPoints[wk2] -> no prior.
+    { yahooId: "penix", sleeperId: "s_penix", gsisId: "g_penix", name: "Backup Elect", position: "QB", team: "ATL", perGamePoints: 10.02294, weeklyPoints: [5.0], scorableSourceFamilyCount: 3 },
+    // Rush: multi-family, no current depth entry, perGame 8.457, no weeklyPoints array -> no prior.
+    { yahooId: "rush", sleeperId: "s_rush", gsisId: "g_rush", name: "Journeyman QB", position: "QB", team: "BAL", perGamePoints: 8.45735, scorableSourceFamilyCount: 3 },
+  ] };
+  const playersMap = {
+    s_penix: { full_name: "Backup Elect", team: "ATL", position: "QB", status: "Active", active: true, depth_chart_order: 2 },
+    s_rush: { full_name: "Journeyman QB", team: "BAL", position: "QB", status: "Active", active: true, depth_chart_order: null },
+  };
+  const schedule = { byTeam: new Map([["ATL", { opponent: "CAR", homeAway: "home", kickoff: "t" }], ["BAL", { opponent: "CLE", homeAway: "away", kickoff: "t" }]]), byeTrusted: false };
+  // No form -> no prior substitution -> explicitly unrankable with the distinct missing-role reason.
+  const noForm = buildFullWeeklyRankings({ board, rosterInputs: { players: [] }, weekStatsList: [{ week: 1, stats: {} }], playersMap, schedule, matchupProvider: null, opportunityRates: null, teamDefenseMean: 5, targetWeek: 2, generatedAt: "t", provenance: {} });
+  const byId = Object.fromEntries(noForm.players.map((p) => [p.playerId, p]));
+  for (const id of ["penix", "rush"]) {
+    assert.equal(byId[id].priorPerGame ?? null, null, `${id} must NOT substitute perGamePoints as a prior`);
+    assert.equal(byId[id].priorBasis, "NO_ROLE_LIMITED_WEEKLY_PRIOR");
+    assert.equal(byId[id].missingRolePrior, true);
+    assert.equal(byId[id].rankable, false);
+    assert.equal(byId[id].unrankableReason, "MISSING_ROLE_PRIOR_NO_ACTUAL");
+  }
+  assert.equal(noForm.audit.unrankableReasons.MISSING_ROLE_PRIOR_NO_ACTUAL, 2);
+  // Same player WITH completed-week form ranks on FORM only (still no perGamePoints prior).
+  const withForm = buildFullWeeklyRankings({ board, rosterInputs: { players: [] }, weekStatsList: [{ week: 1, stats: { s_penix: { gp: 1, pass_att: 30, pass_yd: 250, pass_td: 2, rush_att: 2, rush_yd: 5 } } }], playersMap, schedule, matchupProvider: null, opportunityRates: null, teamDefenseMean: 5, targetWeek: 2, generatedAt: "t", provenance: {} });
+  const p2 = withForm.players.find((p) => p.playerId === "penix");
+  assert.equal(p2.priorPerGame ?? null, null);
+  assert.equal(p2.rankable, true);
+  assert.equal(p2.rankBasis, "CURRENT_FORM_NO_PRIOR");
+  assert.ok(p2.weeklyExpectation > 0);
+});
+
 test("currentPlayerStatus flags confirmed-out injuries but never invents a probability", () => {
   assert.deepEqual(currentPlayerStatus(null), { hasEntry: false, availabilityStatus: null, rawInjuryStatus: null, sleeperStatus: null, currentTeam: null, yahooId: null, gsisId: null });
   assert.equal(currentPlayerStatus({ injury_status: "IR", status: "Inactive", team: "NE" }).availabilityStatus, "IR");
