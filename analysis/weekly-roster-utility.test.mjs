@@ -225,28 +225,32 @@ test("team defense regresses its one-game DST signal toward the league Week-1 me
   assert.notEqual(projection.weeklyExpectation, projection.yahooWeek2Projection);
 });
 
-test("assigns overall and position ranks and flags every unrankable row with a reason", () => {
+test("ranks by resolved disposition and keeps every unrankable row with its reason", () => {
   const rows = [
-    { playerId: "1", name: "QB1", position: "QB", weeklyProjectionAvailable: true, weeklyExpectation: 25, availabilityProbability: 1, priorPerGame: 24, confidence: "PRIOR_AND_WEEK1" },
-    { playerId: "2", name: "RB1", position: "RB", weeklyProjectionAvailable: true, weeklyExpectation: 18, availabilityProbability: 1, priorPerGame: 16, confidence: "PRIOR_AND_WEEK1" },
-    { playerId: "3", name: "RB2", position: "RB", weeklyProjectionAvailable: true, weeklyExpectation: 20, availabilityProbability: 1, priorPerGame: 15, confidence: "WEEK1_ONLY" },
-    { playerId: "4", name: "OutWR", position: "WR", weeklyProjectionAvailable: true, weeklyExpectation: 0, availabilityProbability: 0, availabilityStatus: "OUT", confidence: "PRIOR_AND_WEEK1" },
-    { playerId: "5", name: "NoActual", position: "TE", weeklyProjectionAvailable: false, weeklyExpectation: null, availabilityProbability: 1, confidence: "PRIOR_ONLY", priorPerGame: 9 },
-    { playerId: "6", name: "Empty", position: "WR", weeklyProjectionAvailable: false, weeklyExpectation: null, availabilityProbability: 1, confidence: "INSUFFICIENT" },
+    { playerId: "1", name: "QB1", position: "QB", weeklyExpectation: 25, priorPerGame: 24, unrankableReason: null },
+    { playerId: "2", name: "RB1", position: "RB", weeklyExpectation: 18, priorPerGame: 16, unrankableReason: null },
+    { playerId: "3", name: "RB2", position: "RB", weeklyExpectation: 20, priorPerGame: 15, unrankableReason: null },
+    // A healthy prior-only player ranked ON their prior is rankable — not dropped.
+    { playerId: "3b", name: "PriorOnly", position: "RB", weeklyExpectation: 12, priorPerGame: 12, unrankableReason: null },
+    { playerId: "4", name: "OutWR", position: "WR", weeklyExpectation: null, unrankableReason: "CONFIRMED_INACTIVE_OUT" },
+    { playerId: "5", name: "FreeAgent", position: "TE", weeklyExpectation: null, unrankableReason: "NO_CURRENT_TEAM" },
+    { playerId: "6", name: "Empty", position: "WR", weeklyExpectation: null, unrankableReason: "NO_PRIOR_OR_COMPLETED_WEEK_ACTUAL" },
   ];
   const ranked = assignFullRanks(rows);
   const byId = Object.fromEntries(ranked.map((r) => [r.playerId, r]));
-  assert.equal(ranked.length, 6); // nothing dropped
+  assert.equal(ranked.length, 7); // nothing dropped
   assert.equal(byId["1"].overallRank, 1);
   assert.equal(byId["3"].overallRank, 2);
   assert.equal(byId["2"].overallRank, 3);
-  assert.equal(byId["1"].positionRank, 1);
+  assert.equal(byId["3b"].overallRank, 4);
   assert.equal(byId["3"].positionRank, 1); // RB2 (20) outranks RB1 (18) within RB
   assert.equal(byId["2"].positionRank, 2);
+  assert.equal(byId["3b"].positionRank, 3);
+  assert.equal(byId["1"].positionRank, 1);
   assert.equal(byId["4"].rankable, false);
   assert.equal(byId["4"].overallRank, null);
-  assert.ok(byId["4"].unrankableReason.includes("OUT"));
-  assert.equal(byId["5"].unrankableReason, "NO_COMPLETED_WEEK_ACTUAL");
+  assert.equal(byId["4"].unrankableReason, "CONFIRMED_INACTIVE_OUT");
+  assert.equal(byId["5"].unrankableReason, "NO_CURRENT_TEAM");
   assert.equal(byId["6"].unrankableReason, "NO_PRIOR_OR_COMPLETED_WEEK_ACTUAL");
   // Input rows are untouched (pure).
   assert.equal(rows[0].overallRank, undefined);
