@@ -460,6 +460,40 @@ export function buildWeeklyProjectionReport({
   });
 }
 
+/**
+ * Rank a full universe of weekly projection rows by their already-resolved disposition. The caller
+ * sets, per row, a final `weeklyExpectation` (number) for a rankable row, or an explicit
+ * `unrankableReason` (string) for one that cannot be ranked this week. A row is RANKABLE iff it has
+ * no `unrankableReason` and a finite `weeklyExpectation`; rankable rows get an `overallRank` (by
+ * weeklyExpectation desc, prior then playerId as deterministic tiebreakers) and a `positionRank`
+ * within their position. Unrankable rows keep their reason and are returned too — a missing /
+ * benched / injured / no-team player is surfaced with a reason and NEVER silently dropped. Pure:
+ * returns new row objects in the input order; the input rows are untouched.
+ */
+export function assignFullRanks(rows) {
+  if (!Array.isArray(rows)) throw new Error("rows must be an array");
+  const annotated = rows.map((row) => {
+    const expectation = finite(row.weeklyExpectation) ? Number(row.weeklyExpectation) : null;
+    const rankable = row.unrankableReason == null && expectation != null;
+    const unrankableReason = rankable ? null : (row.unrankableReason ?? "WEEKLY_PROJECTION_UNAVAILABLE");
+    return { ...row, rankable, unrankableReason, overallRank: null, positionRank: null };
+  });
+  const ranked = annotated.filter((row) => row.rankable);
+  ranked.sort((a, b) =>
+    (Number(b.weeklyExpectation) - Number(a.weeklyExpectation)) ||
+    ((finite(b.priorPerGame) ? Number(b.priorPerGame) : -Infinity) - (finite(a.priorPerGame) ? Number(a.priorPerGame) : -Infinity)) ||
+    String(a.playerId ?? "").localeCompare(String(b.playerId ?? "")));
+  const positionCounters = new Map();
+  ranked.forEach((row, index) => {
+    row.overallRank = index + 1;
+    const pos = String(row.position ?? "UNK").toUpperCase();
+    const next = (positionCounters.get(pos) ?? 0) + 1;
+    positionCounters.set(pos, next);
+    row.positionRank = next;
+  });
+  return annotated;
+}
+
 export {
   FIRST_WEEK,
   LAST_WEEK,
