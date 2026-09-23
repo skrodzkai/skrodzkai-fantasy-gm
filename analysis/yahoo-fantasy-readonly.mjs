@@ -17,6 +17,7 @@ export const REDIRECT_URI = "https://localhost:8765/callback";
 export const AUTHORIZATION_ENDPOINT = "https://api.login.yahoo.com/oauth2/request_auth";
 export const TOKEN_ENDPOINT = "https://api.login.yahoo.com/oauth2/get_token";
 export const FANTASY_API_BASE = "https://fantasysports.yahooapis.com/fantasy/v2";
+const OWNED_TEAM_PATH = `/users;use_login=1/games;game_codes=${TARGET.gameCode};seasons=${TARGET.season}/teams?format=json`;
 
 const KEYCHAIN_SERVICE = "com.skrodzkai.fantasy.yahoo";
 const KEYCHAIN_FIELDS = Object.freeze({
@@ -26,6 +27,7 @@ const KEYCHAIN_FIELDS = Object.freeze({
   yahooGuid: "yahoo-guid",
 });
 const SECURITY = "/usr/bin/security";
+const OWNED_TEAM_IDENTITY_PREFIX = "owned-team:";
 
 function fail(code) {
   throw new Error(code);
@@ -197,29 +199,41 @@ export function parseMembership(payload, expectedGuid) {
   const userEntries = numberedEntries(users);
   if (userEntries.length !== 1 || Number(users?.count) !== 1) fail("yahoo_identity_ambiguous");
   const user = userEntries[0]?.user;
-  const observedGuid = requireText(directField(user, "guid"), "yahoo_identity_missing");
-  if (!constantTimeEqual(observedGuid, requireText(expectedGuid, "yahoo_expected_identity_missing"))) {
-    fail("yahoo_identity_mismatch");
+  const observedGuidValue = directField(user, "guid");
+  const observedGuid = typeof observedGuidValue === "string" && observedGuidValue.length > 0
+    ? observedGuidValue
+    : null;
+
+  const gameResources = findResources(user, "game_key");
+  const gameMatches = gameResources.filter((resource) => {
+    return directField(resource, "code") === TARGET.gameCode && Number(directField(resource, "season")) === TARGET.season;
+  });
+  if (gameMatches.length !== 1) fail("yahoo_target_game_membership_missing");
+  const gameKey = requireText(directField(gameMatches[0], "game_key"), "yahoo_game_key_missing");
+  if (!/^\d+$/.test(gameKey)) fail("yahoo_game_key_invalid");
+  const leagueKey = `${gameKey}.l.${TARGET.leagueId}`;
+  const teamKey = `${leagueKey}.t.${TARGET.teamId}`;
+  const teamResources = findResources(gameMatches[0], "team_key");
+  if (!teamResources.some((resource) => directField(resource, "team_key") === teamKey)) {
+    fail("yahoo_target_team_ownership_missing");
   }
 
-  const leagueResources = findResources(user, "league_key");
-  const leagueMatches = leagueResources.filter((resource) => {
-    const leagueKey = directField(resource, "league_key");
-    return typeof leagueKey === "string" && leagueKey.endsWith(`.l.${TARGET.leagueId}`);
-  });
-  if (leagueMatches.length !== 1) fail("yahoo_target_league_membership_missing");
-  const leagueKey = directField(leagueMatches[0], "league_key");
-  if (!/^\d+\.l\.420010$/.test(leagueKey)) fail("yahoo_target_league_key_invalid");
-  const gameKey = requireText(leagueKey.split(".l.")[0], "yahoo_game_key_missing");
-  const teamKey = `${leagueKey}.t.${TARGET.teamId}`;
-  const teamResources = findResources(leagueMatches[0], "team_key");
-  const team = teamResources.find((resource) => directField(resource, "team_key") === teamKey);
-  if (!team) fail("yahoo_target_team_membership_missing");
-  const managerGuids = findValues(team, "guid").filter((value) => typeof value === "string");
-  if (!managerGuids.some((value) => constantTimeEqual(value, expectedGuid))) {
-    fail("yahoo_target_team_identity_mismatch");
+  const ownedTeamIdentity = `${OWNED_TEAM_IDENTITY_PREFIX}${teamKey}`;
+  if (expectedGuid) {
+    if (expectedGuid.startsWith(OWNED_TEAM_IDENTITY_PREFIX)) {
+      if (!constantTimeEqual(expectedGuid, ownedTeamIdentity)) fail("yahoo_identity_mismatch");
+    } else {
+      if (!observedGuid) fail("yahoo_identity_missing");
+      if (!constantTimeEqual(observedGuid, expectedGuid)) fail("yahoo_identity_mismatch");
+    }
   }
-  return { gameKey, leagueKey, teamKey };
+  return {
+    gameKey,
+    leagueKey,
+    teamKey,
+    observedGuid,
+    identityBinding: observedGuid || ownedTeamIdentity,
+  };
 }
 
 function normalizePlayer(resource) {
@@ -266,8 +280,7 @@ async function yahooFantasyGet(path, accessToken, fetchImpl = fetch) {
 }
 
 export async function fetchVerifiedRoster({ accessToken, expectedGuid, fetchImpl = fetch }) {
-  const membershipPath = `/users;use_login=1/games;game_codes=${TARGET.gameCode};seasons=${TARGET.season}/leagues;out=teams?format=json`;
-  const membershipPayload = await yahooFantasyGet(membershipPath, accessToken, fetchImpl);
+  const membershipPayload = await yahooFantasyGet(OWNED_TEAM_PATH, accessToken, fetchImpl);
   const membership = parseMembership(membershipPayload, expectedGuid);
   const rosterPayload = await yahooFantasyGet(`/team/${membership.teamKey}/roster?format=json`, accessToken, fetchImpl);
   const players = parseRoster(rosterPayload, membership.teamKey);
@@ -300,13 +313,18 @@ async function readKeychain(field) {
 async function writeKeychain(field, value) {
   if (!Object.values(KEYCHAIN_FIELDS).includes(field)) fail("yahoo_keychain_field_invalid");
   requireText(value, `yahoo_keychain_item_empty:${field}`);
+  // security's trailing -w uses getpass twice on /dev/tty, not this pipe.
+  // Its documented interactive mode accepts one command on private stdin.
+  // Hex is transport encoding (not encryption); it prevents command injection.
+  const command = `add-generic-password -U -a ${field} -s ${KEYCHAIN_SERVICE} -T "" -X ${Buffer.from(value, "utf8").toString("hex")}\n`;
+  // Apple's interactive reader has a 4096-byte buffer; never allow truncation.
+  if (Buffer.byteLength(command) >= 4096) fail(`yahoo_keychain_item_too_long:${field}`);
   await new Promise((resolve, reject) => {
-    const child = spawn(SECURITY, [
-      "add-generic-password", "-U", "-a", field, "-s", KEYCHAIN_SERVICE, "-T", "", "-w",
-    ], { stdio: ["pipe", "ignore", "ignore"] });
+    const child = spawn(SECURITY, ["-i"], { stdio: ["pipe", "ignore", "ignore"] });
     child.once("error", () => reject(new Error(`yahoo_keychain_write_failed:${field}`)));
-    child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`yahoo_keychain_write_failed:${field}`)));
-    child.stdin.end(`${value}\n`);
+    child.stdin.once("error", () => reject(new Error(`yahoo_keychain_write_failed:${field}`)));
+    child.once("close", (code) => code === 0 ? resolve() : reject(new Error(`yahoo_keychain_write_failed:${field}`)));
+    child.stdin.end(command);
   });
 }
 
@@ -359,7 +377,12 @@ async function enroll({ fetchImpl = fetch } = {}) {
   const callbackUrl = await readHiddenLine("Paste the complete redirect URL (input hidden): ");
   const code = parseCallbackUrl(callbackUrl, state);
   const tokens = await exchangeAuthorizationCode({ clientId, clientSecret, code, fetchImpl });
-  const yahooGuid = requireText(tokens.yahooGuid, "yahoo_token_identity_missing");
+  const membershipPayload = await yahooFantasyGet(OWNED_TEAM_PATH, tokens.accessToken, fetchImpl);
+  const membership = parseMembership(membershipPayload);
+  if (tokens.yahooGuid && membership.observedGuid && !constantTimeEqual(tokens.yahooGuid, membership.observedGuid)) {
+    fail("yahoo_token_identity_mismatch");
+  }
+  const yahooGuid = membership.identityBinding;
   await writeKeychain(KEYCHAIN_FIELDS.yahooGuid, yahooGuid);
   await writeKeychain(KEYCHAIN_FIELDS.refreshToken, tokens.refreshToken);
   process.stdout.write(`${JSON.stringify({ status: "enrolled", identityBound: true, keychainService: KEYCHAIN_SERVICE, redirectUri: REDIRECT_URI })}\n`);
@@ -371,7 +394,11 @@ async function roster({ fetchImpl = fetch } = {}) {
   const refreshToken = await readKeychain(KEYCHAIN_FIELDS.refreshToken);
   const yahooGuid = await readKeychain(KEYCHAIN_FIELDS.yahooGuid);
   const tokens = await refreshAccessToken({ clientId, clientSecret, refreshToken, fetchImpl });
-  if (tokens.yahooGuid && !constantTimeEqual(tokens.yahooGuid, yahooGuid)) fail("yahoo_refresh_identity_mismatch");
+  if (
+    tokens.yahooGuid &&
+    !yahooGuid.startsWith(OWNED_TEAM_IDENTITY_PREFIX) &&
+    !constantTimeEqual(tokens.yahooGuid, yahooGuid)
+  ) fail("yahoo_refresh_identity_mismatch");
   if (!constantTimeEqual(tokens.refreshToken, refreshToken)) {
     await writeKeychain(KEYCHAIN_FIELDS.refreshToken, tokens.refreshToken);
   }
