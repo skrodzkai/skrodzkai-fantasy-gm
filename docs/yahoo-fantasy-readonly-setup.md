@@ -1,6 +1,6 @@
 # Yahoo Fantasy enrollment and weekly read operations
 
-The enrollment/roster connector is fixed to NFL season 2026, league `420010`, and team `7`. All commands remain read-only. The separate operations module adds verified weekly roster, settings, transaction, and candidate reads. It does not expose a generic Yahoo client. Enrollment's network operations are:
+The enrollment/roster connector is fixed to NFL season 2026, league `420010`, and team `7`. All commands remain read-only. The separate operations module adds verified weekly roster, settings, transaction, and candidate reads. Its exported helpers provide GET-only transport and in-process token refresh; CLI output never contains credentials. Enrollment's network operations are:
 
 - `POST https://api.login.yahoo.com/oauth2/get_token` for the authorization-code exchange or refresh grant.
 - `GET` the signed-in user's 2026 NFL league/team membership from the Yahoo Fantasy API.
@@ -60,7 +60,7 @@ node analysis/yahoo-fantasy-operations.mjs candidates FA:0:25
 node analysis/yahoo-fantasy-operations.mjs candidates W:0:25
 ```
 
-- `snapshot`: verified current week, league waiver settings and slot counts, current roster eligibility/selected positions/status, team-specific pending waivers/trades, and up to25 recent completed league transactions.
+- `snapshot`: verified current week, league waiver settings and slot counts, current roster eligibility/selected positions/status, team-specific pending waivers/trades, and up to 25 recent completed league transactions.
 - `candidates`: one league-specific free-agent or waiver page, with ownership. Follow `nextStart` until null to finish the selected pool; a single page is not the full waiver universe. Repeated/changed pages across a live scan must be reconciled by player key, not assumed atomic.
 - Missing collections, wrong league/team/week, invalid counts, duplicate players, taken candidates, or potentially truncated pending claims fail rather than pretending data is complete.
 - Null status is unreported, not a health clearance. Roster-wide editability is not proof that an individual player's game is unlocked. `playerLocksVerified` remains false. Unknown eligibility cannot authorize a move.
@@ -69,7 +69,7 @@ node analysis/yahoo-fantasy-operations.mjs candidates W:0:25
 
 ### Actual access capability
 
-As checked September23,2026, the installed app displays **Fantasy Sports - Read** only. Yahoo's [current access page](https://sports.yahoo.com/developer/access/) states that API access is currently read-only and write access is unavailable. The [reference guide](https://sports.yahoo.com/developer/docs/) still describes historical POST/PUT endpoints; these examples do not establish this application's permission. This implementation contains no Fantasy POST/PUT/DELETE, transaction executor, approval-packet framework, or speculative write fallback.
+As checked September 23, 2026, the installed app displays **Fantasy Sports - Read** only. Yahoo's [current access page](https://sports.yahoo.com/developer/access/) states that API access is currently read-only and write access is unavailable. The [reference guide](https://sports.yahoo.com/developer/docs/) still describes historical POST/PUT endpoints; these examples do not establish this application's permission. This implementation contains no Fantasy POST/PUT/DELETE, transaction executor, approval-packet framework, or speculative write fallback.
 
 Use the API for research and read-only verification once live access is proven. Use the existing permitted signed-in Safari workflow for exact Joe-approved lineup/IR/add-drop/waiver changes. Revalidate live identities, availability, locks, legal slots/drop, exact approval conditions and expiry; preserve free-agent-only versus priority-spending mode; verify the resulting roster and transaction receipt. Do not repeat an ambiguous submission through the other route. Old completed approvals are not reusable.
 
@@ -77,6 +77,6 @@ Use the API for research and read-only verification once live access is proven. 
 
 These commands are acceptance instructions, not a claim they have already succeeded. They use the existing Keychain and may persist a rotated refresh token. The prior direct-agent Keychain denial must be resolved through supported permission review; never evade it through another process, credential source or changed protections. Owner enrollment/roster proof does not prove unattended access. No new login or app recreation is implied.
 
-Before switching the existing heartbeat to API reads, verify a real refreshed `snapshot` against the live Safari roster, exact2026/420010/7 target, current week, player identities/slots and pending claims; verify FA and W page responses as well. Record only sanitized results. If access or response validation fails, report the actual blocker and use the already-permitted browser read path without claiming API readiness. Do not restore polling or add another automation. Keep the weekly custom rankings fixed between authorized refreshes.
+Before switching the existing heartbeat to API reads, verify a real refreshed `snapshot` against the live Safari roster, exact 2026/420010/7 target, current week, player identities/slots and pending claims; verify FA and W page responses as well. Record only sanitized results. If access or response validation fails, report the actual blocker and use the already-permitted browser read path without claiming API readiness. Do not restore polling or add another automation. Keep the weekly custom rankings fixed between authorized refreshes.
 
 References: [Yahoo Fantasy API access](https://sports.yahoo.com/developer/access/), [API reference](https://sports.yahoo.com/developer/docs/), [token flow](https://developer.yahoo.com/oauth2/guide/flows_authcode/), and [bearer requests](https://developer.yahoo.com/oauth2/guide/apirequests/).

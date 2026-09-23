@@ -394,7 +394,7 @@ async function roster({ fetchImpl = fetch } = {}) {
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
-async function refreshBoundAccess(fetchImpl) {
+export async function refreshBoundAccess(fetchImpl = fetch) {
   const clientId = await readKeychain(KEYCHAIN_FIELDS.clientId);
   const clientSecret = await readKeychain(KEYCHAIN_FIELDS.clientSecret);
   const refreshToken = await readKeychain(KEYCHAIN_FIELDS.refreshToken);
@@ -408,15 +408,8 @@ async function refreshBoundAccess(fetchImpl) {
   if (!constantTimeEqual(tokens.refreshToken, refreshToken)) {
     await writeKeychain(KEYCHAIN_FIELDS.refreshToken, tokens.refreshToken);
   }
-  return { accessToken: tokens.accessToken, yahooGuid };
-}
-
-// Operations reuse the enrolled Keychain binding and refresh persistence. Callers
-// must recheck the returned membership on every read command.
-export async function getVerifiedAccess({ fetchImpl = fetch } = {}) {
-  const { accessToken, yahooGuid } = await refreshBoundAccess(fetchImpl);
-  const membershipPayload = await yahooFantasyGet(OWNED_TEAM_PATH, accessToken, fetchImpl);
-  return { accessToken, membership: parseMembership(membershipPayload, yahooGuid) };
+  const { accessToken } = tokens;
+  return { accessToken, yahooGuid };
 }
 
 function usage() {

@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import process from "node:process";
 import {
   TARGET, directField, findResources, findValues,
-  getVerifiedAccess, parseMembership, yahooFantasyGet,
+  refreshBoundAccess, parseMembership, yahooFantasyGet,
 } from "./yahoo-fantasy-readonly.mjs";
 
 const membershipPath = `/users;use_login=1/games;game_codes=nfl;seasons=2026/teams?format=json`;
@@ -137,14 +137,18 @@ function transactions(payload, membership) {
   return list;
 }
 
-export async function operate({ command, packet, transport }) {
-  // Reject unsupported mutations and malformed paging before any credential use.
+function validateRequest(command, packet) {
   if (!["snapshot", "candidates"].includes(command)) fail("yahoo_readonly_command_required");
   if (command === "candidates" && (!["FA", "W"].includes(packet?.status) ||
       !Number.isSafeInteger(packet?.start) || packet.start < 0 ||
       !Number.isSafeInteger(packet?.count) || packet.count < 1 || packet.count > 25 ||
       !Number.isSafeInteger(packet.start + packet.count))) fail("yahoo_page_invalid");
+}
+
+export async function operate({ command, packet, transport }) {
+  validateRequest(command, packet);
   if (!transport || typeof transport.get !== "function") fail("yahoo_transport_missing");
+  if (typeof transport.expectedGuid !== "string" || !transport.expectedGuid.trim()) fail("yahoo_identity_binding_missing");
   const membership = parseMembership(await transport.get(membershipPath), transport.expectedGuid);
   const settings = parseSettings(await transport.get(`/league/${membership.leagueKey}/settings?format=json`), membership);
   const base = {
@@ -174,15 +178,14 @@ async function main(args) {
   } else if (command === "candidates" && args.length === 2 && /^(FA|W):[0-9]+:[0-9]+$/.test(arg)) {
     const [status, start, count] = arg.split(":");
     packet = { status, start: Number(start), count: Number(count) };
-    if (!Number.isSafeInteger(packet.start) || !Number.isSafeInteger(packet.count) ||
-        packet.count < 1 || packet.count > 25 ||
-        !Number.isSafeInteger(packet.start + packet.count)) fail("yahoo_page_invalid");
   } else fail("yahoo_readonly_command_required");
-  const access = await getVerifiedAccess();
+  // Validate before accessing Keychain, not only inside the read operation.
+  validateRequest(command, packet);
+  const access = await refreshBoundAccess();
   const result = await operate({
     command, packet,
     transport: {
-      expectedGuid: access.membership.identityBinding,
+      expectedGuid: access.yahooGuid,
       get: path => yahooFantasyGet(path, access.accessToken),
     },
   });
