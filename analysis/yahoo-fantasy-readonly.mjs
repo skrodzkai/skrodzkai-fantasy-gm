@@ -138,7 +138,7 @@ export function refreshAccessToken({ clientId, clientSecret, refreshToken, fetch
   });
 }
 
-function directField(resource, key) {
+export function directField(resource, key) {
   if (Array.isArray(resource)) {
     for (const item of resource) {
       if (item && typeof item === "object" && !Array.isArray(item) && Object.hasOwn(item, key)) return item[key];
@@ -162,7 +162,7 @@ function collectResourceCandidates(node, key, output) {
   }
 }
 
-function findResources(node, key) {
+export function findResources(node, key) {
   const candidates = [];
   collectResourceCandidates(node, key, candidates);
   const resources = new Map();
@@ -174,7 +174,7 @@ function findResources(node, key) {
   return [...resources.values()].map(({ candidate }) => candidate);
 }
 
-function findValues(node, key, output = []) {
+export function findValues(node, key, output = []) {
   if (Array.isArray(node)) {
     for (const item of node) findValues(item, key, output);
   } else if (node && typeof node === "object") {
@@ -262,7 +262,7 @@ export function parseRoster(payload, expectedTeamKey) {
   return players;
 }
 
-async function yahooFantasyGet(path, accessToken, fetchImpl = fetch) {
+export async function yahooFantasyGet(path, accessToken, fetchImpl = fetch) {
   if (typeof path !== "string" || !path.startsWith("/") || path.includes("..")) fail("yahoo_resource_path_invalid");
   const url = new URL(`${FANTASY_API_BASE}${path}`);
   if (url.origin !== new URL(FANTASY_API_BASE).origin) fail("yahoo_resource_origin_invalid");
@@ -389,6 +389,12 @@ async function enroll({ fetchImpl = fetch } = {}) {
 }
 
 async function roster({ fetchImpl = fetch } = {}) {
+  const { accessToken, yahooGuid } = await refreshBoundAccess(fetchImpl);
+  const result = await fetchVerifiedRoster({ accessToken, expectedGuid: yahooGuid, fetchImpl });
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+}
+
+export async function refreshBoundAccess(fetchImpl = fetch) {
   const clientId = await readKeychain(KEYCHAIN_FIELDS.clientId);
   const clientSecret = await readKeychain(KEYCHAIN_FIELDS.clientSecret);
   const refreshToken = await readKeychain(KEYCHAIN_FIELDS.refreshToken);
@@ -402,8 +408,8 @@ async function roster({ fetchImpl = fetch } = {}) {
   if (!constantTimeEqual(tokens.refreshToken, refreshToken)) {
     await writeKeychain(KEYCHAIN_FIELDS.refreshToken, tokens.refreshToken);
   }
-  const result = await fetchVerifiedRoster({ accessToken: tokens.accessToken, expectedGuid: yahooGuid, fetchImpl });
-  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  const { accessToken } = tokens;
+  return { accessToken, yahooGuid };
 }
 
 function usage() {
