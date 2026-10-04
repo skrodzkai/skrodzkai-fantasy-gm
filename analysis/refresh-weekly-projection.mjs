@@ -7,6 +7,8 @@ import { buildWeeklyProjectionReport, deriveOpportunityRates, opportunityExpecte
 import { scoreOffenseStatLine, scoreTeamDefenseStatLine, OFFENSE_SCORING } from "./player-intelligence.mjs";
 import { scoreHistoricalStatRow } from "./historical-player-calibration.mjs";
 import { parseCsv } from "./opponent-calibration.mjs";
+import { buildIdpOpportunityModel, projectIdp, compareIdpStreaming, sleeperIdpLine } from "./inseason-idp.mjs";
+export { sleeperIdpLine };
 
 // Public read-only Sleeper actuals. Registered source "sleeper" (injury_and_identity /
 // weekly actuals cross-check). Season-scoped weekly box-score stats keyed by Sleeper id.
@@ -40,23 +42,6 @@ export function sleeperOffenseLine(stats) {
     returnTouchdowns: num(stats.kr_td) + num(stats.pr_td),
     twoPointConversions: num(stats.pass_2pt) + num(stats.rush_2pt) + num(stats.rec_2pt),
     fumblesLost: stats.fum_lost,
-  };
-}
-
-export function sleeperIdpLine(stats) {
-  return {
-    soloTackles: stats.idp_tkl_solo,
-    assistedTackles: stats.idp_tkl_ast,
-    sacks: stats.idp_sack,
-    interceptions: stats.idp_int,
-    forcedFumbles: stats.idp_ff,
-    fumbleRecoveries: stats.idp_fum_rec,
-    touchdowns: stats.idp_def_td,
-    safeties: stats.idp_safe,
-    passesDefended: stats.idp_pass_def,
-    blockedKicks: stats.idp_blk_kick,
-    tacklesForLoss: stats.idp_tkl_loss,
-    turnoverReturnYards: num(stats.idp_int_ret_yd) + num(stats.idp_fum_ret_yd),
   };
 }
 
@@ -265,60 +250,6 @@ export function normalizeTeam(team) {
 
 const IDP_POSITIONS = new Set(["DL", "LB", "DB", "S", "CB", "DE", "DT", "NT", "ILB", "OLB", "EDGE", "SS", "FS", "MLB"]);
 const SCORED_POSITIONS = new Set([...OFFENSE_POSITIONS, "K", "PK", "DEF", "DST", ...IDP_POSITIONS]);
-const IDP_GROUPS = Object.freeze({ DL: "DL", DE: "DL", DT: "DL", NT: "DL", EDGE: "DL", LB: "LB", ILB: "LB", OLB: "LB", MLB: "LB", DB: "DB", S: "DB", CB: "DB", SS: "DB", FS: "DB" });
-
-function idpGroup(position) {
-  return IDP_GROUPS[String(position ?? "").toUpperCase()] ?? null;
-}
-
-// A special-teams snap or game flag alone is not evidence of a defensive IDP actual.
-function hasIdpEvidence(stats) {
-  return stats && (num(stats.def_snp) > 0 || Object.values(sleeperIdpLine(stats)).some((value) => num(value) > 0));
-}
-
-// Use the existing exact IDP scorer, but count only defensive player-weeks for an IDP with no
-// trusted individual prior. Trusted-prior rows retain the established completedWeeksSignal path.
-function defensiveIdpSignal(statsKey, weekStatsList) {
-  if (statsKey == null) return null;
-  let games = 0;
-  let points = 0;
-  let produced = false;
-  for (const { stats } of weekStatsList) {
-    const line = stats?.[statsKey];
-    if (!hasIdpEvidence(line)) continue;
-    const score = scoreWeeklyLeaguePoints(sleeperIdpLine(line), "idp");
-    games += 1;
-    points += score;
-    if (score !== 0) produced = true;
-  }
-  return games ? { games, produced, week1Points: points / games, week1OpportunityPoints: null, week1Opportunity: null } : null;
-}
-
-// Every numeric Sleeper id contributes at most once per completed week. The position comes from
-// the identity feed; only defensive activity enters a group's exact-league-scored mean.
-export function idpGroupMeansMultiWeek(weekStatsList, playersMap) {
-  const totals = { DL: { points: 0, sampledPlayerWeeks: 0 }, LB: { points: 0, sampledPlayerWeeks: 0 }, DB: { points: 0, sampledPlayerWeeks: 0 } };
-  for (const { stats } of weekStatsList) {
-    const seenPlayers = new Set();
-    for (const [key, line] of Object.entries(stats ?? {})) {
-      if (!/^[0-9]+$/.test(key) || !hasIdpEvidence(line)) continue;
-      const entry = playersMap[key];
-      const positions = Array.isArray(entry?.fantasy_positions) ? entry.fantasy_positions : [];
-      const group = positions.map(idpGroup).find(Boolean) ?? idpGroup(entry?.position);
-      if (!group) continue;
-      const identity = String(entry?.gsis_id || key);
-      if (seenPlayers.has(identity)) continue;
-      seenPlayers.add(identity);
-      totals[group].points += scoreWeeklyLeaguePoints(sleeperIdpLine(line), "idp");
-      totals[group].sampledPlayerWeeks += 1;
-    }
-  }
-  return Object.fromEntries(Object.entries(totals).map(([group, sample]) => [group, {
-    mean: sample.sampledPlayerWeeks ? sample.points / sample.sampledPlayerWeeks : null,
-    sampledPlayerWeeks: sample.sampledPlayerWeeks,
-  }]));
-}
-
 export function scoringKindForPosition(position) {
   const pos = String(position ?? "").toUpperCase();
   if (pos === "DEF" || pos === "DST") return "teamdef";
@@ -658,9 +589,7 @@ const MATCHUP_IDP_POSITIONS = new Set(["LB", "DB", "DL", "S", "CB", "DE", "DT", 
 export function buildOpponentMatchup({ seasonTexts, gamesText, dstBaselineMean, shrinkGames = 17, clampLow = 0.85, clampHigh = 1.15, defClampLow = 0.75, defClampHigh = 1.25 }) {
   const teamGames = new Map();            // team -> distinct season|week count (games played)
   const offenseAllowed = new Map();       // defenseTeam -> { POS -> points sum }
-  const idpAllowed = new Map();           // offenseTeam -> points sum
   const leagueByPos = {};                 // POS -> points sum
-  let leagueIdp = 0;
   const seasonsUsed = [];
 
   // Games played per team (both sides of every regular-season game in the window).
@@ -709,9 +638,6 @@ export function buildOpponentMatchup({ seasonTexts, gamesText, dstBaselineMean, 
           bucket.K = (bucket.K ?? 0) + lane.points;
           offenseAllowed.set(opponent, bucket);
           leagueByPos.K = (leagueByPos.K ?? 0) + lane.points;
-        } else if (lane.scoringKind === "idp") {
-          idpAllowed.set(opponent, (idpAllowed.get(opponent) ?? 0) + lane.points);
-          leagueIdp += lane.points;
         }
       }
     }
@@ -720,7 +646,6 @@ export function buildOpponentMatchup({ seasonTexts, gamesText, dstBaselineMean, 
   const totalTeamGames = [...teamGames.values()].reduce((sum, value) => sum + value, 0);
   const leaguePerGameByPos = {};
   for (const [pos, sum] of Object.entries(leagueByPos)) leaguePerGameByPos[pos] = totalTeamGames ? sum / totalTeamGames : 0;
-  const leagueIdpPerGame = totalTeamGames ? leagueIdp / totalTeamGames : 0;
   const leagueBandMean = leagueBandGames ? leagueBandSum / leagueBandGames : 0;
 
   const offenseFactor = (defenseTeam, position) => {
@@ -731,14 +656,6 @@ export function buildOpponentMatchup({ seasonTexts, gamesText, dstBaselineMean, 
     const allowed = offenseAllowed.get(team)?.[pos];
     if (!team || !(games > 0) || !leaguePos || allowed == null) return { factor: 1, supported: false };
     const raw = (allowed / games) / leaguePos;
-    return { factor: shrinkFactorToOne(raw, games, shrinkGames, clampLow, clampHigh), supported: true, games };
-  };
-  const idpFactor = (offenseTeam) => {
-    const team = normalizeTeam(offenseTeam);
-    const games = teamGames.get(team) ?? 0;
-    const allowed = idpAllowed.get(team);
-    if (!team || !(games > 0) || !leagueIdpPerGame || allowed == null) return { factor: 1, supported: false };
-    const raw = (allowed / games) / leagueIdpPerGame;
     return { factor: shrinkFactorToOne(raw, games, shrinkGames, clampLow, clampHigh), supported: true, games };
   };
   const defFactor = (offenseTeam) => {
@@ -752,20 +669,18 @@ export function buildOpponentMatchup({ seasonTexts, gamesText, dstBaselineMean, 
 
   return {
     offenseFactor,
-    idpFactor,
     defFactor,
     meta: {
       seasonsUsed: seasonsUsed.sort(),
       totalTeamGames,
       teamsCovered: teamGames.size,
       leaguePerGameByPos,
-      leagueIdpPerGame,
       leagueBandMean,
       dstBaselineMean,
       shrinkGames,
       clamp: { offense: [clampLow, clampHigh], def: [defClampLow, defClampHigh] },
-      basis: "opponent-adjusted fantasy points from real scored nflverse history under the EXACT league scorers; offense vs the DEFENSE faced, IDP vs the OFFENSE faced. DEF is a WHOLE-PROJECTION PROXY: the opponent team's actual final scoring is mapped to the league points-allowed bands and applied as a multiplier to the entire DST baseline (NOT an isolated points-allowed-component adjustment, and NOT exact offense-only points allowed — final team scores can include the offense's own defensive/ST scores). Point-in-time (completed prior seasons only, no leakage). UNCALIBRATED magnitude: shrunk toward neutral by sample and clamped.",
-      limitations: "The DEF factor is a whole-baseline multiplier proxied from the opponent team's final scoring distribution; opponent-specific sack/turnover/return-TD propensity is NOT separately modeled, and the proxy does not isolate exact offense-only points allowed (no per-team historical DST components in the available first-party files). IDP matchup is aggregate defender production allowed by the opponent offense, not per-IDP-position. Kicker matchup uses opponent-defense kicker points allowed. Not validated against 2026 outcomes.",
+      basis: "opponent-adjusted fantasy points from real scored nflverse history under the EXACT league scorers; offense vs the DEFENSE faced. DEF is a WHOLE-PROJECTION PROXY: the opponent team's actual final scoring is mapped to the league points-allowed bands and applied as a multiplier to the entire DST baseline (NOT an isolated points-allowed-component adjustment, and NOT exact offense-only points allowed — final team scores can include the offense's own defensive/ST scores). Point-in-time (completed prior seasons only, no leakage). UNCALIBRATED magnitude: shrunk toward neutral by sample and clamped.",
+      limitations: "The DEF factor is a whole-baseline multiplier proxied from the opponent team's final scoring distribution; opponent-specific sack/turnover/return-TD propensity is NOT separately modeled, and the proxy does not isolate exact offense-only points allowed (no per-team historical DST components in the available first-party files). IDP matchup is omitted. Kicker matchup uses opponent-defense kicker points allowed. Not validated against 2026 outcomes.",
     },
   };
 }
@@ -813,7 +728,7 @@ const FULL_CONTEXT_FIELDS = [
   "scorableSourceFamilyCount", "scorableSourceFamilies", "evidenceStatus", "availabilityAssumption",
   "excludedYahooSeasonPrior", "week1Opportunity",
   "completedGames", "week1SourceStatus", "bye", "kickoff", "homeAway", "boardTeam", "currentTeam",
-  "rawInjuryStatus", "sleeperStatus", "matchupFactor", "matchupStatus", "matchupSupported",
+  "rawInjuryStatus", "sleeperStatus", "matchupFactor", "matchupStatus", "matchupSupported", "idpModel", "eligible",
 ];
 
 function playerNameKey(name) {
@@ -821,19 +736,17 @@ function playerNameKey(name) {
 }
 
 // Resolve the sourced opponent-strength factor for a row from its scoring side. Offense/kicker use
-// the DEFENSE faced; IDP the OFFENSE faced; DEF a whole-baseline proxy from the OFFENSE's actual
+// the DEFENSE faced; DEF a whole-baseline proxy from the OFFENSE's actual
 // scoring. Absent an opponent or historical support the factor is neutral 1.0 (labeled, not fabricated).
 function resolveMatchup(matchupProvider, { scoringKind, opponent, position }) {
   if (!matchupProvider || !opponent) {
     return { factor: 1, supported: false, status: opponent ? "OPPONENT_KNOWN_NO_HISTORY" : "OPPONENT_UNKNOWN_NEUTRAL" };
   }
   const result = scoringKind === "teamdef" ? matchupProvider.defFactor(opponent)
-    : scoringKind === "idp" ? matchupProvider.idpFactor(opponent)
-      : matchupProvider.offenseFactor(opponent, position);
+    : matchupProvider.offenseFactor(opponent, position);
   const status = !result.supported ? "OPPONENT_KNOWN_NO_HISTORY"
     : scoringKind === "teamdef" ? "OPPONENT_SOURCED_DEF_SCORING_PROXY"
-      : scoringKind === "idp" ? "OPPONENT_SOURCED_IDP_AGGREGATE"
-        : "OPPONENT_SOURCED_HISTORICAL";
+      : "OPPONENT_SOURCED_HISTORICAL";
   return { factor: finite(result.factor) ? Number(result.factor) : 1, supported: Boolean(result.supported), status };
 }
 
@@ -870,7 +783,7 @@ export function buildFullWeeklyRankings({
   const seenBoardIdentity = new Set();
   const modelPlayers = [];
   const context = new Map();
-  const idpMeans = idpGroupMeansMultiWeek(weekStatsList, playersMap);
+  const idpModel = buildIdpOpportunityModel(weekStatsList, playersMap, targetWeek);
 
   for (const player of board.players ?? []) {
     const playerId = player.yahooId != null ? String(player.yahooId) : (player.playerId != null ? String(player.playerId) : null);
@@ -901,7 +814,9 @@ export function buildFullWeeklyRankings({
     const sched = team ? schedule.byTeam.get(team) ?? null : null;
     const onBye = byeTrusted && Boolean(team) && !schedule.byTeam.has(team);
     const opponent = sched?.opponent ?? null;
-    const matchup = resolveMatchup(matchupProvider, { scoringKind, opponent, position });
+    const matchup = scoringKind === "idp"
+      ? { factor: 1, supported: false, status: "IDP_MATCHUP_OMITTED_UNSUPPORTED_ROLE_SPECIFIC_RATE" }
+      : resolveMatchup(matchupProvider, { scoringKind, opponent, position });
     // Prior is HEALTH-conditioned vs ROLE-conditioned, resolved explicitly:
     //  - GATE on projection source quality first: a board number backed by <2 scorable families
     //    (e.g. Yahoo-only) is not trusted; it is dropped and the player ranks on observed form, with
@@ -948,13 +863,12 @@ export function buildFullWeeklyRankings({
       missingRolePrior = hasBoardNumber;
       priorBasis = hasBoardNumber ? "NO_ROLE_LIMITED_WEEKLY_PRIOR" : "NONE_NO_PRESEASON_PRIOR";
     }
-    if (scoringKind === "idp" && priorPerGame == null) {
-      signal = defensiveIdpSignal(statsKey, weekStatsList);
-      const groupMean = idpMeans[idpGroup(position)];
-      if (signal && groupMean?.mean != null) {
-        priorPerGame = groupMean.mean;
-        priorBasis = "COMPLETED_WEEK_IDP_GROUP_MEAN";
-      }
+    const currentIdp = scoringKind === "idp" ? projectIdp(idpModel, statsKey) : null;
+    if (currentIdp) {
+      // The generic prior blend remains in place for offense/K/DEF only.
+      signal = null;
+      priorPerGame = null;
+      priorBasis = "CURRENT_DEFENSIVE_ROLE";
     }
     modelPlayers.push({
       playerId,
@@ -989,8 +903,10 @@ export function buildFullWeeklyRankings({
       availabilityAssumption: isTeamDef ? null : (player.availabilityAssumption ?? null),
       excludedYahooSeasonPrior: isTeamDef && finite(player.perGamePoints) ? Number(player.perGamePoints) : null,
       week1Opportunity: signal?.week1Opportunity ?? null,
-      completedGames: signal?.games ?? 0,
-      week1SourceStatus: signal ? (isTeamDef ? "SLEEPER_DST_ACTUAL" : "SLEEPER_ACTUAL") : "NO_COMPLETED_WEEK_RECORD",
+      completedGames: currentIdp?.sampleGames ?? signal?.games ?? 0,
+      week1SourceStatus: currentIdp
+        ? (currentIdp.status === "SNAP_ROLE_MODEL" ? "SLEEPER_DEFENSIVE_SNAPS" : "NO_VALID_DEFENSIVE_SNAP_HISTORY")
+        : signal ? (isTeamDef ? "SLEEPER_DST_ACTUAL" : "SLEEPER_ACTUAL") : "NO_COMPLETED_WEEK_RECORD",
       bye: onBye,
       kickoff: sched?.kickoff ?? null,
       homeAway: sched?.homeAway ?? null,
@@ -1001,6 +917,8 @@ export function buildFullWeeklyRankings({
       matchupFactor: matchup.factor,
       matchupStatus: matchup.status,
       matchupSupported: matchup.supported,
+      idpModel: currentIdp,
+      eligible: player.eligible ?? null,
       noCurrentTeam,
     });
   }
@@ -1010,6 +928,7 @@ export function buildFullWeeklyRankings({
   // identity. Stable id prefers a known Yahoo id, else the Sleeper id. Team defenses stay the 32.
   const usedIds = new Set(modelPlayers.map((player) => player.playerId));
   const seenMissing = new Set();
+  const seenMissingIdentity = new Set();
   let missingCount = 0;
   for (const { stats } of weekStatsList) {
     for (const key of Object.keys(stats ?? {})) {
@@ -1026,21 +945,25 @@ export function buildFullWeeklyRankings({
           (entry.yahoo_id != null && boardKeys.has(`YID:${String(entry.yahoo_id).toUpperCase()}`)) ||
           (entry.gsis_id != null && boardKeys.has(`GID:${String(entry.gsis_id).toUpperCase()}`)) ||
           boardKeys.has(`NP:${playerNameKey(entry.full_name).toUpperCase()}|${positionGroup(position)}`)) continue;
-      const signal = scoringKind === "idp"
-        ? defensiveIdpSignal(key, weekStatsList)
+      const identity = String(entry.gsis_id || key);
+      if (seenMissingIdentity.has(identity)) continue;
+      const currentIdp = scoringKind === "idp" ? projectIdp(idpModel, key) : null;
+      const signal = scoringKind === "idp" ? null
         : completedWeeksSignal({ scoringKind, position, statsKey: key }, weekStatsList, opportunityRates);
       // A relevant missing player must have PRODUCED; offense returners are surfaced, while IDPs
       // need defensive scoring activity rather than special-teams-only participation.
-      if (!signal || !signal.produced) continue;
+      if (scoringKind === "idp" ? currentIdp?.status !== "SNAP_ROLE_MODEL" : !signal || !signal.produced) continue;
       seenMissing.add(key);
+      seenMissingIdentity.add(identity);
       missingCount += 1;
       const team = normalizeTeam(entry.team);
       const sched = team ? schedule.byTeam.get(team) ?? null : null;
       const onBye = byeTrusted && Boolean(team) && !schedule.byTeam.has(team);
       const opponent = sched?.opponent ?? null;
-      const matchup = resolveMatchup(matchupProvider, { scoringKind, opponent, position });
+      const matchup = scoringKind === "idp"
+        ? { factor: 1, supported: false, status: "IDP_MATCHUP_OMITTED_UNSUPPORTED_ROLE_SPECIFIC_RATE" }
+        : resolveMatchup(matchupProvider, { scoringKind, opponent, position });
       const statusInfo = currentPlayerStatus(entry);
-      const groupMean = scoringKind === "idp" ? idpMeans[idpGroup(position)] : null;
       let playerId = entry.yahoo_id != null && !usedIds.has(String(entry.yahoo_id)) ? String(entry.yahoo_id) : `sleeper:${key}`;
       if (usedIds.has(playerId)) playerId = `sleeper:${key}`;
       usedIds.add(playerId);
@@ -1050,10 +973,10 @@ export function buildFullWeeklyRankings({
         position,
         team,
         opponent,
-        priorPerGame: groupMean?.mean ?? null,
+        priorPerGame: null,
         scoringKind,
-        week1Points: signal.week1Points,
-        week1OpportunityPoints: signal.week1OpportunityPoints,
+        week1Points: signal?.week1Points ?? null,
+        week1OpportunityPoints: signal?.week1OpportunityPoints ?? null,
         matchupFactor: matchup.factor,
         matchupStatus: matchup.status,
         availabilityStatus: onBye ? "BYE" : (statusInfo.availabilityStatus ?? null),
@@ -1063,7 +986,7 @@ export function buildFullWeeklyRankings({
         universe: "missing-active",
         group: null,
         sleeperId: key,
-        priorBasis: groupMean?.mean != null ? "COMPLETED_WEEK_IDP_GROUP_MEAN" : "NONE_NO_PRESEASON_PRIOR",
+        priorBasis: currentIdp ? "CURRENT_DEFENSIVE_ROLE" : "NONE_NO_PRESEASON_PRIOR",
         priorGated: false,
         missingRolePrior: false,
         gatedPriorPerGame: null,
@@ -1076,9 +999,9 @@ export function buildFullWeeklyRankings({
         evidenceStatus: "NO_PRESEASON_PROJECTION",
         availabilityAssumption: null,
         excludedYahooSeasonPrior: null,
-        week1Opportunity: signal.week1Opportunity,
-        completedGames: signal.games,
-        week1SourceStatus: "SLEEPER_ACTUAL",
+        week1Opportunity: signal?.week1Opportunity ?? null,
+        completedGames: currentIdp?.sampleGames ?? signal?.games ?? 0,
+        week1SourceStatus: currentIdp ? "SLEEPER_DEFENSIVE_SNAPS" : "SLEEPER_ACTUAL",
         bye: onBye,
         kickoff: sched?.kickoff ?? null,
         homeAway: sched?.homeAway ?? null,
@@ -1089,6 +1012,8 @@ export function buildFullWeeklyRankings({
         matchupFactor: matchup.factor,
         matchupStatus: matchup.status,
         matchupSupported: matchup.supported,
+        idpModel: currentIdp,
+        eligible: fantasyPositions,
         noCurrentTeam: false,
       });
     }
@@ -1128,6 +1053,12 @@ export function buildFullWeeklyRankings({
       unrankableReason = "NO_CURRENT_TEAM";
     } else if (ctx.bye) {
       unrankableReason = "TARGET_WEEK_BYE";
+    } else if (ctx.idpModel) {
+      if (ctx.idpModel.weeklyExpectation == null) unrankableReason = ctx.idpModel.status;
+      else {
+        weeklyExpectation = ctx.idpModel.weeklyExpectation * availability;
+        rankBasis = "IDP_CURRENT_SNAP_ROLE";
+      }
     } else if (baseline == null) {
       // Distinct reasons: a single-family GATED prior, a supported player whose only board number is a
       // conditional per-game rate with NO weekly role prior (never substituted), or truly no prior.
@@ -1136,8 +1067,7 @@ export function buildFullWeeklyRankings({
           : "NO_PRIOR_OR_COMPLETED_WEEK_ACTUAL";
     } else {
       weeklyExpectation = baseline * matchupFactor * availability;
-      rankBasis = ctx.priorBasis === "COMPLETED_WEEK_IDP_GROUP_MEAN" ? "IDP_FORM_REGRESSED_TO_GROUP_MEAN"
-        : row.confidence === "PRIOR_AND_WEEK1" ? "PRIOR_AND_FORM"
+      rankBasis = row.confidence === "PRIOR_AND_WEEK1" ? "PRIOR_AND_FORM"
         : row.confidence === "WEEK1_ONLY" ? "CURRENT_FORM_NO_PRIOR"
           : "PRIOR_ONLY_NO_ACTUAL";
     }
@@ -1145,10 +1075,10 @@ export function buildFullWeeklyRankings({
     // Reconcile the row's own metadata with the resolved disposition (finding: no contradictory
     // weeklyProjectionAvailable=false + "UNAVAILABLE" note on a ranked row).
     merged.weeklyProjectionAvailable = rankable;
+    if (ctx.idpModel) merged.confidence = rankable ? "CURRENT_ROLE" : "IDP_ROLE_UNKNOWN";
     // The prior kind for the human note: a current-starter undiscounted role rate vs a role-limited
     // (backup/unknown) weekly expectation vs a DEF league mean.
-    const priorKind = ctx.priorBasis === "COMPLETED_WEEK_IDP_GROUP_MEAN" ? `${idpGroup(row.position)} completed-week IDP group mean (${idpMeans[idpGroup(row.position)].sampledPlayerWeeks} defensive player-weeks, exact league scoring; uncalibrated shrinkage target, not an individual multi-source forecast)`
-      : ctx.priorBasis === "PRESEASON_STARTER_ROLE_PER_GAME" ? "current-starter undiscounted role rate (depth_chart_order 1)"
+    const priorKind = ctx.priorBasis === "PRESEASON_STARTER_ROLE_PER_GAME" ? "current-starter undiscounted role rate (depth_chart_order 1)"
       : ctx.priorBasis === "PRESEASON_WEEKLY_ROLE_LIMITED" ? "role-limited preseason weekly expectation (no current-starter evidence — weak role)"
         : ctx.priorBasis === "WEEK_LEAGUE_DST_MEAN" ? "league DST mean"
           : "preseason prior";
@@ -1158,8 +1088,8 @@ export function buildFullWeeklyRankings({
     const dispositionNote = rankable
       ? (rankBasis === "PRIOR_ONLY_NO_ACTUAL"
           ? `ranked on the trusted ${priorKind}; no completed-week actual yet (weak evidence)`
-          : rankBasis === "IDP_FORM_REGRESSED_TO_GROUP_MEAN"
-            ? `ranked on defensive completed-week form regressed toward the sourced ${priorKind} at weight ${row.week1Weight} form / ${(1 - row.week1Weight).toFixed(2)} group mean${noPriorReason}`
+          : rankBasis === "IDP_CURRENT_SNAP_ROLE"
+            ? `IDP current defensive role: ${ctx.idpModel.expectedSnaps.toFixed(1)} expected snaps, ${ctx.idpModel.tacklePoints.toFixed(2)} tackle + ${ctx.idpModel.eventBaseline.toFixed(2)} pooled event points; ${ctx.idpModel.uncertainty}; observed splash excluded from individual rate`
           : rankBasis === "CURRENT_FORM_NO_PRIOR"
             ? `ranked on observed completed-week league-scored form; no trusted preseason prior${noPriorReason}`
             : `ranked on the trusted ${priorKind} blended with completed-week form`)
@@ -1173,6 +1103,10 @@ export function buildFullWeeklyRankings({
     return merged;
   });
   const players = assignFullRanks(disposed);
+  const finalCoverage = players.reduce((counts, row) => {
+    counts[row.confidence] = (counts[row.confidence] ?? 0) + 1;
+    return counts;
+  }, {});
 
   // Audit: identity gaps, duplicate ids, roster coverage, DEF count, per-position/coverage tallies.
   const boardYahoo = new Set((board.players ?? []).map((player) => String(player.yahooId)));
@@ -1209,12 +1143,14 @@ export function buildFullWeeklyRankings({
 
   return {
     ...report,
-    provenance: { ...report.provenance, idpGroupMeans: {
-      source: "Sleeper completed-week defensive player actuals; analysis/player-intelligence.mjs exact league IDP scorer",
-      basis: "one canonical player identity per completed week (GSIS id when present, else numeric Sleeper id); IDP fantasy positions normalized to DL/LB/DB; defensive snaps or scored IDP activity required; special-teams/offense-only rows and duplicate aliases excluded; uncalibrated group shrinkage target, not an individual multi-source forecast",
-      groups: idpMeans,
+    season: provenance?.season ?? board?.season ?? null,
+    provenance: { ...report.provenance, idpOpportunity: {
+      source: "Sleeper completed-week defensive snaps, team snaps and exact league IDP scorer",
+      coverage: idpModel.coverage, groups: idpModel.rates,
+      basis: "latest defensive role and recent share; one observed team-game pooled tackle-rate shrinkage; pooled event baseline, no individual splash carryover; uncalibrated; no role-specific matchup source",
     } },
     posture: "research projection only; no roster, Yahoo, or deployment authority",
+    coverage: finalCoverage,
     universe: {
       boardPlayersInput: (board.players ?? []).length,
       boardPlayers: players.filter((row) => row.universe === "board").length,
@@ -1229,7 +1165,7 @@ export function buildFullWeeklyRankings({
       rosterCoverageMissing,
       defenseCount: positionCounts.DEF ?? 0,
       positionCounts,
-      coverage: report.coverage,
+      coverage: finalCoverage,
       rankBasisCounts,
       unrankableReasons,
       matchupApplied,
@@ -1272,6 +1208,7 @@ export async function buildWeeklyRefresh({
       continue;
     }
     const scoringKind = String(input.scoringKind ?? "offense").toLowerCase();
+    if (scoringKind === "idp") throw new Error("IDP weekly projections require --full with completed defensive snap and identity inputs");
     const isTeamDef = scoringKind === "teamdef";
     const sleeperId = boardPlayer.sleeperId == null ? null : String(boardPlayer.sleeperId);
     const stats = sleeperId ? sleeperStats[sleeperId] : null;
@@ -1436,7 +1373,7 @@ export function renderFullRankingsHtml(report) {
   // role rate, depth_chart_order 1) or role-limited (backup/unknown weekly expectation), a gated
   // single-family board prior (ranked on form), a DEF league-mean baseline, or a missing player.
   const priorSrc = (row) => {
-    if (row.priorBasis === "COMPLETED_WEEK_IDP_GROUP_MEAN") return `idp-${idpGroup(row.position)}-mean`;
+    if (row.priorBasis === "CURRENT_DEFENSIVE_ROLE") return "idp-snap-role";
     if (row.universe === "missing-active") return "form(no-prior)";
     if (row.position === "DEF") return "dst-mean";
     if (row.priorGated) return `gated(${row.scorableSourceFamilyCount ?? 0}fam)`;
@@ -1447,7 +1384,7 @@ export function renderFullRankingsHtml(report) {
   };
   const week1 = report.provenance?.week1List ?? [];
   const teamDef = report.provenance?.teamDefense ?? {};
-  const idpMeans = report.provenance?.idpGroupMeans ?? {};
+  const idpOpportunity = report.provenance?.idpOpportunity ?? {};
   const matchup = report.provenance?.matchup ?? {};
   // Default view sorts by current overall rank ascending (not board/input order).
   const ranked = report.players.filter((row) => row.rankable).sort((a, b) => (a.overallRank ?? Infinity) - (b.overallRank ?? Infinity));
@@ -1464,6 +1401,10 @@ export function renderFullRankingsHtml(report) {
     ${dataCell(`${row.opponent ? (row.homeAway === "away" ? "@" : "vs ") + row.opponent : ""}`)}
     <td data-sort="${escapeHtml(row.kickoff ?? "")}">${kickoff(row.kickoff)}</td>
     ${numCell(row.weeklyExpectation)}
+    ${numCell(row.idpModel?.expectedSnaps)}
+    ${numCell(row.idpModel?.tacklePoints)}
+    ${numCell(row.idpModel?.eventBaseline)}
+    ${dataCell(row.idpModel?.uncertainty ?? "")}
     ${numCell(row.priorPerGame)}
     ${numCell(row.week1Signal)}
     <td class="num" data-sort="${row.matchupFactor == null ? 1 : Number(row.matchupFactor)}">${row.matchupFactor == null ? "" : Number(row.matchupFactor).toFixed(3)}${row.matchupSupported ? "" : "*"}</td>
@@ -1485,8 +1426,8 @@ export function renderFullRankingsHtml(report) {
     ${(() => { const h = health(row); return `<td data-sort="${h}">${h}</td>`; })()}
     ${dataCell(row.universe ?? "")}
   </tr>`;
-  const rankedHeaders = ["Ovr", "PosRk", "Player", "Pos", "Team", "Opp", "Kickoff", "Custom", "Prior/g", "Form", "Matchup", "Yahoo*", "Δ vs Yahoo", "Health", "Basis", "PriorSrc", "Gms", "Universe"];
-  const rankedNumCols = new Set([0, 1, 7, 8, 9, 10, 11, 12, 16]);
+  const rankedHeaders = ["Ovr", "PosRk", "Player", "Pos", "Team", "Opp", "Kickoff", "Custom", "IDP snaps", "IDP tackle", "IDP events", "IDP uncertainty", "Prior/g", "Form", "Matchup", "Yahoo*", "Δ vs Yahoo", "Health", "Basis", "PriorSrc", "Gms", "Universe"];
+  const rankedNumCols = new Set([0, 1, 7, 8, 9, 10, 12, 13, 14, 15, 16, 20]);
   const unrankedHeaders = ["Player", "Pos", "Team", "Reason", "Prior/g", "PriorSrc", "Health", "Universe"];
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1514,7 +1455,7 @@ export function renderFullRankingsHtml(report) {
 <h1>SKRODZKai full custom Week ${escapeHtml(report.targetWeek)} rankings</h1>
 <div class="meta">
   Generated ${escapeHtml(report.generatedAt)}. ${escapeHtml(report.posture)}.<br>
-  Custom number = trusted individual prior (or a sourced position-group mean for IDPs without one) blended <code>${escapeHtml(report.week1Weight)}</code> completed-week form /
+  Offense/K/DEF custom number = trusted individual prior blended <code>${escapeHtml(report.week1Weight)}</code> completed-week form /
   <code>${(1 - report.week1Weight).toFixed(2)}</code> prior; the form signal is
   <code>${escapeHtml(report.opportunityShare)}</code> opportunity (volume valued at league-average points/opportunity) +
   <code>${(1 - report.opportunityShare).toFixed(2)}</code> observed league-scored result. Weights are documented, UNCALIBRATED
@@ -1523,9 +1464,9 @@ export function renderFullRankingsHtml(report) {
   Completed-week actuals: ${week1.map((w) => `Sleeper ${escapeHtml(w.season)} wk${escapeHtml(w.week)} (${escapeHtml(w.captureMode)}, retrievedAt ${escapeHtml(w.retrievedAt ?? "n/a")}, sha256 ${escapeHtml(String(w.contentSha256 ?? "").slice(0, 12))})`).join("; ")}.
   Schedule/opponent/kickoff: ${escapeHtml(report.provenance?.schedule?.sourceId ?? "n/a")} ${escapeHtml(report.provenance?.schedule?.captureMode ?? "")} (retrievedAt ${escapeHtml(report.provenance?.schedule?.retrievedAt ?? "n/a")}).
   Current injury/team status &amp; missing-player identity: ${escapeHtml(report.provenance?.identity?.sourceId ?? "n/a")} ${escapeHtml(report.provenance?.identity?.captureMode ?? "")} (retrievedAt ${escapeHtml(report.provenance?.identity?.retrievedAt ?? "n/a")}).<br>
-  <b>Matchup (${escapeHtml(matchup.status ?? "n/a")}):</b> opponent + kickoff SOURCED from the actual schedule. ${matchup.seasonsUsed ? `Opponent-strength factor from real scored nflverse history (seasons ${escapeHtml((matchup.seasonsUsed ?? []).join(", "))}, ${escapeHtml(matchup.totalTeamGames ?? "?")} team-games) under the EXACT league scorers — offense vs the DEFENSE faced, IDP vs the OFFENSE faced, DEF a WHOLE-PROJECTION PROXY from the OFFENSE's final scoring mapped to the points-allowed bands (a whole-baseline multiplier, NOT an isolated points-allowed component or exact offense-only points allowed); shrunk toward neutral by sample and clamped ${escapeHtml(JSON.stringify(matchup.clamp?.offense ?? []))}. A <code>*</code> on the Matchup cell = no historical support, held neutral. UNCALIBRATED to 2026. Limitation: ${escapeHtml(matchup.limitations ?? "")}` : "no matchup factor applied (neutral 1.0)."}<br>
+  <b>Matchup (${escapeHtml(matchup.status ?? "n/a")}):</b> opponent + kickoff SOURCED from the actual schedule. ${matchup.seasonsUsed ? `Opponent-strength factor from real scored nflverse history (seasons ${escapeHtml((matchup.seasonsUsed ?? []).join(", "))}, ${escapeHtml(matchup.totalTeamGames ?? "?")} team-games) for offense/K/DEF only; IDP matchup omitted because aggregate opponent points do not establish role-specific tackle opportunity. UNCALIBRATED to 2026. Limitation: ${escapeHtml(matchup.limitations ?? "")}` : "no matchup factor applied (neutral 1.0)."}<br>
   Team defenses (${escapeHtml(teamDef.sampledTeamWeeks ?? "?")} team-weeks): Week-form DST scored under the exact league rules, regressed to the league DST mean ${money(teamDef.leagueMean)} then opponent-offense matchup-adjusted; the Yahoo DEF season prior is EXCLUDED.
-  IDPs without a trusted individual prior: defensive completed-week form is regressed toward the exact-league-scored group mean at the same weight. ${escapeHtml(Object.entries(idpMeans.groups ?? {}).map(([group, sample]) => `${group} ${money(sample.mean)} (${sample.sampledPlayerWeeks} defensive player-weeks)`).join("; "))}. Special-teams/offense-only activity is excluded; the group mean is not an individual multi-source forecast. UNCALIBRATED.
+  IDP: latest measured defensive snap role and recent share determine workload; tackle rate shrinks toward the ${escapeHtml(Object.entries(idpOpportunity.groups ?? {}).map(([group, sample]) => `${group} pooled rate (${sample.sampledPlayerWeeks} player-weeks)`).join("; "))}. Event points use the group baseline rather than individual splash history. One team-game of pooled snaps is the smoothing denominator. High uncertainty flags thin samples or a 20-point share change. Special teams alone and missing denominators do not become zeroes. UNCALIBRATED.
 </div>
 <div class="counts">
   Universe: <b>${report.universe.totalRows}</b> rows (<b>${report.universe.boardPlayers}</b> board + <b>${report.universe.missingActivePlayers}</b> relevant missing-active) —
@@ -1619,7 +1560,8 @@ async function runFullRankings(args, { season, targetWeek, week1Weight, opportun
   }
 
   const provenance = {
-    prior: { path: args.board, generatedAt: board.generatedAt ?? null, leagueId: board.leagueId ?? null, scoringModel: board.scoringModel ?? null, note: "pre-season custom multi-source blend, HEALTH-conditioned vs ROLE-conditioned. Default per-player prior = the board's ROLE-LIMITED weekly expectation weeklyPoints[targetWeek] WHEN IT EXISTS; there is NO fallback to perGamePoints (=consensus/expectedGames is a CONDITIONAL performance rate, NOT a role-independent weekly expectation). A non-starter/unknown-role player with no weekly prior therefore gets NO prior — it ranks on observed form only, or is explicitly unrankable (MISSING_ROLE_PRIOR_NO_ACTUAL) when there is no form; the conditional rate is never substituted as weekly workload. The undiscounted perGamePoints role rate is RESTORED only for a CURRENT healthy STARTER, evidenced by the fresh Sleeper depth chart (depth_chart_order===1) and no confirmed-inactive status — removing the stale preseason health/expected-games cap for genuine starters without re-inflating backups. Prior is also GATED on projection source quality: only a >=2 scorable-family prior is trusted; a single-family (e.g. Yahoo-only) board number is dropped (PRIOR_UNSUPPORTED) and the player ranks on observed form (raw number + families + depth-chart evidence exposed per row). No-prior IDP defensive form is regressed toward a completed-week position-group mean; that mean is not an individual multi-source prior. DEF uses the league DST mean (never gated, never role-restored)." },
+    season,
+    prior: { path: args.board, generatedAt: board.generatedAt ?? null, leagueId: board.leagueId ?? null, scoringModel: board.scoringModel ?? null, note: "pre-season custom multi-source blend, HEALTH-conditioned vs ROLE-conditioned. Default per-player prior = the board's ROLE-LIMITED weekly expectation weeklyPoints[targetWeek] WHEN IT EXISTS; there is NO fallback to perGamePoints (=consensus/expectedGames is a CONDITIONAL performance rate, NOT a role-independent weekly expectation). A non-starter/unknown-role player with no weekly prior therefore gets NO prior — it ranks on observed form only, or is explicitly unrankable (MISSING_ROLE_PRIOR_NO_ACTUAL) when there is no form; the conditional rate is never substituted as weekly workload. The undiscounted perGamePoints role rate is RESTORED only for a CURRENT healthy STARTER, evidenced by the fresh Sleeper depth chart (depth_chart_order===1) and no confirmed-inactive status — removing the stale preseason health/expected-games cap for genuine starters without re-inflating backups. Prior is also GATED on projection source quality: only a >=2 scorable-family prior is trusted; a single-family (e.g. Yahoo-only) board number is dropped (PRIOR_UNSUPPORTED) and the player ranks on observed form (raw number + families + depth-chart evidence exposed per row). IDP ignores board preseason points and uses the separate current defensive snap-role model. DEF uses the league DST mean (never gated, never role-restored)." },
     week1List: weekStatsList.map(({ receipt }) => receipt),
     schedule: scheduleReceipt,
     identity: identityReceipt,
@@ -1650,7 +1592,7 @@ async function runFullRankings(args, { season, targetWeek, week1Weight, opportun
           status: "MATCHUP_DISABLED_NEUTRAL",
           note: "matchup adjustment disabled (--no-matchup); opponent/kickoff still sourced from the schedule but every factor is neutral 1.0.",
         },
-    modelChoiceNote: "week1Weight and opportunityShare are documented, UNCALIBRATED model choices (no 2026 weekly-outcome calibration exists); the opponent-matchup factor is a shrunk, clamped recency prior from real scored history, also UNCALIBRATED to 2026 outcomes. This is a sourced, form-and-matchup-updated prior, explicitly distinguished from a validated projection.",
+    modelChoiceNote: "Offense/K/DEF retain documented uncalibrated prior/form and matchup choices. IDP uses current snap role, pooled tackle-rate shrinkage and pooled event baseline with no role-specific matchup adjustment. Neither path has validated predictive lift from three completed weeks.",
   };
 
   const rankings = buildFullWeeklyRankings({
@@ -1688,6 +1630,17 @@ function parseArgs(argv) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args["plan-idp"]) {
+    if (!args.rankings || !args["idp-snapshot"] || !args.out) throw new Error("--plan-idp requires --rankings, --idp-snapshot, and --out");
+    const rankings = JSON.parse(await readFile(args.rankings, "utf8"));
+    const snapshot = JSON.parse(await readFile(args["idp-snapshot"], "utf8"));
+    const planning = compareIdpStreaming(rankings, snapshot);
+    await mkdir(args.out, { recursive: true });
+    const path = join(args.out, `week${rankings.targetWeek}-idp-streaming.json`);
+    await writeFile(path, `${JSON.stringify(planning, null, 2)}\n`, { mode: 0o600 });
+    process.stdout.write(`${JSON.stringify({ path, disposition: planning.disposition, proposals: planning.proposals.length })}\n`);
+    return;
+  }
   const requiredKeys = args.full ? ["board", "out"] : ["roster", "board", "out"];
   for (const key of requiredKeys) {
     if (!args[key]) throw new Error(`missing --${key}`);
