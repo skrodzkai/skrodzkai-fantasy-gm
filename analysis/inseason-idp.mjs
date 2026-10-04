@@ -172,6 +172,8 @@ export function compareIdpStreaming(rankings, snapshot) {
       Date.parse(snapshot.capturedAt) < Date.parse(rankings.generatedAt) ||
       !Array.isArray(snapshot?.roster) ||
       !Array.isArray(snapshot?.available)) return fail("INVALID_OR_WRONG_PERIOD_YAHOO_SNAPSHOT");
+  const snapshotIds = [...snapshot.roster, ...snapshot.available].map((item) => String(item?.yahooId));
+  if (new Set(snapshotIds).size !== snapshotIds.length) return fail("DUPLICATE_YAHOO_IDENTITY");
   const model = new Map(rankings.players.filter((row) => idpGroup(row.position)).map((row) => [String(row.playerId), row]));
   const convert = (item, available) => {
     if (!item || !/^\d+$/.test(String(item.yahooId)) || !Array.isArray(item.eligible) ||
@@ -190,7 +192,7 @@ export function compareIdpStreaming(rankings, snapshot) {
       team: row.team, name: row.name, slot: available ? "BN" : item.slot, locked: available ? false : item.locked };
   };
   const roster = snapshot.roster.map((item) => convert(item, false));
-  if (roster.some((row) => !row) || new Set(roster.map((row) => row.yahooId)).size !== roster.length) return fail("UNJOINED_OR_DUPLICATE_ROSTER_YAHOO_IDENTITY");
+  if (roster.some((row) => !row)) return fail("UNJOINED_OR_DUPLICATE_ROSTER_YAHOO_IDENTITY");
   const excludedCandidates = [];
   const available = [];
   for (const item of snapshot.available) {
@@ -204,7 +206,6 @@ export function compareIdpStreaming(rankings, snapshot) {
     else excludedCandidates.push({ yahooId: item?.yahooId ?? null, name: item?.name ?? null,
       reason: "UNJOINABLE_OR_INVALID_YAHOO_CANDIDATE", uncertainty: null });
   }
-  if (new Set([...roster, ...available].map((row) => row.yahooId)).size !== roster.length + available.length) return fail("DUPLICATE_YAHOO_IDENTITY", excludedCandidates);
   const slots = snapshot.slots;
   if (!Array.isArray(slots) || slots.length !== 3 || [...slots].sort().join(",") !== "D,DB,LB" ||
       roster.some((row) => ![...slots, "BN"].includes(row.slot) || (row.locked && row.slot === "BN"))) return fail("UNKNOWN_LINEUP_OR_LOCK_STATE");
