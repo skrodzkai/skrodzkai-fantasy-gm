@@ -9,7 +9,6 @@ import {
   buildOpponentMatchup,
   currentPlayerStatus,
   completedWeeksSignal,
-  idpGroupMeansMultiWeek,
   buildFullWeeklyRankings,
 } from "./refresh-weekly-projection.mjs";
 
@@ -213,7 +212,7 @@ test("multi-family with NO weekly role prior gets NO prior (perGamePoints never 
   assert.ok(p2.weeklyExpectation > 0);
 });
 
-test("no-prior IDPs use defensive position-group actuals while trusted IDP priors stay individual", () => {
+test("IDP weekly ranking uses measured role and pooled rate rather than preseason points or special teams", () => {
   const board = { players: [
     { yahooId: "gated", sleeperId: "100", gsisId: "g100", name: "Gated LB", position: "ILB", team: "AAA", perGamePoints: 30, weeklyPoints: [30, 30], scorableSourceFamilyCount: 1 },
     { yahooId: "trusted", sleeperId: "101", gsisId: "g101", name: "Trusted LB", position: "LB", team: "AAA", perGamePoints: 6, weeklyPoints: [6, 6], scorableSourceFamilyCount: 2 },
@@ -226,30 +225,16 @@ test("no-prior IDPs use defensive position-group actuals while trusted IDP prior
     ["106", "MLB", "g106"], ["107", "ILB", "g100"],
   ].map(([id, position, gsis_id]) => [id, { full_name: `Player ${id}`, team: "AAA", active: true, status: "Active", position, fantasy_positions: [position], gsis_id }]));
   const weekStatsList = [{ week: 1, stats: {
-    100: { def_snp: 40, idp_tkl_solo: 20 }, // 10 points
-    101: { def_snp: 40, idp_tkl_solo: 4 }, // 2 points
-    102: { def_snp: 20 }, // real defensive zero
+    100: { def_snp: 40, tm_def_snp: 60, idp_tkl_solo: 20 }, // 10 points
+    101: { def_snp: 40, tm_def_snp: 60, idp_tkl_solo: 4 }, // 2 points
+    102: { def_snp: 20, tm_def_snp: 60 }, // real defensive zero
     103: { gp: 1, st_snp: 10 }, // no defensive actual
-    104: { def_snp: 30, idp_tkl_solo: 10 }, // DL, not LB
-    105: { def_snp: 30, idp_tkl_solo: 2 }, // DB, not LB
-    106: { def_snp: 30, idp_tkl_solo: 2 }, // added LB, 1 point
-    107: { def_snp: 40, idp_tkl_solo: 20 }, // duplicate gsis identity, excluded
+    104: { def_snp: 30, tm_def_snp: 60, idp_tkl_solo: 10 }, // DL, not LB
+    105: { def_snp: 30, tm_def_snp: 60, idp_tkl_solo: 2 }, // DB, not LB
+    106: { def_snp: 30, tm_def_snp: 60, idp_tkl_solo: 2 }, // added LB, 1 point
+    107: { def_snp: 40, tm_def_snp: 60, idp_tkl_solo: 20 }, // duplicate gsis identity, excluded
     200: { gp: 1, rush_att: 5, rush_yd: 50 }, // non-IDP, excluded
   } }];
-  const means = idpGroupMeansMultiWeek(weekStatsList, playersMap);
-  assert.deepEqual(means, {
-    DL: { mean: 5, sampledPlayerWeeks: 1 },
-    LB: { mean: 3.25, sampledPlayerWeeks: 4 },
-    DB: { mean: 1, sampledPlayerWeeks: 1 },
-  });
-  const blankGsis = idpGroupMeansMultiWeek([{ stats: {
-    108: { def_snp: 10, idp_tkl_solo: 2 },
-    109: { def_snp: 10, idp_tkl_solo: 4 },
-  } }], {
-    108: { position: "LB", gsis_id: "" },
-    109: { position: "ILB", gsis_id: "" },
-  });
-  assert.deepEqual(blankGsis.LB, { mean: 1.5, sampledPlayerWeeks: 2 });
   const rankings = buildFullWeeklyRankings({
     board, rosterInputs: { players: [] }, weekStatsList, playersMap,
     schedule: { byTeam: new Map([["AAA", { opponent: "BBB", kickoff: "t" }]]), byeTrusted: false },
@@ -258,23 +243,22 @@ test("no-prior IDPs use defensive position-group actuals while trusted IDP prior
   });
   const byId = Object.fromEntries(rankings.players.map((row) => [row.playerId, row]));
   assert.equal(byId.gated.priorGated, true);
-  assert.equal(byId.gated.priorBasis, "COMPLETED_WEEK_IDP_GROUP_MEAN");
-  assert.equal(byId.gated.priorPerGame, 3.25);
-  assert.equal(byId.gated.weeklyBaseline, 0.25 * 10 + 0.75 * 3.25);
-  assert.equal(byId.gated.rankBasis, "IDP_FORM_REGRESSED_TO_GROUP_MEAN");
-  assert.equal(byId.trusted.priorPerGame, 6);
-  assert.equal(byId.trusted.priorBasis, "PRESEASON_WEEKLY_ROLE_LIMITED");
-  assert.equal(byId.trusted.weeklyBaseline, 0.25 * 2 + 0.75 * 6);
-  assert.equal(byId.zero.week1Points, 0);
-  assert.equal(byId.zero.weeklyBaseline, 0.75 * 3.25);
+  assert.equal(byId.gated.priorBasis, "CURRENT_DEFENSIVE_ROLE");
+  assert.equal(byId.gated.priorPerGame, null);
+  assert.equal(byId.gated.rankBasis, "IDP_CURRENT_SNAP_ROLE");
+  assert.equal(byId.trusted.priorPerGame, null);
+  assert.equal(byId.trusted.priorBasis, "CURRENT_DEFENSIVE_ROLE");
+  assert.equal(byId.trusted.rankBasis, "IDP_CURRENT_SNAP_ROLE");
+  assert.ok(byId.gated.weeklyExpectation > byId.trusted.weeklyExpectation);
+  assert.equal(byId.zero.idpModel.observedEventPoints, 0);
+  assert.equal(byId.zero.idpModel.latestShare, 1 / 3);
   assert.equal(byId.special.rankable, false);
-  assert.equal(byId.special.week1Points, null);
+  assert.equal(byId.special.unrankableReason, "NO_VALID_DEFENSIVE_SNAP_HISTORY");
   const added = byId["sleeper:106"];
   assert.equal(added.universe, "missing-active");
-  assert.equal(added.priorPerGame, 3.25);
-  assert.equal(added.weeklyBaseline, 0.25 * 1 + 0.75 * 3.25);
-  assert.match(added.notes.at(-1), /not an individual multi-source forecast/);
-  assert.equal(rankings.provenance.idpGroupMeans.groups.LB.sampledPlayerWeeks, 4);
+  assert.equal(added.rankBasis, "IDP_CURRENT_SNAP_ROLE");
+  assert.equal(rankings.provenance.idpOpportunity.groups.LB.sampledPlayerWeeks, 4);
+  assert.equal(rankings.provenance.idpOpportunity.coverage.duplicateAliases, 1);
 });
 
 test("currentPlayerStatus flags confirmed-out injuries but never invents a probability", () => {
