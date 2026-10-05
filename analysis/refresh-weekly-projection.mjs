@@ -8,6 +8,9 @@ import { scoreOffenseStatLine, scoreTeamDefenseStatLine, OFFENSE_SCORING } from 
 import { scoreHistoricalStatRow } from "./historical-player-calibration.mjs";
 import { parseCsv } from "./opponent-calibration.mjs";
 import { buildIdpOpportunityModel, projectIdp, compareIdpStreaming, sleeperIdpLine } from "./inseason-idp.mjs";
+import { buildSpecialTeamsModel, projectSpecialTeams } from "./special-teams-projection.mjs";
+import { compareMultiweekRoster } from "./multiweek-roster-planning.mjs";
+import { evaluateWeeklyForecasts } from "./projection-evaluation.mjs";
 export { sleeperIdpLine };
 
 // Public read-only Sleeper actuals. Registered source "sleeper" (injury_and_identity /
@@ -198,6 +201,9 @@ export async function loadSleeperWeek({ sleeperPath, season, week, capturedAt, o
     if (!sidecar || sidecar.contentSha256 !== contentSha256 || !sidecar.retrievedAt) {
       throw new Error("offline replay requires a matching source capture receipt");
     }
+    assertReceiptPeriod(sidecar, { sourceId: "sleeper", season, week });
+    if (!Number.isFinite(Date.parse(sidecar.retrievedAt)) || Date.parse(sidecar.retrievedAt) > Date.now())
+      throw new Error("invalid or future source capture time");
     if (Number(sidecar.season) !== season || Number(sidecar.week) !== week) {
       throw new Error("source capture season/week does not match requested period");
     }
@@ -225,10 +231,10 @@ export async function loadSleeperWeek({ sleeperPath, season, week, capturedAt, o
   await writeFile(capturePath, text, { mode: 0o600 });
   const receipt = {
     sourceId: "sleeper", sourceFamily: "sleeper", season, week, url,
-    retrievedAt: capturedAt, contentSha256, capturePath, captureMode: "LIVE_FETCH",
+    retrievedAt: new Date().toISOString(), contentSha256, capturePath, captureMode: "LIVE_FETCH",
   };
   // Sidecar receipt so a later offline replay recovers the true capture instant.
-  await writeFile(`${capturePath}.receipt.json`, `${JSON.stringify({ sourceId: "sleeper", season, week, url, retrievedAt: capturedAt, contentSha256 }, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(`${capturePath}.receipt.json`, `${JSON.stringify({ sourceId: "sleeper", season, week, url, retrievedAt: receipt.retrievedAt, contentSha256 }, null, 2)}\n`, { mode: 0o600 });
   return { stats, receipt };
 }
 
@@ -445,6 +451,8 @@ async function loadReceiptedJson({ path, url, sourceId, sourceFamily, season, we
       throw new Error(`offline replay requires a matching ${sourceId} capture receipt`);
     }
     assertReceiptPeriod(sidecar, { sourceId, season, week });
+    if (!Number.isFinite(Date.parse(sidecar.retrievedAt)) || Date.parse(sidecar.retrievedAt) > Date.now())
+      throw new Error("invalid or future source capture time");
     return {
       payload: JSON.parse(text),
       receipt: {
@@ -458,14 +466,15 @@ async function loadReceiptedJson({ path, url, sourceId, sourceFamily, season, we
   const text = await response.text();
   const payload = JSON.parse(text);
   const contentSha256 = sha256(text);
+  const retrievedAt = new Date().toISOString();
   const sourcesDir = join(outDir, "sources");
   await mkdir(sourcesDir, { recursive: true });
   const capturePath = join(sourcesDir, captureName);
   await writeFile(capturePath, text, { mode: 0o600 });
-  await writeFile(`${capturePath}.receipt.json`, `${JSON.stringify({ sourceId, season, week, url, retrievedAt: capturedAt, contentSha256 }, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(`${capturePath}.receipt.json`, `${JSON.stringify({ sourceId, season, week, url, retrievedAt, contentSha256 }, null, 2)}\n`, { mode: 0o600 });
   return {
     payload,
-    receipt: { sourceId, sourceFamily, season, week, url, retrievedAt: capturedAt, contentSha256, capturePath, captureMode: "LIVE_FETCH" },
+    receipt: { sourceId, sourceFamily, season, week, url, retrievedAt, contentSha256, capturePath, captureMode: "LIVE_FETCH" },
   };
 }
 
@@ -511,6 +520,7 @@ export function verifySchedulePayload(payload, { season, week }) {
     const competitors = competition.competitors ?? [];
     if (competitors.length !== 2) continue;
     const kickoff = event.date ?? competition.date ?? null;
+    if (!Number.isFinite(Date.parse(kickoff))) throw new Error("schedule game has no valid kickoff");
     const sides = competitors.map((competitor) => ({
       team: normalizeTeam(competitor.team?.abbreviation),
       homeAway: competitor.homeAway ?? null,
@@ -520,7 +530,9 @@ export function verifySchedulePayload(payload, { season, week }) {
     for (let index = 0; index < 2; index += 1) {
       const self = sides[index];
       const other = sides[1 - index];
-      byTeam.set(self.team, { opponent: other.team, homeAway: self.homeAway, kickoff, gameId: event.id ?? null });
+      if (byTeam.has(self.team)) throw new Error(`duplicate schedule team ${self.team}`);
+      byTeam.set(self.team, { opponent: other.team, homeAway: self.homeAway, kickoff, gameId: event.id ?? null,
+        completed: event.status?.type?.completed === true });
     }
   }
   if (gamesParsed === 0) throw new Error(`schedule payload contained no games for ${season} week ${week}`);
@@ -531,18 +543,33 @@ export function verifySchedulePayload(payload, { season, week }) {
   return { season: Number(season), week: Number(week), byTeam, teamsPlaying, gamesParsed, teamsPlayingCount: teamsPlaying.size, byeTrusted };
 }
 
-export async function loadSchedule({ schedulePath, season, week, capturedAt, outDir }) {
+export async function loadSchedule({ schedulePath, byePath = null, season, week, capturedAt, outDir }) {
   const { payload, receipt } = await loadReceiptedJson({
     path: schedulePath || null, url: ESPN_SCOREBOARD_URL(season, week),
     sourceId: "espn-schedule", sourceFamily: "espn", season, week, capturedAt, outDir,
     captureName: `espn-schedule-${season}-week${week}.json`,
   });
   const parsed = verifySchedulePayload(payload, { season, week });
+  const byeTeams = new Set();
+  let byeReceipt = null;
+  if (byePath) {
+    const byeCapture = await loadReceiptedJson({ path: byePath, sourceId: "verified-byes", sourceFamily: "official-readback", season, week });
+    const evidence = byeCapture.payload;
+    const nflTeams = new Set("ARI ATL BAL BUF CAR CHI CIN CLE DAL DEN DET GB HOU IND JAX KC LAC LAR LV MIA MIN NE NO NYG NYJ PHI PIT SEA SF TB TEN WAS".split(" "));
+    if (evidence.source !== "NFL_OFFICIAL_VERIFIED_READBACK" || evidence.verified !== true || evidence.season !== season || evidence.week !== week ||
+        !Array.isArray(evidence.teams) || new Set(evidence.teams).size !== evidence.teams.length ||
+        !Number.isFinite(Date.parse(evidence.capturedAt)) || evidence.capturedAt !== byeCapture.receipt.retrievedAt ||
+        !/^https:\/\/(www\.)?nfl\.com\//.test(evidence.sourceUrl ?? "") ||
+        evidence.teams.some((team) => !nflTeams.has(team) || parsed.byTeam.has(team))) throw new Error("invalid or conflicting verified bye evidence");
+    evidence.teams.forEach((team) => byeTeams.add(team));
+    byeReceipt = { ...byeCapture.receipt, sourceUrl: evidence.sourceUrl, teams: evidence.teams };
+  }
   return {
     byTeam: parsed.byTeam,
     teamsPlaying: parsed.teamsPlaying,
+    byeTeams,
     byeTrusted: parsed.byeTrusted,
-    receipt: { ...receipt, gamesParsed: parsed.gamesParsed, teamsPlaying: parsed.teamsPlayingCount, byeTrusted: parsed.byeTrusted },
+    receipt: { ...receipt, gamesParsed: parsed.gamesParsed, teamsPlaying: parsed.teamsPlayingCount, byeTrusted: parsed.byeTrusted, byeEvidence: byeReceipt },
   };
 }
 
@@ -728,7 +755,7 @@ const FULL_CONTEXT_FIELDS = [
   "scorableSourceFamilyCount", "scorableSourceFamilies", "evidenceStatus", "availabilityAssumption",
   "excludedYahooSeasonPrior", "week1Opportunity",
   "completedGames", "week1SourceStatus", "bye", "kickoff", "homeAway", "boardTeam", "currentTeam",
-  "rawInjuryStatus", "sleeperStatus", "matchupFactor", "matchupStatus", "matchupSupported", "idpModel", "eligible",
+  "rawInjuryStatus", "sleeperStatus", "matchupFactor", "matchupStatus", "matchupSupported", "idpModel", "eligible", "scheduleStatus", "gsisId", "yahooComparisonCapturedAt",
 ];
 
 function playerNameKey(name) {
@@ -773,9 +800,12 @@ export function buildFullWeeklyRankings({
   targetWeek,
   generatedAt,
   provenance,
+  completedThroughWeek = targetWeek - 1,
+  specialTeamsModel = buildSpecialTeamsModel(weekStatsList, playersMap),
+  comparisonWeek = targetWeek,
 }) {
   const rosterOverlay = new Map((rosterInputs?.players ?? []).map((player) => [String(player.yahooId), player]));
-  const byeTrusted = schedule.byeTrusted !== false;
+  const byeTrusted = schedule.byeTrusted === true;
   // Two-way dedupe keys: a board player must not reappear as a "missing" row under any of their
   // identities (Yahoo id, Sleeper id, gsis id, or normalized name+position).
   const boardKeys = new Set();
@@ -783,7 +813,8 @@ export function buildFullWeeklyRankings({
   const seenBoardIdentity = new Set();
   const modelPlayers = [];
   const context = new Map();
-  const idpModel = buildIdpOpportunityModel(weekStatsList, playersMap, targetWeek);
+  if (targetWeek <= completedThroughWeek || completedThroughWeek < 1) throw new Error("forecast target must follow completed cutoff");
+  const idpModel = buildIdpOpportunityModel(weekStatsList, playersMap, completedThroughWeek + 1);
 
   for (const player of board.players ?? []) {
     const playerId = player.yahooId != null ? String(player.yahooId) : (player.playerId != null ? String(player.playerId) : null);
@@ -812,7 +843,7 @@ export function buildFullWeeklyRankings({
     let signal = completedWeeksSignal({ scoringKind, position, statsKey }, weekStatsList, opportunityRates);
     const overlay = rosterOverlay.get(playerId) ?? null;
     const sched = team ? schedule.byTeam.get(team) ?? null : null;
-    const onBye = byeTrusted && Boolean(team) && !schedule.byTeam.has(team);
+    const onBye = Boolean(team) && (schedule.byeTeams?.has(team) || byeTrusted && !schedule.byTeam.has(team));
     const opponent = sched?.opponent ?? null;
     const matchup = scoringKind === "idp"
       ? { factor: 1, supported: false, status: "IDP_MATCHUP_OMITTED_UNSUPPORTED_ROLE_SPECIFIC_RATE" }
@@ -883,12 +914,13 @@ export function buildFullWeeklyRankings({
       matchupFactor: matchup.factor,
       matchupStatus: matchup.status,
       availabilityStatus: onBye ? "BYE" : (statusInfo.availabilityStatus ?? null),
-      yahooWeek2Projection: overlay?.yahooWeek2Projection ?? null,
+      yahooWeek2Projection: targetWeek === comparisonWeek ? overlay?.yahooWeek2Projection ?? null : null,
     });
     context.set(playerId, {
       universe: "board",
       group: overlay?.group ?? null,
       sleeperId: player.sleeperId != null ? String(player.sleeperId) : null,
+      gsisId: player.gsisId ?? null,
       priorBasis,
       priorGated,
       missingRolePrior,
@@ -919,6 +951,9 @@ export function buildFullWeeklyRankings({
       matchupSupported: matchup.supported,
       idpModel: currentIdp,
       eligible: player.eligible ?? null,
+      yahooComparisonCapturedAt: targetWeek === comparisonWeek && rosterInputs?.source === "YAHOO_VERIFIED_READBACK" &&
+        rosterInputs?.season === provenance?.season && rosterInputs?.week === targetWeek ? rosterInputs.capturedAt ?? null : null,
+      scheduleStatus: sched ? "VERIFIED_GAME" : onBye ? "VERIFIED_BYE" : "UNKNOWN",
       noCurrentTeam,
     });
   }
@@ -958,7 +993,7 @@ export function buildFullWeeklyRankings({
       missingCount += 1;
       const team = normalizeTeam(entry.team);
       const sched = team ? schedule.byTeam.get(team) ?? null : null;
-      const onBye = byeTrusted && Boolean(team) && !schedule.byTeam.has(team);
+      const onBye = Boolean(team) && (schedule.byeTeams?.has(team) || byeTrusted && !schedule.byTeam.has(team));
       const opponent = sched?.opponent ?? null;
       const matchup = scoringKind === "idp"
         ? { factor: 1, supported: false, status: "IDP_MATCHUP_OMITTED_UNSUPPORTED_ROLE_SPECIFIC_RATE" }
@@ -986,6 +1021,7 @@ export function buildFullWeeklyRankings({
         universe: "missing-active",
         group: null,
         sleeperId: key,
+        gsisId: entry.gsis_id ?? null,
         priorBasis: currentIdp ? "CURRENT_DEFENSIVE_ROLE" : "NONE_NO_PRESEASON_PRIOR",
         priorGated: false,
         missingRolePrior: false,
@@ -1014,6 +1050,7 @@ export function buildFullWeeklyRankings({
         matchupSupported: matchup.supported,
         idpModel: currentIdp,
         eligible: fantasyPositions,
+        scheduleStatus: sched ? "VERIFIED_GAME" : onBye ? "VERIFIED_BYE" : "UNKNOWN",
         noCurrentTeam: false,
       });
     }
@@ -1040,10 +1077,15 @@ export function buildFullWeeklyRankings({
   const disposed = report.players.map((row) => {
     const ctx = context.get(row.playerId) ?? {};
     const merged = { ...row };
+    const scoringKind = scoringKindForPosition(row.position);
+    merged.scoringKind = scoringKind;
     for (const field of FULL_CONTEXT_FIELDS) merged[field] = ctx[field] ?? null;
     const baseline = finite(row.weeklyBaseline) ? Number(row.weeklyBaseline) : null;
     const availability = finite(row.availabilityProbability) ? Number(row.availabilityProbability) : 1;
     const matchupFactor = finite(ctx.matchupFactor) ? Number(ctx.matchupFactor) : 1;
+    const special = ["kicker", "teamdef"].includes(scoringKind)
+      ? projectSpecialTeams(specialTeamsModel, { kind: scoringKind,
+        statsKey: scoringKind === "teamdef" ? row.team : ctx.sleeperId, opponent: row.opponent }) : null;
     let unrankableReason = null;
     let weeklyExpectation = null;
     let rankBasis = null;
@@ -1053,12 +1095,17 @@ export function buildFullWeeklyRankings({
       unrankableReason = "NO_CURRENT_TEAM";
     } else if (ctx.bye) {
       unrankableReason = "TARGET_WEEK_BYE";
+    } else if (ctx.scheduleStatus === "UNKNOWN") {
+      unrankableReason = "TARGET_WEEK_SCHEDULE_UNKNOWN";
     } else if (ctx.idpModel) {
       if (ctx.idpModel.weeklyExpectation == null) unrankableReason = ctx.idpModel.status;
       else {
         weeklyExpectation = ctx.idpModel.weeklyExpectation * availability;
         rankBasis = "IDP_CURRENT_SNAP_ROLE";
       }
+    } else if (special) {
+      if (special.weeklyExpectation == null) unrankableReason = special.status;
+      else { weeklyExpectation = special.weeklyExpectation * availability; rankBasis = "CURRENT_SEASON_COMPONENTS"; }
     } else if (baseline == null) {
       // Distinct reasons: a single-family GATED prior, a supported player whose only board number is a
       // conditional per-game rate with NO weekly role prior (never substituted), or truly no prior.
@@ -1075,6 +1122,20 @@ export function buildFullWeeklyRankings({
     // Reconcile the row's own metadata with the resolved disposition (finding: no contradictory
     // weeklyProjectionAvailable=false + "UNAVAILABLE" note on a ranked row).
     merged.weeklyProjectionAvailable = rankable;
+    if (special) {
+      merged.specialTeamsModel = special;
+      merged.priorPerGame = null;
+      merged.priorShrinkageApplied = false;
+      merged.priorGated = false;
+      merged.missingRolePrior = false;
+      merged.week1Weight = null;
+      merged.weeklyBaseline = special.weeklyExpectation;
+      merged.priorBasis = "CURRENT_SEASON_COMPONENTS";
+      merged.confidence = rankable ? "CURRENT_COMPONENTS_UNCALIBRATED" : "COMPONENTS_UNKNOWN";
+      merged.matchupFactor = 1;
+      merged.matchupSupported = special.opponentSampleGames > 0;
+      merged.matchupStatus = special.opponentStatus ?? "UNKNOWN";
+    }
     if (ctx.idpModel) merged.confidence = rankable ? "CURRENT_ROLE" : "IDP_ROLE_UNKNOWN";
     // The prior kind for the human note: a current-starter undiscounted role rate vs a role-limited
     // (backup/unknown) weekly expectation vs a DEF league mean.
@@ -1090,12 +1151,16 @@ export function buildFullWeeklyRankings({
           ? `ranked on the trusted ${priorKind}; no completed-week actual yet (weak evidence)`
           : rankBasis === "IDP_CURRENT_SNAP_ROLE"
             ? `IDP current defensive role: ${ctx.idpModel.expectedSnaps.toFixed(1)} expected snaps, ${ctx.idpModel.tacklePoints.toFixed(2)} tackle + ${ctx.idpModel.eventBaseline.toFixed(2)} pooled event points; ${ctx.idpModel.uncertainty}; observed splash excluded from individual rate`
+          : rankBasis === "CURRENT_SEASON_COMPONENTS"
+            ? `${special.basis}; ${special.limitations}`
           : rankBasis === "CURRENT_FORM_NO_PRIOR"
             ? `ranked on observed completed-week league-scored form; no trusted preseason prior${noPriorReason}`
             : `ranked on the trusted ${priorKind} blended with completed-week form`)
       : `unrankable this week: ${unrankableReason}${ctx.priorGated && unrankableReason === "PRIOR_UNSUPPORTED_NO_ACTUAL" ? ` (board prior was single-scorable-family, gatedPriorPerGame=${ctx.gatedPriorPerGame})` : ""}${ctx.missingRolePrior && unrankableReason === "MISSING_ROLE_PRIOR_NO_ACTUAL" ? ` (no weekly role prior and no form; conditional perGamePoints=${ctx.unusedConditionalRate} NOT substituted)` : ""}`;
-    merged.notes = [...(row.notes ?? []).filter((note) => !STALE_NOTE.test(note)), dispositionNote];
+    merged.notes = [...(special ? [] : row.notes ?? []).filter((note) => !STALE_NOTE.test(note)), dispositionNote];
     merged.weeklyExpectation = weeklyExpectation;
+    merged.naiveBaseline = completedWeeksSignal({ scoringKind, position: row.position,
+      statsKey: scoringKind === "teamdef" ? row.team : ctx.sleeperId }, weekStatsList, null)?.week1Points ?? null;
     merged.deltaVsYahoo = finite(row.yahooWeek2Projection) && weeklyExpectation != null
       ? weeklyExpectation - Number(row.yahooWeek2Projection) : null;
     merged.rankBasis = rankBasis;
@@ -1135,7 +1200,8 @@ export function buildFullWeeklyRankings({
     counts[row.unrankableReason] = (counts[row.unrankableReason] ?? 0) + 1;
     return counts;
   }, {});
-  const matchupApplied = players.filter((row) => row.rankable && row.matchupSupported).length;
+  const matchupApplied = players.filter((row) => row.rankable && row.matchupSupported && row.rankBasis !== "CURRENT_SEASON_COMPONENTS").length;
+  const defenseOpponentExposureApplied = players.filter((row) => row.rankable && row.scoringKind === "teamdef" && row.specialTeamsModel?.opponentSampleGames > 0).length;
   const priorGatedRankedOnForm = players.filter((row) => row.rankable && row.priorGated).length;
   const priorGatedUnrankable = players.filter((row) => !row.rankable && row.priorGated).length;
   const missingRolePriorRankedOnForm = players.filter((row) => row.rankable && row.missingRolePrior).length;
@@ -1144,11 +1210,16 @@ export function buildFullWeeklyRankings({
   return {
     ...report,
     season: provenance?.season ?? board?.season ?? null,
+    completedThroughWeek,
+    forecastAssumptions: { status: "CURRENT_STATUS_AND_ROLE_CARRIED_FORWARD_NO_RECOVERY_FORECAST",
+      injuryAsOf: provenance?.identity?.retrievedAt ?? null, futureAvailability: "UNKNOWN_UNTIL_FRESH_READBACK",
+      uncertainty: "UNCALIBRATED_POINT_ESTIMATES_NO_PREDICTIVE_IMPROVEMENT_CLAIM" },
     provenance: { ...report.provenance, idpOpportunity: {
       source: "Sleeper completed-week defensive snaps, team snaps and exact league IDP scorer",
       coverage: idpModel.coverage, groups: idpModel.rates,
       basis: "latest defensive role and recent share; one observed team-game pooled tackle-rate shrinkage; pooled event baseline, no individual splash carryover; uncalibrated; no role-specific matchup source",
-    } },
+    }, specialTeams: { basis: specialTeamsModel.basis, limitations: specialTeamsModel.limitations,
+      sampledKickerGames: specialTeamsModel.kPool.length, sampledDefenseGames: specialTeamsModel.dPool.length } },
     posture: "research projection only; no roster, Yahoo, or deployment authority",
     coverage: finalCoverage,
     universe: {
@@ -1169,6 +1240,7 @@ export function buildFullWeeklyRankings({
       rankBasisCounts,
       unrankableReasons,
       matchupApplied,
+      defenseOpponentExposureApplied,
       priorGatedRankedOnForm,
       priorGatedUnrankable,
       missingRolePriorRankedOnForm,
@@ -1283,7 +1355,7 @@ export async function buildWeeklyRefresh({
   return { ...report, players, identityGaps };
 }
 
-function renderMarkdown(report) {
+export function renderMarkdown(report) {
   const money = (value) => (value == null ? "—" : Number(value).toFixed(2));
   const groups = [
     ["roster", "Roster (starters + bench)"],
@@ -1291,6 +1363,7 @@ function renderMarkdown(report) {
     ["available-def", "Available team defenses"],
   ];
   const week1 = report.provenance?.week1 ?? {};
+  const teamDef = report.provenance?.teamDefense ?? {};
   const lines = [];
   lines.push(`# SKRODZKai custom Week ${report.targetWeek} projection`);
   lines.push("");
@@ -1304,7 +1377,6 @@ function renderMarkdown(report) {
   lines.push(`- Week 1 actuals: ${week1.sourceId ?? "n/a"} season ${week1.season ?? "?"} week ${week1.week ?? "?"} — capture ${week1.captureMode ?? "n/a"}, source retrievedAt ${week1.retrievedAt ?? (week1.captureObservedMtime ? `unknown (file mtime ${week1.captureObservedMtime})` : "n/a")}, sha256 ${String(week1.contentSha256 ?? "").slice(0, 12)}`);
   lines.push(`  (source acquisition time is recorded separately from report generation time and is never backdated to it)`);
   lines.push(`- Comparison/context: ${report.provenance?.comparison ?? "n/a"}`);
-  const teamDef = report.provenance?.teamDefense ?? {};
   lines.push(`- Team defense: each defense's Week-1 DST line scored under the EXACT league DST rules, then regressed to the Week-1 league DST mean ${money(teamDef.week1LeagueMean)} across ${teamDef.sampledTeams ?? "?"} defenses; the draft-board single-source Yahoo DEF prior is EXCLUDED (${teamDef.priorBasis ?? "n/a"}). One-game defensive form, NOT a calibrated projection.`);
   lines.push("");
   lines.push("Coverage: " + Object.entries(report.coverage).map(([k, v]) => `${k}=${v}`).join(", "));
@@ -1373,6 +1445,7 @@ export function renderFullRankingsHtml(report) {
   // role rate, depth_chart_order 1) or role-limited (backup/unknown weekly expectation), a gated
   // single-family board prior (ranked on form), a DEF league-mean baseline, or a missing player.
   const priorSrc = (row) => {
+    if (row.priorBasis === "CURRENT_SEASON_COMPONENTS") return "current-components";
     if (row.priorBasis === "CURRENT_DEFENSIVE_ROLE") return "idp-snap-role";
     if (row.universe === "missing-active") return "form(no-prior)";
     if (row.position === "DEF") return "dst-mean";
@@ -1383,7 +1456,6 @@ export function renderFullRankingsHtml(report) {
     return `${row.scorableSourceFamilyCount}fam${role ? "·" + role : ""}`;
   };
   const week1 = report.provenance?.week1List ?? [];
-  const teamDef = report.provenance?.teamDefense ?? {};
   const idpOpportunity = report.provenance?.idpOpportunity ?? {};
   const matchup = report.provenance?.matchup ?? {};
   // Default view sorts by current overall rank ascending (not board/input order).
@@ -1455,7 +1527,7 @@ export function renderFullRankingsHtml(report) {
 <h1>SKRODZKai full custom Week ${escapeHtml(report.targetWeek)} rankings</h1>
 <div class="meta">
   Generated ${escapeHtml(report.generatedAt)}. ${escapeHtml(report.posture)}.<br>
-  Offense/K/DEF custom number = trusted individual prior blended <code>${escapeHtml(report.week1Weight)}</code> completed-week form /
+  Offense custom number = trusted individual prior blended <code>${escapeHtml(report.week1Weight)}</code> completed-week form /
   <code>${(1 - report.week1Weight).toFixed(2)}</code> prior; the form signal is
   <code>${escapeHtml(report.opportunityShare)}</code> opportunity (volume valued at league-average points/opportunity) +
   <code>${(1 - report.opportunityShare).toFixed(2)}</code> observed league-scored result. Weights are documented, UNCALIBRATED
@@ -1464,8 +1536,8 @@ export function renderFullRankingsHtml(report) {
   Completed-week actuals: ${week1.map((w) => `Sleeper ${escapeHtml(w.season)} wk${escapeHtml(w.week)} (${escapeHtml(w.captureMode)}, retrievedAt ${escapeHtml(w.retrievedAt ?? "n/a")}, sha256 ${escapeHtml(String(w.contentSha256 ?? "").slice(0, 12))})`).join("; ")}.
   Schedule/opponent/kickoff: ${escapeHtml(report.provenance?.schedule?.sourceId ?? "n/a")} ${escapeHtml(report.provenance?.schedule?.captureMode ?? "")} (retrievedAt ${escapeHtml(report.provenance?.schedule?.retrievedAt ?? "n/a")}).
   Current injury/team status &amp; missing-player identity: ${escapeHtml(report.provenance?.identity?.sourceId ?? "n/a")} ${escapeHtml(report.provenance?.identity?.captureMode ?? "")} (retrievedAt ${escapeHtml(report.provenance?.identity?.retrievedAt ?? "n/a")}).<br>
-  <b>Matchup (${escapeHtml(matchup.status ?? "n/a")}):</b> opponent + kickoff SOURCED from the actual schedule. ${matchup.seasonsUsed ? `Opponent-strength factor from real scored nflverse history (seasons ${escapeHtml((matchup.seasonsUsed ?? []).join(", "))}, ${escapeHtml(matchup.totalTeamGames ?? "?")} team-games) for offense/K/DEF only; IDP matchup omitted because aggregate opponent points do not establish role-specific tackle opportunity. UNCALIBRATED to 2026. Limitation: ${escapeHtml(matchup.limitations ?? "")}` : "no matchup factor applied (neutral 1.0)."}<br>
-  Team defenses (${escapeHtml(teamDef.sampledTeamWeeks ?? "?")} team-weeks): Week-form DST scored under the exact league rules, regressed to the league DST mean ${money(teamDef.leagueMean)} then opponent-offense matchup-adjusted; the Yahoo DEF season prior is EXCLUDED.
+  <b>Matchup (${escapeHtml(matchup.status ?? "n/a")}):</b> opponent + kickoff SOURCED from the actual schedule. ${matchup.seasonsUsed ? `Opponent-strength factor from real scored nflverse history (seasons ${escapeHtml((matchup.seasonsUsed ?? []).join(", "))}, ${escapeHtml(matchup.totalTeamGames ?? "?")} team-games) for offense only; IDP matchup omitted because aggregate opponent points do not establish role-specific tackle opportunity. K/DEF use their separate current-season components. UNCALIBRATED to 2026. Limitation: ${escapeHtml(matchup.limitations ?? "")}` : "no historical matchup factor applied (neutral 1.0)."}<br>
+  K/DEF: current-season components use one observed pooled game of smoothing. K uses own-team FG/PAT opportunities and exact league scoring; DEF separates sacks, turnovers and points allowed, with pooled rare scores and verified completed-schedule opponent exposure where available. Missing exposure is disclosed. Choices are UNCALIBRATED; no predictive improvement claim. Preseason K/DEF priors are excluded.
   IDP: latest measured defensive snap role and recent share determine workload; tackle rate shrinks toward the ${escapeHtml(Object.entries(idpOpportunity.groups ?? {}).map(([group, sample]) => `${group} pooled rate (${sample.sampledPlayerWeeks} player-weeks)`).join("; "))}. Event points use the group baseline rather than individual splash history. One team-game of pooled snaps is the smoothing denominator. High uncertainty flags thin samples or a 20-point share change. Special teams alone and missing denominators do not become zeroes. UNCALIBRATED.
 </div>
 <div class="counts">
@@ -1516,6 +1588,46 @@ filter.addEventListener("input", () => {
 </body></html>`;
 }
 
+export function buildForecastActualReports(forecasts, weekStatsList, historicalSchedules, season) {
+  return forecasts.filter((forecast) => forecast.season === season && weekStatsList.some(({ week }) => week === forecast.targetWeek)).map((forecast) => {
+    const actual = weekStatsList.find(({ week }) => week === forecast.targetWeek);
+    const schedule = historicalSchedules.get(forecast.targetWeek);
+    const players = [];
+    const unresolvedPlayers = [];
+    for (const row of forecast.players ?? []) {
+      const kind = scoringKindForPosition(row.position);
+      const key = kind === "teamdef" ? row.team : row.sleeperId;
+      const raw = actual.stats?.[key];
+      const game = schedule?.byTeam.get(row.team);
+      if (!raw || (kind === "teamdef" ? !finite(raw.pts_allow) : !participatedWeek(raw))) {
+        unresolvedPlayers.push({ playerId: row.playerId, sleeperId: row.sleeperId, position: row.position, reason: "NO_PARTICIPATION_ROW_UNRESOLVED" });
+        continue;
+      }
+      if (!game?.completed || game.kickoff !== row.kickoff) continue;
+      players.push({ playerId: row.playerId, sleeperId: row.sleeperId, position: row.position, kickoff: game.kickoff,
+        actualPoints: scoreWeeklyLeaguePoints(week1LineFor(kind, raw), kind) });
+    }
+    return { season, week: forecast.targetWeek, completed: true,
+      completedVerifiedAt: schedule?.receipt?.retrievedAt ?? null, retrievedAt: actual.receipt.retrievedAt,
+      scoringSource: "analysis/player-intelligence.mjs", receipts: { actuals: actual.receipt, completedSchedule: schedule?.receipt ?? null }, players, unresolvedPlayers };
+  });
+}
+
+export function buildMultiweekRankings({ targetWeek, schedules, ...inputs }) {
+  if (!Number.isInteger(targetWeek) || targetWeek < 2 || targetWeek > 18) throw new Error("target week must be 2 through 18");
+  const horizonWeeks = Array.from({ length: Math.min(3, 19 - targetWeek) }, (_, i) => targetWeek + i);
+  const weeks = horizonWeeks.map((week) => {
+    const schedule = schedules.get(week);
+    if (!schedule || schedule.receipt?.week !== week || schedule.receipt?.season !== inputs.provenance.season)
+      throw new Error(`missing verified schedule for horizon week ${week}`);
+    return buildFullWeeklyRankings({ ...inputs, targetWeek: week, completedThroughWeek: targetWeek - 1,
+      comparisonWeek: targetWeek,
+      schedule, provenance: { ...inputs.provenance, schedule: schedule.receipt } });
+  });
+  return { season: inputs.provenance.season, targetWeek, generatedAt: inputs.generatedAt,
+    completedThroughWeek: targetWeek - 1, forecastAssumptions: weeks[0].forecastAssumptions, weeks };
+}
+
 async function runFullRankings(args, { season, targetWeek, week1Weight, opportunityShare, generatedAt, capturedAt }) {
   // Completed weeks are every week before the target week — no hardcoded Week 1.
   const completedWeeks = Array.from({ length: targetWeek - 1 }, (_, index) => index + 1);
@@ -1523,18 +1635,31 @@ async function runFullRankings(args, { season, targetWeek, week1Weight, opportun
     args.roster ? readFile(args.roster, "utf8").then(JSON.parse) : Promise.resolve({ players: [] }),
     readFile(args.board, "utf8").then(JSON.parse),
   ]);
+  const { players: playersMap, receipt: identityReceipt } = await loadSleeperPlayersMap({
+    playersPath: args.players || null, season, capturedAt, outDir: args.out,
+  });
+  const historicalSchedules = new Map();
+  for (const week of completedWeeks) {
+    const historical = await loadSchedule({ schedulePath: args[`schedule-week${week}`] || null,
+      season, week, capturedAt, outDir: args.out });
+    if ([...historical.byTeam.values()].some((game) => !game.completed || !Number.isFinite(Date.parse(game.kickoff)) || Date.parse(game.kickoff) >= Date.now()))
+      throw new Error(`actuals cutoff week ${week} does not have verified completed schedule games`);
+    historicalSchedules.set(week, historical);
+  }
   const weekStatsList = [];
   for (const week of completedWeeks) {
     const offlinePath = args[`sleeper-week${week}`] || (completedWeeks.length === 1 ? args.sleeper : null) || null;
     const { stats, receipt } = await loadSleeperWeek({ sleeperPath: offlinePath, season, week, capturedAt, outDir: args.out });
     weekStatsList.push({ week, stats, receipt });
   }
-  const { players: playersMap, receipt: identityReceipt } = await loadSleeperPlayersMap({
-    playersPath: args.players || null, season, capturedAt, outDir: args.out,
-  });
-  const { byTeam: scheduleByTeam, byeTrusted: scheduleByeTrusted, receipt: scheduleReceipt } = await loadSchedule({
-    schedulePath: args.schedule || null, season, week: targetWeek, capturedAt, outDir: args.out,
-  });
+  const horizonWeeks = Array.from({ length: Math.min(3, 19 - targetWeek) }, (_, i) => targetWeek + i);
+  const schedules = new Map();
+  for (const week of horizonWeeks) schedules.set(week, await loadSchedule({
+    schedulePath: args[`schedule-week${week}`] || (week === targetWeek ? args.schedule : null) || null,
+    byePath: args[`byes-week${week}`] || null,
+    season, week, capturedAt, outDir: args.out }));
+  const scheduleReceipt = schedules.get(targetWeek).receipt;
+  const specialTeamsModel = buildSpecialTeamsModel(weekStatsList, playersMap, historicalSchedules);
 
   const { rates: opportunityRates, sampledPlayers, dedupedAliases } = buildOpportunityRatesMultiWeek(board, weekStatsList);
   const { mean: teamDefenseMean, sampledTeamWeeks } = teamDefenseLeagueMeanMultiWeek(weekStatsList);
@@ -1561,7 +1686,7 @@ async function runFullRankings(args, { season, targetWeek, week1Weight, opportun
 
   const provenance = {
     season,
-    prior: { path: args.board, generatedAt: board.generatedAt ?? null, leagueId: board.leagueId ?? null, scoringModel: board.scoringModel ?? null, note: "pre-season custom multi-source blend, HEALTH-conditioned vs ROLE-conditioned. Default per-player prior = the board's ROLE-LIMITED weekly expectation weeklyPoints[targetWeek] WHEN IT EXISTS; there is NO fallback to perGamePoints (=consensus/expectedGames is a CONDITIONAL performance rate, NOT a role-independent weekly expectation). A non-starter/unknown-role player with no weekly prior therefore gets NO prior — it ranks on observed form only, or is explicitly unrankable (MISSING_ROLE_PRIOR_NO_ACTUAL) when there is no form; the conditional rate is never substituted as weekly workload. The undiscounted perGamePoints role rate is RESTORED only for a CURRENT healthy STARTER, evidenced by the fresh Sleeper depth chart (depth_chart_order===1) and no confirmed-inactive status — removing the stale preseason health/expected-games cap for genuine starters without re-inflating backups. Prior is also GATED on projection source quality: only a >=2 scorable-family prior is trusted; a single-family (e.g. Yahoo-only) board number is dropped (PRIOR_UNSUPPORTED) and the player ranks on observed form (raw number + families + depth-chart evidence exposed per row). IDP ignores board preseason points and uses the separate current defensive snap-role model. DEF uses the league DST mean (never gated, never role-restored)." },
+    prior: { path: args.board, generatedAt: board.generatedAt ?? null, leagueId: board.leagueId ?? null, scoringModel: board.scoringModel ?? null, note: "Offense uses a trusted >=2-family role-limited weekly prior when present; the undiscounted perGamePoints rate is restored only for a fresh healthy depth-chart starter. No conditional-rate fallback for backups or unknown roles. Unsupported single-family priors are gated. IDP ignores preseason points and uses current defensive snap role. K/DEF ignore preseason priors and use separate current-season component models. Yahoo projections remain comparison only." },
     week1List: weekStatsList.map(({ receipt }) => receipt),
     schedule: scheduleReceipt,
     identity: identityReceipt,
@@ -1577,13 +1702,14 @@ async function runFullRankings(args, { season, targetWeek, week1Weight, opportun
     teamDefense: {
       leagueMean: teamDefenseMean,
       sampledTeamWeeks,
-      priorBasis: "REGRESSED_TO_LEAGUE_DST_MEAN",
+      priorBasis: "CURRENT_SEASON_COMPONENTS_NO_PRESEASON_WEIGHT",
       scoringSource: "analysis/player-intelligence.mjs TEAM_DEFENSE_SCORING — exact league DST rules; the draft-board single-source Yahoo DEF prior is EXCLUDED (carried only as excludedYahooSeasonPrior).",
-      note: "each defense's completed-week DST line is scored under the exact league rules and regressed toward the league DST mean, then adjusted by the opponent-offense matchup factor (see matchup).",
+      note: "current-season sack/turnover/points-allowed components shrink by one pooled observed game; rare scores pooled; opponent exposure from verified completed schedule join, no whole-score historical multiplier.",
     },
     matchup: matchupMeta
       ? {
           status: "OPPONENT_SOURCED_HISTORICAL",
+          appliedLanes: ["offense"],
           source: `nflverse player stats seasons ${matchupMeta.seasonsUsed.join(", ")} + nflverse game scores (read-only source-cache); ${matchupMeta.totalTeamGames} team-games, ${matchupMeta.teamsCovered} teams`,
           ...matchupMeta,
           scheduleNote: "opponent identity and kickoff are SOURCED from the actual NFL schedule (ESPN public scoreboard); byes for the target week are trusted only when the schedule is complete.",
@@ -1592,15 +1718,17 @@ async function runFullRankings(args, { season, targetWeek, week1Weight, opportun
           status: "MATCHUP_DISABLED_NEUTRAL",
           note: "matchup adjustment disabled (--no-matchup); opponent/kickoff still sourced from the schedule but every factor is neutral 1.0.",
         },
-    modelChoiceNote: "Offense/K/DEF retain documented uncalibrated prior/form and matchup choices. IDP uses current snap role, pooled tackle-rate shrinkage and pooled event baseline with no role-specific matchup adjustment. Neither path has validated predictive lift from three completed weeks.",
+    modelChoiceNote: "Offense retains prior/form and historical matchup choices. IDP carries the cutoff's measured snap role. K/DEF use current-season components, no preseason blend or historical whole-score matchup multiplier. Every horizon carries current injury/role assumptions; no recovery forecast. All choices uncalibrated and forward acceptance pending.",
   };
 
-  const rankings = buildFullWeeklyRankings({
+  // Real report-generation instant after all source acquisition; no backdated --generated-at.
+  generatedAt = new Date().toISOString();
+  const multiweek = buildMultiweekRankings({
     board,
     rosterInputs,
     weekStatsList,
     playersMap,
-    schedule: { byTeam: scheduleByTeam, byeTrusted: scheduleByeTrusted },
+    schedules,
     matchupProvider,
     opportunityRates,
     teamDefenseMean,
@@ -1608,16 +1736,32 @@ async function runFullRankings(args, { season, targetWeek, week1Weight, opportun
     opportunityShare: opportunityShare ?? undefined,
     targetWeek,
     generatedAt,
-    provenance,
+    specialTeamsModel,
+    provenance: { ...provenance, completedSchedules: [...historicalSchedules.values()].map(({ receipt }) => receipt) },
   });
+  const weeks = multiweek.weeks;
+  const rankings = weeks[0];
 
   await mkdir(args.out, { recursive: true });
   const jsonPath = join(args.out, `week${targetWeek}-full-rankings.json`);
   const htmlPath = join(args.out, `week${targetWeek}-full-rankings.html`);
   await writeFile(jsonPath, `${JSON.stringify(rankings, null, 2)}\n`, { mode: 0o600 });
   await writeFile(htmlPath, `${renderFullRankingsHtml(rankings)}\n`, { mode: 0o600 });
+  const multiweekPath = join(args.out, `week${targetWeek}-multiweek-rankings.json`);
+  await writeFile(multiweekPath, `${JSON.stringify(multiweek, null, 2)}\n`, { mode: 0o600 });
+  for (const future of weeks.slice(1)) {
+    await writeFile(join(args.out, `week${future.targetWeek}-full-rankings.json`), `${JSON.stringify(future, null, 2)}\n`, { mode: 0o600 });
+    await writeFile(join(args.out, `week${future.targetWeek}-full-rankings.html`), `${renderFullRankingsHtml(future)}\n`, { mode: 0o600 });
+  }
+  const prior = args["prior-forecast"] ? JSON.parse(await readFile(args["prior-forecast"], "utf8")) : null;
+  const priorForecasts = prior ? prior.weeks ?? [prior] : [];
+  const actualReports = buildForecastActualReports(priorForecasts, weekStatsList, historicalSchedules, season);
+  const evaluation = evaluateWeeklyForecasts(priorForecasts, actualReports);
+  const evaluationPath = join(args.out, "forecast-evaluation.json");
+  await writeFile(join(args.out, "forecast-actuals.json"), `${JSON.stringify(actualReports, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(evaluationPath, `${JSON.stringify(evaluation, null, 2)}\n`, { mode: 0o600 });
   process.stdout.write(`${JSON.stringify({
-    jsonPath, htmlPath, universe: rankings.universe, audit: rankings.audit,
+    jsonPath, htmlPath, multiweekPath, horizonWeeks, evaluationPath, evaluation: evaluation.status, universe: rankings.universe, audit: rankings.audit,
   }, null, 2)}\n`);
 }
 
@@ -1630,6 +1774,23 @@ function parseArgs(argv) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args["plan-roster"] || args["evaluate-forecasts"]) {
+    if (!args.rankings || !args.out) throw new Error("planning/evaluation requires --rankings and --out");
+    const report = JSON.parse(await readFile(args.rankings, "utf8"));
+    let result;
+    if (args["plan-roster"]) {
+      if (!args["roster-snapshot"]) throw new Error("--plan-roster requires --roster-snapshot");
+      result = compareMultiweekRoster(report, JSON.parse(await readFile(args["roster-snapshot"], "utf8")));
+    } else {
+      if (!args.actuals) throw new Error("--evaluate-forecasts requires --actuals");
+      result = evaluateWeeklyForecasts(report.weeks ?? [report], JSON.parse(await readFile(args.actuals, "utf8")));
+    }
+    await mkdir(args.out, { recursive: true });
+    const output = join(args.out, args["plan-roster"] ? `week${report.targetWeek}-roster-planning.json` : "forecast-evaluation.json");
+    await writeFile(output, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
+    process.stdout.write(`${JSON.stringify({ output, disposition: result.disposition ?? result.status })}\n`);
+    return;
+  }
   if (args["plan-idp"]) {
     if (!args.rankings || !args["idp-snapshot"] || !args.out) throw new Error("--plan-idp requires --rankings, --idp-snapshot, and --out");
     const rankings = JSON.parse(await readFile(args.rankings, "utf8"));
@@ -1648,8 +1809,8 @@ async function main() {
   const season = Number(args.season ?? 2026);
   const targetWeek = Number(args["target-week"] ?? 2);
   if (!Number.isInteger(season) || season < 2000 || !Number.isInteger(targetWeek) ||
-      targetWeek < 2 || targetWeek > 17) {
-    throw new Error("target week must be an integer 2 through 17");
+      targetWeek < 2 || targetWeek > 18) {
+    throw new Error("target week must be an integer 2 through 18");
   }
   const week1Weight = args["week1-weight"] != null ? Number(args["week1-weight"]) : undefined;
   const opportunityShare = args["opportunity-share"] != null ? Number(args["opportunity-share"]) : undefined;
@@ -1660,6 +1821,7 @@ async function main() {
   const capturedAt = new Date().toISOString();
 
   if (args.full) {
+    if (args["generated-at"]) throw new Error("--full stamps actual generation time; --generated-at is not permitted");
     await runFullRankings(args, { season, targetWeek, week1Weight, opportunityShare, generatedAt, capturedAt });
     return;
   }

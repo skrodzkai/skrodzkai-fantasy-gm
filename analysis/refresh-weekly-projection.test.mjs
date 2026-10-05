@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { buildSpecialTeamsModel, projectSpecialTeams } from "./special-teams-projection.mjs";
+import { buildMultiweekRankings, buildForecastActualReports, renderMarkdown, renderFullRankingsHtml } from "./refresh-weekly-projection.mjs";
 
 import {
   assertReceiptPeriod,
@@ -11,6 +13,86 @@ import {
   completedWeeksSignal,
   buildFullWeeklyRankings,
 } from "./refresh-weekly-projection.mjs";
+
+test("K/DEF current-season components pool zero games, shrink by sample and require participation", () => {
+  const players = { "1": { position: "K" }, "2": { position: "K" }, "3": { position: "K" } };
+  const schedule = new Map([[1, { byTeam: new Map([["NE", { opponent: "BUF" }], ["BUF", { opponent: "NE" }]]) }]]);
+  const sample = [{ week: 1, stats: { "1": { gp: 1, fga: 2, fgm: 2, xpa: 2, xpm: 1 }, "2": { gp: 1 },
+    "3": { gms_active: 1 }, NE: { pts_allow: 14, pts_allow_14_20: 1, sack: 4, def_td: 1 }, BUF: { pts_allow: 35, pts_allow_35p: 1 } } }];
+  const model = buildSpecialTeamsModel(sample, players, schedule);
+  assert.equal(model.kPool.length, 2);
+  assert.equal(projectSpecialTeams(model, { kind: "kicker", statsKey: "3" }).weeklyExpectation, null);
+  assert.equal(projectSpecialTeams(model, { kind: "kicker", statsKey: "missing" }).weeklyExpectation, null);
+  const k = projectSpecialTeams(model, { kind: "kicker", statsKey: "1" });
+  assert.equal(k.components.fieldGoalPoints, 4.5);
+  assert.equal(k.components.extraPointPoints, 0.75);
+  assert.equal(k.components.missedExtraPointPoints, -0.75);
+  assert.equal(k.weeklyExpectation, 4.5);
+  const d = projectSpecialTeams(model, { kind: "teamdef", statsKey: "NE", opponent: "BUF" });
+  assert.equal(d.components.rareScoresPooled, 3); // six-point rare TD averaged across BOTH games
+  assert.equal(d.opponentSampleGames, 1);
+  assert.equal(d.opponentStatus, "VERIFIED_COMPLETED_SCHEDULE_EXPOSURE");
+  assert.equal(projectSpecialTeams(model, { kind: "teamdef", statsKey: "NE", opponent: "NO" }).opponentSampleGames, 0);
+  const more = buildSpecialTeamsModel([...sample, { week: 2, stats: { NE: { pts_allow: 14, sack: 4 }, BUF: { pts_allow: 35 } } }], players);
+  assert.ok(projectSpecialTeams(more, { kind: "teamdef", statsKey: "NE" }).components.sacks >
+    projectSpecialTeams(model, { kind: "teamdef", statsKey: "NE" }).components.sacks);
+  assert.equal(buildSpecialTeamsModel([{ week: 1, stats: { NE: { pts_allow: 7, sack: -1 }, "1": { gp: 1, fga: "bad" } } }], players).dPool.length, 0);
+  const full = buildFullWeeklyRankings({ board: { players: [
+    { yahooId: "1", sleeperId: "1", position: "K", name: "Kicker", team: "NE", perGamePoints: 100, weeklyPoints: [100, 100], scorableSourceFamilyCount: 2 },
+    { yahooId: "10", position: "DEF", name: "Defense", team: "NE", perGamePoints: 100, weeklyPoints: [100, 100] }] },
+    rosterInputs: { players: [] }, weekStatsList: sample, playersMap: { ...players, "1": { position: "K", team: "NE", status: "Active", depth_chart_order: 1 } },
+    schedule: { byTeam: new Map([["NE", { opponent: "BUF", kickoff: "2026-09-20T17:00:00Z" }]]), byeTrusted: false },
+    opportunityRates: null, teamDefenseMean: 99, specialTeamsModel: model, targetWeek: 2, generatedAt: "2026-09-16T00:00:00Z",
+    provenance: { season: 2026, matchup: { seasonsUsed: [2025] } } });
+  for (const row of full.players.filter((row) => row.playerId === "1" || row.playerId === "10")) {
+    assert.equal(row.rankBasis, "CURRENT_SEASON_COMPONENTS");
+    assert.equal(row.priorBasis, "CURRENT_SEASON_COMPONENTS");
+    assert.equal(row.priorPerGame, null);
+    assert.equal(row.priorShrinkageApplied, false);
+    assert.equal(row.matchupFactor, 1);
+    assert.equal(row.weeklyExpectation, row.specialTeamsModel.weeklyExpectation);
+  }
+  assert.equal(full.players.find((row) => row.playerId === "1").naiveBaseline, 6);
+  assert.equal(full.players.find((row) => row.playerId === "10").naiveBaseline, 12);
+  assert.doesNotThrow(() => renderMarkdown(full));
+  assert.equal(full.audit.matchupApplied, 0);
+  assert.equal(full.audit.defenseOpponentExposureApplied, 1);
+  const html = renderFullRankingsHtml(full);
+  assert.match(html, /for offense only/);
+  assert.doesNotMatch(html, /for offense\/K\/DEF only/);
+  assert.match(html, /current-components/);
+  assert.doesNotMatch(html, /dst-mean/);
+});
+
+test("multiweek forecasts reuse one cutoff, preserve current injury assumptions and cap at week 18", () => {
+  const board = { players: [{ yahooId: "1", sleeperId: "1", name: "Back", position: "RB", team: "NE", perGamePoints: 12,
+    weeklyPoints: Array(18).fill(12), scorableSourceFamilyCount: 2 }] };
+  const schedules = new Map([4, 5, 6].map((week) => [week, { byTeam: new Map([["NE", { opponent: "BUF", kickoff: `2026-10-${week + 1}T17:00:00Z` }]]),
+    byeTrusted: false, receipt: { season: 2026, week } }]));
+  const input = { board, rosterInputs: { players: [] }, playersMap: { "1": { position: "RB", team: "NE", status: "Active", active: true, injury_status: "Out" } },
+    weekStatsList: [1, 2, 3].map((week) => ({ week, stats: { "1": { gp: 1, rush_att: 10, rush_yd: 50 } } })),
+    opportunityRates: null, teamDefenseMean: null, generatedAt: "2026-10-01T00:00:00Z", provenance: { season: 2026 } };
+  const report = buildMultiweekRankings({ ...input, targetWeek: 4, schedules });
+  assert.deepEqual(report.weeks.map((r) => r.targetWeek), [4, 5, 6]);
+  assert.deepEqual(report.weeks.map((r) => r.completedThroughWeek), [3, 3, 3]);
+  assert.ok(report.weeks.every((r) => r.players[0].unrankableReason === "CONFIRMED_INACTIVE_OUT"));
+  const byeSchedules = new Map(schedules);
+  byeSchedules.set(4, { ...schedules.get(4), byTeam: new Map(), byeTeams: new Set(["NE"]) });
+  byeSchedules.set(5, { ...schedules.get(5), byTeam: new Map(), byeTeams: new Set() });
+  const byeReport = buildMultiweekRankings({ ...input, playersMap: { "1": { ...input.playersMap["1"], injury_status: null } }, targetWeek: 4, schedules: byeSchedules });
+  assert.equal(byeReport.weeks[0].players[0].scheduleStatus, "VERIFIED_BYE");
+  assert.equal(byeReport.weeks[1].players[0].scheduleStatus, "UNKNOWN");
+  assert.equal(byeReport.weeks[1].players[0].weeklyExpectation, null);
+  assert.throws(() => buildMultiweekRankings({ ...input, targetWeek: 4, schedules: new Map([[4, schedules.get(4)]]) }), /missing verified schedule/);
+  const final = buildMultiweekRankings({ ...input, targetWeek: 18, weekStatsList: Array.from({ length: 17 }, (_, i) => ({ week: i + 1, stats: {} })),
+    schedules: new Map([[18, { ...schedules.get(4), receipt: { season: 2026, week: 18 } }]]) });
+  assert.deepEqual(final.weeks.map((r) => r.targetWeek), [18]);
+  const actual = buildForecastActualReports([{ season: 2026, targetWeek: 1, players: ["1", "2"].map((id) => ({ playerId: id, sleeperId: id, position: "RB", team: "NE", kickoff: "kick" })) }],
+    [{ week: 1, stats: { "1": { gp: 1, rush_yd: 100 } }, receipt: { retrievedAt: "later" } }],
+    new Map([[1, { byTeam: new Map([["NE", { completed: true, kickoff: "kick" }]]), receipt: { retrievedAt: "final" } }]]), 2026);
+  assert.equal(actual[0].players[0].actualPoints, 12); // exact 100-yard bonus under league scorer
+  assert.deepEqual(actual[0].unresolvedPlayers, [{ playerId: "2", sleeperId: "2", position: "RB", reason: "NO_PARTICIPATION_ROW_UNRESOLVED" }]);
+});
 
 test("assertReceiptPeriod binds source and period, rejecting a relabeled capture", () => {
   const good = { sourceId: "espn-schedule", season: 2026, week: 2, retrievedAt: "2026-09-16T00:00:00Z", contentSha256: "abc" };
