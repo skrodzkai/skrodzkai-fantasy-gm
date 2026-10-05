@@ -1,5 +1,119 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { compareMultiweekRoster, strongestLegalLineup } from "./multiweek-roster-planning.mjs";
+
+function planningFixture() {
+  const now = Date.parse("2026-10-02T09:00:00Z"), generatedAt = "2026-10-02T07:00:00Z";
+  const players = [
+    { playerId: "1", sleeperId: "s1", position: "RB", name: "Back", values: [10, 10, 10] },
+    { playerId: "2", sleeperId: "s2", position: "K", name: "Kicker", values: [8, 8, 8] },
+    { playerId: "3", sleeperId: "NE", position: "DEF", name: "Defense", values: [-2, 10, -2] },
+    { playerId: "4", sleeperId: "s4", position: "QB", name: "Reserve quarterback", values: [20, 20, 20] },
+    { playerId: "5", sleeperId: "BUF", position: "DEF", name: "Streaming defense", values: [8, -4, 8] },
+    { playerId: "6", sleeperId: "s6", position: "RB", name: "New back", values: [9, 15, 15] },
+  ];
+  const report = { season: 2026, targetWeek: 4, generatedAt, weeks: [4, 5, 6].map((targetWeek, i) => ({ season: 2026, targetWeek,
+    completedThroughWeek: 3, generatedAt, provenance: { schedule: { season: 2026, week: targetWeek } }, players: players.map((row) => ({ ...row,
+      rankable: true, weeklyExpectation: row.values[i], scheduleStatus: "VERIFIED_GAME", kickoff: `2026-10-${10 + i}T17:00:00Z` })) })) };
+  const snapshot = { source: "YAHOO_VERIFIED_READBACK", fullRosterVerified: true, availableVerified: true, season: 2026, week: 4,
+    leagueId: "420010", teamId: "7", capturedAt: "2026-10-02T08:00:00Z", expiresAt: "2026-10-02T10:00:00Z",
+    slots: [{ id: "RB1", eligible: ["RB"] }, { id: "K", eligible: ["K"] }, { id: "DEF", eligible: ["DEF"] }],
+    roster: ["1", "2", "3", "4"].map((yahooId, i) => ({ yahooId, eligible: [players[i].position], ownership: "OWNED", locked: false,
+      droppable: true, injuryStatus: null, slot: ["RB1", "K", "DEF", "BN"][i] })),
+    available: ["5", "6"].map((yahooId, i) => ({ yahooId, eligible: [players[4 + i].position], ownership: "UNOWNED", locked: false,
+      injuryStatus: null, availability: "FA" })) };
+  return { report, snapshot, now };
+}
+
+test("full roster planner prices cross-position bench drops, defense stashes, and weekly tradeoffs", () => {
+  const f = planningFixture(), result = compareMultiweekRoster(f.report, f.snapshot, f.now);
+  assert.equal(result.disposition, "PROPOSE_FOR_EXACT_APPROVAL");
+  const proposals = result.proposals.map((index) => result.alternatives[index]);
+  const stash = proposals.find((p) => p.addYahooId === "5" && p.dropYahooId === "4");
+  assert.deepEqual(stash.weeklyGains.map((row) => row.starterPointGain), [10, 0, 10]);
+  assert.equal(stash.summedStarterPointGain, 20);
+  assert.deepEqual(stash.defensePairYahooIds, ["3", "5"]);
+  assert.ok(proposals.every((p) => p.approvalRequired && !p.executableNow));
+  assert.ok(result.defenseAlternatives.every((index) => result.alternatives[index].addPosition === "DEF"));
+  assert.ok(result.alternatives.every((p) => !Object.hasOwn(p, "before")));
+  for (const [i, after] of stash.after.entries()) {
+    const baseline = result.baseline[i];
+    const reconstructed = baseline.selected.map((pick) => after.changes.find((change) => change.slot === pick.slot) ?? pick);
+    assert.equal(reconstructed.reduce((sum, pick) => sum + pick.points, 0), after.points);
+    assert.equal(new Set(reconstructed.map((pick) => pick.yahooId)).size, reconstructed.length);
+    assert.ok(after.changes.length <= 1);
+  }
+  const tradeoff = proposals.find((p) => p.addYahooId === "6" && p.dropYahooId === "1");
+  assert.deepEqual(tradeoff.weeklyGains.map((row) => row.starterPointGain), [-1, 5, 5]);
+  assert.equal(tradeoff.tradeoff, "HORIZON_GAIN_WITH_WEEKLY_STARTER_LOSS_REQUIRES_REVIEW");
+  assert.match(result.benchAudit[0].unmodeledValue, /NOT_WORTHLESS/);
+  assert.deepEqual(result.benchAudit[0].weeklyStarterContribution.map((r) => r.points), [0, 0, 0]);
+  assert.equal(result.baseline[0].selected.find((pick) => pick.yahooId === "3").points, -2);
+});
+
+test("planner pins current exact locks, frees future locks and excludes locked bench/IR", () => {
+  const rows = [{ yahooId: "1", eligible: ["RB", "WR"], slot: "RB1", locked: true, points: { 4: 10, 5: 10 } },
+    { yahooId: "2", eligible: ["RB"], slot: "BN", locked: false, points: { 4: 20, 5: 20 } },
+    { yahooId: "3", eligible: ["WR"], slot: "WR1", locked: false, points: { 4: 5, 5: 5 } },
+    { yahooId: "4", eligible: ["RB", "WR"], slot: "BN", locked: true, points: { 4: 100, 5: 100 } },
+    { yahooId: "5", eligible: ["RB", "WR"], slot: "IR", locked: false, points: { 4: 200, 5: 200 } }];
+  const slots = [{ id: "RB1", eligible: ["RB"] }, { id: "WR1", eligible: ["WR"] }];
+  const current = strongestLegalLineup(rows, slots, 4, 4), future = strongestLegalLineup(rows, slots, 5, 4);
+  assert.equal(current.points, 15);
+  assert.equal(current.selected.find((p) => p.yahooId === "1").slot, "RB1");
+  assert.equal(future.points, 120);
+  assert.ok(!future.selected.some((p) => p.yahooId === "5"));
+});
+
+test("planner holds stale/unknown facts, exact identity aliases, expired W and missing current forecasts", () => {
+  for (const mutate of [
+    (f) => { f.snapshot.expiresAt = "2026-10-02T08:30:00Z"; },
+    (f) => { delete f.snapshot.roster[0].ownership; },
+    (f) => { f.snapshot.available[0].injuryStatus = "UNKNOWN"; },
+    (f) => { f.snapshot.available[0].availability = "W"; f.snapshot.available[0].conditionalExpiresAt = "2026-10-02T08:30:00Z"; },
+    (f) => { f.report.weeks.forEach((week) => { week.players[4].sleeperId = "s1"; }); },
+    (f) => { delete f.report.weeks[0].players[0].scheduleStatus; },
+    (f) => { delete f.report.generatedAt; },
+    (f) => { f.report.weeks.pop(); },
+  ]) {
+    const f = planningFixture(); mutate(f);
+    assert.equal(compareMultiweekRoster(f.report, f.snapshot, f.now).disposition, "HOLD");
+  }
+  const f = planningFixture();
+  f.snapshot.available.push({ ...f.snapshot.available[0], yahooId: "999" });
+  const result = compareMultiweekRoster(f.report, f.snapshot, f.now);
+  assert.equal(result.disposition, "PROPOSE_FOR_EXACT_APPROVAL");
+  assert.equal(result.excludedCandidates.find((row) => row.yahooId === "999").reason, "UNJOINED_EXACT_YAHOO_IDENTITY");
+});
+
+test("temporary coverage expiry creates review and W remains conditional", () => {
+  const f = planningFixture();
+  f.snapshot.available[0].availability = "W";
+  f.snapshot.available[0].conditionalExpiresAt = "2026-10-03T10:00:00Z";
+  f.snapshot.coverageRecords = [{ temporaryYahooId: "4", coveredYahooIds: ["1"], reviewAt: "2026-10-02T08:00:00Z", expiresAt: "2026-10-02T08:30:00Z" }];
+  const result = compareMultiweekRoster(f.report, f.snapshot, f.now);
+  assert.equal(result.coverageReviews[0].disposition, "REVIEW_COVERAGE");
+  assert.equal(result.coverageReviews[0].action, "REVIEW_ONLY_NO_AUTOMATIC_DROP");
+  assert.match(result.proposals.map((index) => result.alternatives[index]).find((row) => row.addYahooId === "5").executionCondition, /AFTER_RELEASE/);
+});
+
+test("general planner retains IDP continuity and role/tackle edge controls", () => {
+  const f = planningFixture();
+  f.snapshot.slots[0].eligible = ["LB"];
+  f.snapshot.roster[0].eligible = ["LB"];
+  f.snapshot.available[1].eligible = ["LB"];
+  for (const week of f.report.weeks) {
+    week.players[0].position = "LB";
+    week.players[5].position = "LB";
+    week.players[0].idpModel = { status: "SNAP_ROLE_MODEL", roleContinuity: "LATEST_WEEK_MEASURED", expectedSnaps: 60, tacklePoints: 9 };
+    week.players[5].idpModel = { status: "SNAP_ROLE_MODEL", roleContinuity: "LATEST_WEEK_MEASURED", expectedSnaps: 50, tacklePoints: 8 };
+  }
+  let result = compareMultiweekRoster(f.report, f.snapshot, f.now);
+  assert.ok(!result.proposals.some((index) => result.alternatives[index].addYahooId === "6"));
+  f.report.weeks[0].players[0].idpModel.roleContinuity = "UNVERIFIED_NO_TEAM_SNAP_ROWS";
+  result = compareMultiweekRoster(f.report, f.snapshot, f.now);
+  assert.equal(result.reason, "STARTER_IDP_ROLE_CONTINUITY_REQUIRES_REVIEW");
+});
 
 import {
   buildWeeklyProjectionProfile,

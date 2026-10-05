@@ -240,6 +240,97 @@ function args(argv) {
   return Object.fromEntries(argv.map((entry) => { const [key, ...value] = entry.replace(/^--/, "").split("="); return [key, value.join("=")]; }));
 }
 
+// Later actuals are explicit league-scored, completed-period artifacts. Evaluation never tunes
+// weights or replaces a forecast with a recomputation after kickoff.
+export function evaluateWeeklyForecasts(forecasts, actualReports) {
+  const excluded = [], evaluated = [];
+  if (!Array.isArray(forecasts) || !forecasts.length) return { status: "NOT_EVALUATED", reason: "NO_PRIOR_SAVED_FORECAST", byPosition: {}, evaluated: [], excluded: [] };
+  const seen = new Set();
+  for (const forecast of forecasts) {
+    const generated = Date.parse(forecast.generatedAt);
+    const actual = (actualReports ?? []).find((r) => r.season === forecast.season && r.week === forecast.targetWeek);
+    const sourceValid = (receipt, sourceId, season, week) => receipt?.sourceId === sourceId && receipt.season === season && receipt.week === week &&
+      /^[a-f0-9]{64}$/.test(receipt.contentSha256 ?? "") && Number.isFinite(Date.parse(receipt.retrievedAt));
+    if (!Number.isInteger(forecast.season) || !Number.isInteger(forecast.targetWeek) || !Number.isFinite(generated) || generated > Date.now() ||
+        !Number.isInteger(forecast.completedThroughWeek) || forecast.completedThroughWeek >= forecast.targetWeek ||
+        !actual || actual.completed !== true || actual.scoringSource !== "analysis/player-intelligence.mjs" ||
+        !sourceValid(actual.receipts?.actuals, "sleeper", forecast.season, forecast.targetWeek) ||
+        !sourceValid(actual.receipts?.completedSchedule, "espn-schedule", forecast.season, forecast.targetWeek) ||
+        actual.completedVerifiedAt !== actual.receipts.completedSchedule.retrievedAt || actual.retrievedAt !== actual.receipts.actuals.retrievedAt ||
+        Date.parse(actual.retrievedAt) > Date.now() ||
+        Date.parse(actual.retrievedAt) < Date.parse(actual.completedVerifiedAt) ||
+        !sourceValid(forecast.provenance?.schedule, "espn-schedule", forecast.season, forecast.targetWeek) ||
+        Date.parse(forecast.provenance.schedule.retrievedAt) > generated ||
+        !Array.isArray(forecast.players) || !Array.isArray(actual.players) ||
+        (forecast.provenance?.week1List ?? []).length !== forecast.completedThroughWeek ||
+        (forecast.provenance?.week1List ?? []).some((receipt, i) => !sourceValid(receipt, "sleeper", forecast.season, i + 1) || Date.parse(receipt.retrievedAt) > generated)) {
+      excluded.push({ week: forecast.targetWeek, reason: "UNVERIFIED_FORECAST_OR_LATER_COMPLETED_ACTUAL_PERIOD" }); continue;
+    }
+    const actualById = new Map(actual.players.map((row) => [String(row.playerId), row]));
+    if (actualById.size !== actual.players.length || new Set(forecast.players.map((r) => String(r.playerId))).size !== forecast.players.length) {
+      excluded.push({ week: forecast.targetWeek, reason: "DUPLICATE_IDENTITY" }); continue;
+    }
+    for (const row of forecast.players) {
+      if (!row.rankable || !finite(row.weeklyExpectation)) continue;
+      const observed = actualById.get(String(row.playerId)), kickoff = Date.parse(row.kickoff);
+      const key = `${forecast.season}|${forecast.targetWeek}|${row.playerId}`;
+      if (!observed) {
+        const unresolved = actual.unresolvedPlayers?.find((item) => String(item.playerId) === String(row.playerId) &&
+          item.sleeperId === row.sleeperId && item.position === row.position);
+        excluded.push({ playerId: row.playerId, position: row.position, week: forecast.targetWeek,
+          reason: unresolved?.reason === "NO_PARTICIPATION_ROW_UNRESOLVED" ? unresolved.reason : "IDENTITY_TIMING_OR_ACTUAL_UNVERIFIED" });
+        continue;
+      }
+      if (!observed || !Number.isFinite(kickoff) || generated >= kickoff || Date.parse(actual.completedVerifiedAt) <= kickoff || observed.kickoff !== row.kickoff ||
+          observed.position !== row.position || !row.sleeperId && row.position !== "DEF" ||
+          observed.sleeperId !== row.sleeperId || !finite(observed.actualPoints) || seen.has(key)) {
+        excluded.push({ playerId: row.playerId, position: row.position, week: forecast.targetWeek, reason: "IDENTITY_TIMING_OR_ACTUAL_UNVERIFIED" }); continue;
+      }
+      seen.add(key);
+      const yahooBeforeKickoff = Number.isFinite(Date.parse(row.yahooComparisonCapturedAt)) &&
+        Date.parse(row.yahooComparisonCapturedAt) <= generated && Date.parse(row.yahooComparisonCapturedAt) < kickoff;
+      evaluated.push({ playerId: key, position: row.position, week: forecast.targetWeek, predicted: Number(row.weeklyExpectation),
+        actual: Number(observed.actualPoints), naive: finite(row.naiveBaseline) ? Number(row.naiveBaseline) : null,
+        yahoo: yahooBeforeKickoff && finite(row.yahooWeek2Projection) ? Number(row.yahooWeek2Projection) : null });
+    }
+  }
+  const metrics = (rows, field) => {
+    const valid = rows.filter((r) => finite(r[field]));
+    const ranks = (key) => {
+      const sorted = [...valid].sort((a, b) => b[key] - a[key]), result = new Map();
+      for (let i = 0; i < sorted.length;) {
+        let end = i + 1; while (end < sorted.length && sorted[end][key] === sorted[i][key]) end += 1;
+        for (let j = i; j < end; j += 1) result.set(sorted[j].playerId, (i + 1 + end) / 2);
+        i = end;
+      }
+      return result;
+    };
+    const predictedRanks = ranks(field), actualRanks = ranks("actual");
+    return { sample: valid.length, mae: mean(valid.map((r) => Math.abs(r[field] - r.actual))),
+      spearman: pearson(valid.map((r) => [predictedRanks.get(r.playerId), actualRanks.get(r.playerId)])) };
+  };
+  const byPosition = Object.fromEntries([...new Set(evaluated.map((r) => r.position))].map((position) => {
+    const rows = evaluated.filter((r) => r.position === position);
+    const paired = (field) => {
+      const common = rows.filter((row) => finite(row[field]));
+      const forecast = metrics(common, "predicted"), comparator = metrics(common, field);
+      return { sample: common.length, forecast, comparator,
+        forecastMinusComparatorMae: forecast.mae == null ? null : forecast.mae - comparator.mae };
+    };
+    return [position, { forecast: metrics(rows, "predicted"), naiveCompletedGameMean: metrics(rows, "naive"),
+      yahooTimestampedComparison: metrics(rows, "yahoo"), totalsScope: "AVAILABLE_PER_METHOD_UNPAIRED",
+      pairedComparisons: { naiveCompletedGameMean: paired("naive"), yahooTimestampedComparison: paired("yahoo") } }];
+  }));
+  const exclusionsByPosition = {};
+  for (const row of excluded) {
+    const position = row.position ?? "UNKNOWN", counts = exclusionsByPosition[position] ??= {};
+    counts[row.reason] = (counts[row.reason] ?? 0) + 1;
+  }
+  return { status: evaluated.length ? "EVALUATED_REPORT_ONLY" : "NOT_EVALUATED", byPosition, evaluated, excluded,
+    exclusionsByPosition, absencePolicy: "MISSING_PARTICIPATION_REMAINS_UNRESOLVED_NEVER_ZERO",
+    tuning: "DISABLED", acceptance: "PENDING_FORWARD_FORECAST_ACCEPTANCE_NO_PREDICTIVE_IMPROVEMENT_CLAIM" };
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const input = args(process.argv.slice(2));
   for (const key of ["ranking-pack", "calibration", "output", "generated-at"]) if (!input[key]) throw new Error(`missing --${key}`);
