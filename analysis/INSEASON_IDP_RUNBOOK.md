@@ -250,3 +250,108 @@ that exact action's bounded authority under receipt rules. No new schedule, poll
 code or live configuration change is proposed. Source test/review/PR acceptance and future
 forecast acceptance are separate; predictive improvement, installation, live integration and
 runtime behavior remain pending.
+
+## October 6 current-role and roster-planning repair candidate
+
+This section describes the source candidate, not a live installation or heartbeat edit.
+Monday still performs one full refresh. Offense players with measured offensive snaps use
+completed-season team opportunity budgets and recent measured shares. Yardage/completion/
+reception efficiency shrinks by one pooled position player-game; TD/turnover/threshold bonuses
+use pooled position rates. Individual hot TD averages and preseason backup points do not anchor
+current starters. Team allocations are capped at the observed budget. Missing snaps and conflicting
+historical team denominators remain unknown. A QB with relief snaps but no measured full-start
+workload has no starter projection. A depth-one QB whose latest game was partial has no normal
+forecast; prior measured full starts support a separately labeled conditional full-start case.
+Depth rank never distributes workload to backups. IDP, K and DEF point models are unchanged.
+Every offense row without measured role remains unknown, regardless of a preseason prior,
+source-family count, depth rank or box-score-only production.
+These choices are uncalibrated; source tests/replays are not evidence of predictive improvement.
+
+The read-only Yahoo candidate now captures each exact player's `is_editable`, rather than
+substituting roster-level editability. A bounded complete FA/W traversal uses the existing GET
+routes, with no position filter, no retry, and a short terminal page for each status. A page limit,
+duplicate/ownership change or settings drift stops collection as incomplete.
+
+```sh
+node analysis/yahoo-fantasy-operations.mjs snapshot all:200 \
+  --out=/path/to/private-readback.json
+node analysis/yahoo-fantasy-operations.mjs planner-input \
+  /path/to/private-readback.json /path/to/monday/week5-multiweek-rankings.json \
+  2026-10-06T20:00:00Z --out=/path/to/private-planner-input.json
+node analysis/refresh-weekly-projection.mjs --plan-roster \
+  --rankings=/path/to/monday/week5-multiweek-rankings.json \
+  --roster-snapshot=/path/to/private-planner-input.json --out=/path/to/planning
+```
+
+The example expiry is illustrative; supply a real bounded freshness expiry. Output files use
+mode 0600 and exclusive creation. Do not put private snapshots in Git or review packets.
+Snapshot freshness uses the roster read clock, never the later final pool-page clock.
+Repeated Yahoo positions receive occurrence IDs within equivalent slot positions. Exact player
+editability supplies captured lock facts; the planner recomputes current-game locks at its actual
+evaluation time from verified kickoff, pins starters to their exact slots, and forbids started-game
+bench/candidate current-week use even when a later Yahoo editability field permits dropping.
+Candidate lineup eligibility may use a verified future same-week
+kickoff with a currently editable roster, explicitly labeled. Unknown candidate locks exclude that
+candidate. A verified current-bye candidate with locked=null can instead appear as future-only
+research: never current-week use and never an approval proposal, even with other gates known.
+Unknown Yahoo candidate injury codes (including NA and IR-R) exclude that exact candidate;
+unknown roster injury codes still HOLD planning and are not armed for game checks.
+Advisory drop comparison requires player editable=1, undroppable=0, cant-cut-list=none,
+no pending claims and a non-IR slot; a fresh execution preflight still decides actual drop legality.
+W review expiry bounds the conditional proposal and does not establish waiver release time.
+Missing acquisition capacity/limit semantics, unknown drop legality, pending claims/trades or
+an incomplete candidate pool produce transaction `HOLD`; baseline, bench costs,
+`conditionalProposals` indices and independently verified game checks remain visible. Missing
+values, zero and negative limit sentinels never mean unlimited. An optional fourth planner-input
+file is an exact verified Yahoo supplement with season/week/league/team, source, verified=true,
+capturedAt/expiresAt, per-player locks/drop facts and their basis, or addCapacityVerified plus
+addCapacityBasis. It must come from supported current readbacks, not invented booleans.
+
+At existing 75-minute and 15-minute checkpoints, collect a small official availability packet
+and recompute the affected-player overlay from the SAME saved base. No season refresh or service:
+
+```sh
+node analysis/refresh-weekly-projection.mjs --overlay-availability \
+  --rankings=/path/to/monday/week5-multiweek-rankings.json \
+  --official-overlay=/path/to/official-facts.json --out=/path/to/unique-checkpoint
+```
+
+The packet has integer season/week, source="NFL_OFFICIAL_VERIFIED_READBACK", verified=true,
+supporting official NFL/club sourceUrl, actual capturedAt, future expiresAt and `facts`. Each fact
+has exact numeric playerId, status, source/verified/sourceUrl and its own capturedAt/expiresAt
+(not later than the packet clocks). Status is ACTIVE, OUT, IR, PUP, NFI, SUSPENDED, INACTIVE,
+QUESTIONABLE, DOUBTFUL, RESTRICTED or UNKNOWN. Sources must be verified official pages by the
+collector; the source tag is a readback contract, not URL discovery. Replacement-role facts can
+set replacementRole=true; no workload is invented. A partial QB's ACTIVE readback restores its
+measured full-start case only with fullStarterRoleVerified=true, supported by that official role
+readback. Source clocks/expiry and base/evidence hashes are retained; originals stay fixed.
+
+Optional `redistributions` contain donorPlayerId, channel (passAttempts/carries/targets), and
+recipientPlayerIds. The donor needs official confirmed absence; recipients need official ACTIVE
+facts and existing measured same-team channel opportunity. A recipient gets an uncalibrated
+estimate proportional to its measured opportunity divided by team budget minus this donor only.
+With several absent donors this intentionally underallocates rather than silently renormalizing
+the remaining recipients; every donor's unassigned opportunity is retained. No equal splits,
+depth-three/four/five promotion, unmeasured replacement QB volume, cross-channel transfers or
+extra team opportunities. Unsupported recipients remain HOLD; unused opportunities remain
+unallocated, with an explicit unknown bucket. Rare official numeric plans can instead supply
+fact.workload with kind="OFFICIAL_QUANTIFIED_WORKLOAD", expectedVolume for all three channels,
+support and the same official evidence-clock fields; numeric plans and restored partial-QB
+full-start scenarios must conserve the existing team budget across all known teammate allocations.
+An overfilled team fails closed instead of inventing a replacement allocation.
+
+Q/D/restriction/unknown facts remain scenarios with no probability or generic haircut. Run the
+same overlay command twice with `--availability-scenario=current-role` and
+`--availability-scenario=unavailable` for separately labeled conditional cases. A questionable
+donor's redistribution is applied only in its unavailable scenario. Compare both planner outputs
+together before reviewing any robust gain; a single scenario emits no approval proposal.
+Unknown current-role components stay unknown even in the available case.
+
+`gameChecks.rosterSchedule` preserves verified roster/schedule facts independently of add/drop
+gates. `actionableChecks` groups only future existing checkpoints: unlocked starters and direct
+eligible bench substitutions whose actual current starter destination remains unlocked at that
+checkpoint. IR, known unavailable players, past/locked games, missing locks and expired checkpoints
+are excluded. Expired official facts are unknown, never reused as a current OUT designation;
+an unflagged Yahoo status is not official clearance. No unapproved slot rearrangement is assumed. Thus a Monday bench QB has no check
+when its only Sunday QB destination is already locked. The coordinator alone updates the same
+heartbeat after source acceptance; these helpers schedule nothing and authorize no Yahoo write.

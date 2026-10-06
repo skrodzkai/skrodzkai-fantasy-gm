@@ -214,14 +214,13 @@ test("buildOpponentMatchup produces a measured, shrunk factor and flags unsuppor
   assert.equal(provider.meta.seasonsUsed[0], 2025);
 });
 
-test("prior is role-conditioned: starter restores undiscounted rate; backup/no-evidence stays role-limited; single-family gated", () => {
+test("full offense requires measured role: starter, backup, missing identity and source families cannot restore preseason points", () => {
   const board = { players: [
-    // Healthy STARTER with a preseason health cap (weeklyPoints[wk2] discounted below perGame); fresh
-    // depth_chart_order 1 -> RESTORE the undiscounted role rate (no stale 15/16 haircut).
+    // Depth-chart starter alone cannot restore a preseason healthy/full-role rate.
     { yahooId: "cmc", sleeperId: "s_cmc", gsisId: "g_cmc", name: "Star RB", position: "RB", team: "SF", perGamePoints: 17.10, weeklyPoints: [16.03, 16.03], scorableSourceFamilyCount: 4 },
-    // Multi-family BACKUP (depth 2) -> keep the role-limited weeklyPoints, NOT the inflated perGame.
+    // Backup's role-limited preseason rate is diagnostic only.
     { yahooId: "mar", sleeperId: "s_mar", gsisId: "g_mar", name: "Backup QB", position: "QB", team: "WAS", perGamePoints: 1.95, weeklyPoints: [0.12, 0.12], scorableSourceFamilyCount: 3 },
-    // Multi-family with NO fresh depth entry (unknown role) -> keep role-limited weeklyPoints.
+    // Unknown current role cannot consume the role-limited preseason rate either.
     { yahooId: "beck", sleeperId: null, gsisId: "g_beck", name: "No Entry QB", position: "QB", team: "CLE", perGamePoints: 12.94, weeklyPoints: [3.23, 3.23], scorableSourceFamilyCount: 3 },
     // Single scorable family -> prior gated (dropped); no actual -> unrankable.
     { yahooId: "solo", sleeperId: "s_solo", gsisId: "g_solo", name: "Yahoo Only", position: "WR", team: "BUF", perGamePoints: 10, weeklyPoints: [9, 9], scorableSourceFamilyCount: 1 },
@@ -246,32 +245,26 @@ test("prior is role-conditioned: starter restores undiscounted rate; backup/no-e
     teamDefenseMean: 5, targetWeek: 2, generatedAt: "t", provenance: {},
   });
   const byId = Object.fromEntries(rankings.players.map((p) => [p.playerId, p]));
-  // Starter: undiscounted perGame restored (NOT the health-capped weeklyPoints 16.03).
-  assert.ok(Math.abs(byId.cmc.priorPerGame - 17.10) < 1e-9, `cmc prior ${byId.cmc.priorPerGame}`);
-  assert.equal(byId.cmc.priorBasis, "PRESEASON_STARTER_ROLE_PER_GAME");
+  for (const id of ["cmc", "mar", "beck", "solo"]) {
+    assert.equal(byId[id].priorPerGame, null);
+    assert.equal(byId[id].priorBasis, "CURRENT_OFFENSIVE_ROLE");
+    assert.equal(byId[id].rankable, false);
+    assert.equal(byId[id].unrankableReason, "NO_MEASURED_OFFENSIVE_ROLE");
+  }
   assert.equal(byId.cmc.currentStarter, true);
-  // Multi-family backup: role-limited weeklyPoints retained (NOT perGame 1.95).
-  assert.ok(Math.abs(byId.mar.priorPerGame - 0.12) < 1e-9, `mariota prior ${byId.mar.priorPerGame}`);
-  assert.equal(byId.mar.priorBasis, "PRESEASON_WEEKLY_ROLE_LIMITED");
-  // No fresh depth entry -> unknown role -> role-limited weeklyPoints (NOT perGame 12.94).
-  assert.ok(Math.abs(byId.beck.priorPerGame - 3.23) < 1e-9, `beck prior ${byId.beck.priorPerGame}`);
-  assert.equal(byId.beck.priorBasis, "PRESEASON_WEEKLY_ROLE_LIMITED");
-  // Single-family gating still works.
-  assert.equal(byId.solo.priorPerGame ?? null, null);
-  assert.equal(byId.solo.rankable, false);
-  assert.equal(byId.solo.unrankableReason, "PRIOR_UNSUPPORTED_NO_ACTUAL");
+  assert.equal(byId.mar.roleLimitedPrior, 0.12); // retained diagnostic, never consumed
 });
 
-test("multi-family with NO weekly role prior gets NO prior (perGamePoints never substituted): form-only or unrankable", () => {
+test("full offense does not substitute a conditional prior or box-score-only form for missing measured snaps", () => {
   const board = { players: [
     // Penix: multi-family, fresh depth 2 (backup), perGame 10.02, NO weeklyPoints[wk2] -> no prior.
-    { yahooId: "penix", sleeperId: "s_penix", gsisId: "g_penix", name: "Backup Elect", position: "QB", team: "ATL", perGamePoints: 10.02294, weeklyPoints: [5.0], scorableSourceFamilyCount: 3 },
+    { yahooId: "penix", sleeperId: "1001", gsisId: "g_penix", name: "Backup Elect", position: "QB", team: "ATL", perGamePoints: 10.02294, weeklyPoints: [5.0], scorableSourceFamilyCount: 3 },
     // Rush: multi-family, no current depth entry, perGame 8.457, no weeklyPoints array -> no prior.
-    { yahooId: "rush", sleeperId: "s_rush", gsisId: "g_rush", name: "Journeyman QB", position: "QB", team: "BAL", perGamePoints: 8.45735, scorableSourceFamilyCount: 3 },
+    { yahooId: "rush", sleeperId: "1002", gsisId: "g_rush", name: "Journeyman QB", position: "QB", team: "BAL", perGamePoints: 8.45735, scorableSourceFamilyCount: 3 },
   ] };
   const playersMap = {
-    s_penix: { full_name: "Backup Elect", team: "ATL", position: "QB", status: "Active", active: true, depth_chart_order: 2 },
-    s_rush: { full_name: "Journeyman QB", team: "BAL", position: "QB", status: "Active", active: true, depth_chart_order: null },
+    "1001": { full_name: "Backup Elect", team: "ATL", position: "QB", status: "Active", active: true, depth_chart_order: 2 },
+    "1002": { full_name: "Journeyman QB", team: "BAL", position: "QB", status: "Active", active: true, depth_chart_order: null },
   };
   const schedule = { byTeam: new Map([["ATL", { opponent: "CAR", homeAway: "home", kickoff: "t" }], ["BAL", { opponent: "CLE", homeAway: "away", kickoff: "t" }]]), byeTrusted: false };
   // No form -> no prior substitution -> explicitly unrankable with the distinct missing-role reason.
@@ -279,19 +272,25 @@ test("multi-family with NO weekly role prior gets NO prior (perGamePoints never 
   const byId = Object.fromEntries(noForm.players.map((p) => [p.playerId, p]));
   for (const id of ["penix", "rush"]) {
     assert.equal(byId[id].priorPerGame ?? null, null, `${id} must NOT substitute perGamePoints as a prior`);
-    assert.equal(byId[id].priorBasis, "NO_ROLE_LIMITED_WEEKLY_PRIOR");
-    assert.equal(byId[id].missingRolePrior, true);
+    assert.equal(byId[id].priorBasis, "CURRENT_OFFENSIVE_ROLE");
     assert.equal(byId[id].rankable, false);
-    assert.equal(byId[id].unrankableReason, "MISSING_ROLE_PRIOR_NO_ACTUAL");
+    assert.equal(byId[id].unrankableReason, "NO_MEASURED_OFFENSIVE_ROLE");
   }
-  assert.equal(noForm.audit.unrankableReasons.MISSING_ROLE_PRIOR_NO_ACTUAL, 2);
-  // Same player WITH completed-week form ranks on FORM only (still no perGamePoints prior).
-  const withForm = buildFullWeeklyRankings({ board, rosterInputs: { players: [] }, weekStatsList: [{ week: 1, stats: { s_penix: { gp: 1, pass_att: 30, pass_yd: 250, pass_td: 2, rush_att: 2, rush_yd: 5 } } }], playersMap, schedule, matchupProvider: null, opportunityRates: null, teamDefenseMean: 5, targetWeek: 2, generatedAt: "t", provenance: {} });
+  assert.equal(noForm.audit.unrankableReasons.NO_MEASURED_OFFENSIVE_ROLE, 2);
+  // Box-score-only form without a measured snap denominator is still unknown role.
+  const actual = { gp: 1, tm_off_snp: 60, pass_att: 30, pass_yd: 250, pass_td: 2, rush_att: 2, rush_yd: 5 };
+  const formInput = { board, rosterInputs: { players: [] }, playersMap, schedule, matchupProvider: null, opportunityRates: null, teamDefenseMean: 5, targetWeek: 2, generatedAt: "t", provenance: {} };
+  const withForm = buildFullWeeklyRankings({ ...formInput, weekStatsList: [{ week: 1, stats: { "1001": actual } }] });
   const p2 = withForm.players.find((p) => p.playerId === "penix");
   assert.equal(p2.priorPerGame ?? null, null);
-  assert.equal(p2.rankable, true);
-  assert.equal(p2.rankBasis, "CURRENT_FORM_NO_PRIOR");
-  assert.ok(p2.weeklyExpectation > 0);
+  assert.equal(p2.rankable, false);
+  assert.equal(p2.unrankableReason, "NO_MEASURED_OFFENSIVE_ROLE");
+  assert.equal(p2.weeklyExpectation, null);
+  // Numeric Sleeper identity and present team denominator reach the actual missing-off_snp
+  // branch. The identical box score WITH measured full snaps is a known-role projection.
+  const measured = buildFullWeeklyRankings({ ...formInput, weekStatsList: [{ week: 1, stats: { "1001": { ...actual, off_snp: 55 } } }] });
+  assert.equal(measured.players.find(p => p.playerId === "penix").rankable, true);
+  assert.ok(measured.players.find(p => p.playerId === "penix").weeklyExpectation > 0);
 });
 
 test("IDP weekly ranking uses measured role and pooled rate rather than preseason points or special teams", () => {
