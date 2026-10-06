@@ -129,7 +129,8 @@ export function buildRosterGameChecks(report, snapshot, now = Date.now()) {
 /** Advisory only. The snapshot explicitly supplies Yahoo facts; no account/browser/transaction code. */
 export function compareMultiweekRoster(report, snapshot, now = Date.now()) {
   const gameChecks = buildRosterGameChecks(report, snapshot, now);
-  const fail = (reason) => ({ disposition: "HOLD", reason, proposals: [], gameChecks, approvalRequired: true, executableNow: false });
+  const unknownRosterForecasts = [];
+  const fail = (reason) => ({ disposition: "HOLD", reason, proposals: [], gameChecks, unknownRosterForecasts, approvalRequired: true, executableNow: false });
   const weeks = report?.weeks;
   const currentWeek = report?.targetWeek;
   const expectedWeeks = Array.from({ length: Math.min(3, 19 - currentWeek) }, (_, i) => currentWeek + i);
@@ -212,6 +213,12 @@ export function compareMultiweekRoster(report, snapshot, now = Date.now()) {
     }
   }
   catch (error) { return fail(error.message); }
+  const targetWeeks = weeks.map((r) => r.targetWeek);
+  for (const row of roster) {
+    const unknownWeeks = targetWeeks.filter((week) => !finite(row.points[week]));
+    if (unknownWeeks.length) unknownRosterForecasts.push({ yahooId: row.yahooId, slot: row.slot, weeks: unknownWeeks,
+      reason: "ROSTER_FORECAST_UNKNOWN_EXCLUDED_FROM_MODELED_MATCHING" });
+  }
   const occupied = roster.filter((r) => !["BN", "IR"].includes(r.slot));
   if (occupied.length !== slots.length || new Set(occupied.map((r) => r.slot)).size !== slots.length ||
       occupied.some((r) => !slots.find((s) => s.id === r.slot)?.eligible.some((p) => r.eligible.includes(p))) ||
@@ -228,7 +235,6 @@ export function compareMultiweekRoster(report, snapshot, now = Date.now()) {
     coverageReviews.push({ ...record, disposition: now >= Math.min(time(record.reviewAt), time(record.expiresAt)) ? "REVIEW_COVERAGE" : "COVERAGE_RETAINED_UNTIL_REVIEW",
       approvalRequired: true, executableNow: false, action: "REVIEW_ONLY_NO_AUTOMATIC_DROP" });
   }
-  const targetWeeks = weeks.map((r) => r.targetWeek);
   const lineups = (rows) => targetWeeks.map((week) => ({ week, ...strongestLegalLineup(rows, slots, week, currentWeek) }));
   const baseline = lineups(roster);
   if (baseline.some((lineup) => !Array.isArray(lineup.selected))) return fail("NO_COMPLETE_KNOWN_HORIZON_LINEUP");
@@ -290,7 +296,8 @@ export function compareMultiweekRoster(report, snapshot, now = Date.now()) {
     proposals, conditionalProposals, alternatives, transactionReadiness: { status: transactionHolds.length ? "HOLD" : "ADVISORY_FACTS_KNOWN_FRESH_EXECUTION_PREFLIGHT_REQUIRED", holds: transactionHolds },
     defenseAlternatives: alternatives.flatMap((row, index) => row.addPosition === "DEF" ? [index] : []),
     outputContract: "PROPOSAL_AND_DEFENSE_INDICES_INTO_ALTERNATIVES_AFTER_SLOT_CHANGES_FROM_BASELINE",
-    benchAudit, coverageReviews, excludedCandidates, unknownReserves, gameChecks,
+    benchAudit, coverageReviews, excludedCandidates, unknownReserves, unknownRosterForecasts, gameChecks,
+    horizonComparisonBasis: unknownRosterForecasts.length ? "CONDITIONAL_ON_KNOWN_FORECASTS_UNKNOWN_ROSTER_FORECASTS_EXCLUDED" : "KNOWN_ROSTER_FORECASTS",
     forecastAssumptions: report.forecastAssumptions, availabilityScenario: report.availabilityScenario ?? null,
     snapshotCapturedAt: snapshot.capturedAt, snapshotExpiresAt: snapshot.expiresAt,
     limitation: "strongest legal lineup among known forecasts; unknown reserves disclosed, injury insurance/upside/recovery and future acquisition availability unmodeled; all comparisons are advisory" };

@@ -346,6 +346,10 @@ same overlay command twice with `--availability-scenario=current-role` and
 donor's redistribution is applied only in its unavailable scenario. Compare both planner outputs
 together before reviewing any robust gain; a single scenario emits no approval proposal.
 Unknown current-role components stay unknown even in the available case.
+Planner `unknownRosterForecasts` identifies every roster player's unknown forecast weeks,
+including current starters. `horizonComparisonBasis` labels gains conditional on known forecasts
+when those omissions exist; matching excludes unknowns rather than treating them as zero.
+Common future-week gains in paired target-week scenarios do not establish recovery-adjusted gains.
 
 `gameChecks.rosterSchedule` preserves verified roster/schedule facts independently of add/drop
 gates. `actionableChecks` groups only future existing checkpoints: unlocked starters and direct
