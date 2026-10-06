@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { compareMultiweekRoster, strongestLegalLineup } from "./multiweek-roster-planning.mjs";
+import { buildRosterGameChecks, compareMultiweekRoster, strongestLegalLineup } from "./multiweek-roster-planning.mjs";
 
 function planningFixture() {
   const now = Date.parse("2026-10-02T09:00:00Z"), generatedAt = "2026-10-02T07:00:00Z";
@@ -49,6 +49,19 @@ test("full roster planner prices cross-position bench drops, defense stashes, an
   assert.match(result.benchAudit[0].unmodeledValue, /NOT_WORTHLESS/);
   assert.deepEqual(result.benchAudit[0].weeklyStarterContribution.map((r) => r.points), [0, 0, 0]);
   assert.equal(result.baseline[0].selected.find((pick) => pick.yahooId === "3").points, -2);
+  // A current-bye stash with an unknown lock is future-only research, not an approval
+  // proposal, even when every global transaction gate is known.
+  const bye = planningFixture();
+  Object.assign(bye.report.weeks[0].players[4], { bye: true, scheduleStatus: "VERIFIED_BYE", kickoff: null, weeklyExpectation: 0 });
+  bye.report.weeks[1].players[4].weeklyExpectation = 30;
+  Object.assign(bye.snapshot.available[0], { locked: null, futureOnlyResearch: true });
+  const research = compareMultiweekRoster(bye.report, bye.snapshot, bye.now);
+  const futureStash = research.alternatives.find(p => p.addYahooId === "5" && p.dropYahooId === "4");
+  assert.deepEqual(futureStash.weeklyGains.map(row => row.starterPointGain), [0, 20, 10]);
+  assert.equal(futureStash.legalConstraints.candidateLocked, null);
+  assert.equal(futureStash.legalConstraints.currentWeekUseForbidden, true);
+  assert.ok(!research.proposals.some(index => research.alternatives[index].addYahooId === "5"));
+  assert.ok(futureStash.transactionHolds.length);
 });
 
 test("planner pins current exact locks, frees future locks and excludes locked bench/IR", () => {
@@ -63,13 +76,25 @@ test("planner pins current exact locks, frees future locks and excludes locked b
   assert.equal(current.selected.find((p) => p.yahooId === "1").slot, "RB1");
   assert.equal(future.points, 120);
   assert.ok(!future.selected.some((p) => p.yahooId === "5"));
+  // A formerly unlocked fact cannot survive its exact verified kickoff at planner time.
+  const f = planningFixture();
+  f.report.weeks[0].players[0].kickoff = "2026-10-02T08:30:00Z";
+  f.report.weeks[0].players[4].kickoff = "2026-10-02T08:30:00Z";
+  f.report.weeks[0].players[5].kickoff = "2026-10-02T08:30:00Z";
+  f.snapshot.roster[3].eligible = ["RB"];
+  f.report.weeks.forEach(week => { week.players[3].position = "RB"; });
+  f.report.weeks[0].players[3].kickoff = "2026-10-02T08:30:00Z";
+  const started = compareMultiweekRoster(f.report, f.snapshot, f.now);
+  assert.equal(started.baseline[0].selected.find(p => p.slot === "RB1").yahooId, "1");
+  assert.ok(started.excludedCandidates.filter(row => ["5", "6"].includes(row.yahooId)).every(row => row.reason === "LOCKED"));
+  assert.equal(started.alternatives.length, 0);
 });
 
 test("planner holds stale/unknown facts, exact identity aliases, expired W and missing current forecasts", () => {
   for (const mutate of [
     (f) => { f.snapshot.expiresAt = "2026-10-02T08:30:00Z"; },
     (f) => { delete f.snapshot.roster[0].ownership; },
-    (f) => { f.snapshot.available[0].injuryStatus = "UNKNOWN"; },
+    (f) => { f.snapshot.roster[0].injuryStatus = "UNKNOWN"; },
     (f) => { f.snapshot.available[0].availability = "W"; f.snapshot.available[0].conditionalExpiresAt = "2026-10-02T08:30:00Z"; },
     (f) => { f.report.weeks.forEach((week) => { week.players[4].sleeperId = "s1"; }); },
     (f) => { delete f.report.weeks[0].players[0].scheduleStatus; },
@@ -84,6 +109,42 @@ test("planner holds stale/unknown facts, exact identity aliases, expired W and m
   const result = compareMultiweekRoster(f.report, f.snapshot, f.now);
   assert.equal(result.disposition, "PROPOSE_FOR_EXACT_APPROVAL");
   assert.equal(result.excludedCandidates.find((row) => row.yahooId === "999").reason, "UNJOINED_EXACT_YAHOO_IDENTITY");
+  for (const status of ["UNKNOWN", "NA", "IR-R"]) {
+    const unknown = planningFixture(); unknown.snapshot.available[0].injuryStatus = status;
+    const excluded = compareMultiweekRoster(unknown.report, unknown.snapshot, unknown.now);
+    assert.equal(excluded.baseline.length, 3);
+    assert.equal(excluded.excludedCandidates.find(row => row.yahooId === "5").reason, "UNKNOWN_YAHOO_INJURY_STATUS");
+    assert.ok(!excluded.alternatives.some(row => row.addYahooId === "5"));
+    unknown.snapshot.roster[3].injuryStatus = status;
+    assert.equal(buildRosterGameChecks(unknown.report, unknown.snapshot, unknown.now).checks.find(row => row.yahooId === "4").blockedReason, "YAHOO_AVAILABILITY_STATUS_UNKNOWN");
+  }
+  for (const mutate of [
+    held => { held.snapshot.roster[3].droppable = null; },
+    held => { held.snapshot.availableVerified = false; },
+    held => { held.snapshot.transactionHolds = ["PENDING_CLAIMS_OR_TRADE_REQUIRES_RECONCILIATION"]; },
+  ]) {
+    const held = planningFixture(); mutate(held);
+    const conditional = compareMultiweekRoster(held.report, held.snapshot, held.now);
+    assert.equal(conditional.disposition, "HOLD");
+    assert.equal(conditional.baseline.length, 3);
+    assert.equal(conditional.benchAudit.length, 1);
+    assert.equal(conditional.proposals.length, 0);
+    assert.equal(conditional.gameChecks.status, "VERIFIED_ROSTER_SCHEDULE");
+    if (held.snapshot.roster[3].droppable === null) assert.ok(!conditional.alternatives.some(row => row.dropYahooId === "4"));
+  }
+  const expired = planningFixture();
+  expired.report.weeks[0].players[0].officialAvailability = { status: "OUT", expiresAt: "2026-10-02T08:30:00Z" };
+  const check = buildRosterGameChecks(expired.report, expired.snapshot, expired.now).checks.find(row => row.yahooId === "1");
+  assert.equal(check.officialAvailability, "UNKNOWN_NO_CURRENT_OFFICIAL_OVERLAY");
+  assert.equal(check.checkRequired, true);
+  const officialOut = planningFixture();
+  Object.assign(officialOut.report.weeks[0].players[0], { rankable: false, weeklyExpectation: 0, unrankableReason: "CONFIRMED_INACTIVE_OUT",
+    officialAvailability: { status: "OUT", expiresAt: "2026-10-02T09:30:00Z" } });
+  const absent = compareMultiweekRoster(officialOut.report, officialOut.snapshot, officialOut.now);
+  assert.equal(absent.baseline[0].selected.find(row => row.yahooId === "1").points, 0);
+  assert.equal(absent.gameChecks.checks.find(row => row.yahooId === "1").blockedReason, "CONFIRMED_UNAVAILABLE");
+  const illegalSlot = planningFixture(); illegalSlot.snapshot.roster[0].slot = "UNVERIFIED_SLOT";
+  assert.equal(buildRosterGameChecks(illegalSlot.report, illegalSlot.snapshot, illegalSlot.now).checks.find(row => row.yahooId === "1").blockedReason, "EXACT_SLOT_CONTRACT_UNKNOWN");
 });
 
 test("temporary coverage expiry creates review and W remains conditional", () => {
