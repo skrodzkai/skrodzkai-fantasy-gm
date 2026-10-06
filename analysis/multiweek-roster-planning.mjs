@@ -130,7 +130,8 @@ export function buildRosterGameChecks(report, snapshot, now = Date.now()) {
 export function compareMultiweekRoster(report, snapshot, now = Date.now()) {
   const gameChecks = buildRosterGameChecks(report, snapshot, now);
   const unknownRosterForecasts = [];
-  const fail = (reason) => ({ disposition: "HOLD", reason, proposals: [], gameChecks, unknownRosterForecasts, approvalRequired: true, executableNow: false });
+  let benchIdpReviews = [];
+  const fail = (reason) => ({ disposition: "HOLD", reason, proposals: [], gameChecks, unknownRosterForecasts, benchIdpReviews, approvalRequired: true, executableNow: false });
   const weeks = report?.weeks;
   const currentWeek = report?.targetWeek;
   const expectedWeeks = Array.from({ length: Math.min(3, 19 - currentWeek) }, (_, i) => currentWeek + i);
@@ -214,6 +215,11 @@ export function compareMultiweekRoster(report, snapshot, now = Date.now()) {
   }
   catch (error) { return fail(error.message); }
   const targetWeeks = weeks.map((r) => r.targetWeek);
+  benchIdpReviews = roster.filter((row) => row.slot === "BN" && idpGroup(row.position)).map((row) => ({
+    yahooId: row.yahooId, name: row.name, position: row.position, reason: "OWNER_NO_BENCH_IDP_POLICY",
+    action: "EXACT_OWNER_APPROVED_REMOVAL_OR_REPLACEMENT_REVIEW",
+    unknownForecastWeeks: targetWeeks.filter((week) => !finite(row.points[week])),
+    droppable: row.droppable, locked: row.locked, approvalRequired: true, executableNow: false, automaticDrop: false }));
   for (const row of roster) {
     const unknownWeeks = targetWeeks.filter((week) => !finite(row.points[week]));
     if (unknownWeeks.length) unknownRosterForecasts.push({ yahooId: row.yahooId, slot: row.slot, weeks: unknownWeeks,
@@ -246,19 +252,29 @@ export function compareMultiweekRoster(report, snapshot, now = Date.now()) {
       weeklyStarterContribution: baseline.map((lineup, i) => ({ week: lineup.week,
         points: finite(row.points[lineup.week]) && without[i].selected ? lineup.points - without[i].points : null })),
       starterWeeks: baseline.filter((lineup) => lineup.selected.some((pick) => pick.yahooId === row.yahooId)).map((lineup) => lineup.week),
+      ownerPolicyReview: benchIdpReviews.find((review) => review.yahooId === row.yahooId) ?? null,
       unmodeledValue: "INJURY_INSURANCE_AND_UPSIDE_NOT_MODELED_ZERO_MARGINAL_IS_NOT_WORTHLESS", automaticDrop: false };
   });
   const alternatives = [];
   for (const add of available) {
-    if (add.locked || inactive.has(add.injuryStatus) || targetWeeks.some((w) => !finite(add.points[w])) ||
+    const unknownAddWeeks = targetWeeks.filter((w) => !finite(add.points[w]));
+    const currentDefenseOnly = add.position === "DEF" && finite(add.points[currentWeek]) && unknownAddWeeks.length > 0;
+    if (add.locked || inactive.has(add.injuryStatus) || unknownAddWeeks.length && !currentDefenseOnly ||
         idpGroup(add.position) && targetWeeks.some((w) => add.idpModels[w]?.status !== "SNAP_ROLE_MODEL" || add.idpModels[w]?.roleContinuity === "UNVERIFIED_NO_TEAM_SNAP_ROWS")) {
       excludedCandidates.push({ yahooId: add.yahooId, reason: add.locked ? "LOCKED" : inactive.has(add.injuryStatus) ? "CONFIRMED_INACTIVE" :
         idpGroup(add.position) ? "ADD_IDP_ROLE_CONTINUITY_OR_FORECAST_REQUIRES_REVIEW" : "HORIZON_FORECAST_UNKNOWN" });
       continue;
     }
     for (const drop of roster.filter((r) => r.droppable && !r.locked && r.slot !== "IR" && targetWeeks.every((w) => finite(r.points[w])))) {
+      // The owner's no-bench-IDP policy permits starting-IDP swaps, not an IDP stash
+      // paid for by a modeled zero-cost offense reserve.
+      if (idpGroup(add.position) && (!idpGroup(drop.position) || drop.slot === "BN" ||
+          !baseline[0].selected.some((pick) => pick.yahooId === drop.yahooId))) continue;
+      if (currentDefenseOnly && (drop.position !== "DEF" || drop.slot === "BN" ||
+          !baseline[0].selected.some((pick) => pick.yahooId === drop.yahooId))) continue;
       const after = lineups([...roster.filter((r) => r.yahooId !== drop.yahooId), add]);
-      if (after.some((lineup) => !lineup.selected)) continue;
+      if (!after[0].selected || after.some((lineup) => !lineup.selected) && !currentDefenseOnly) continue;
+      if (idpGroup(add.position) && !after[0].selected.some((pick) => pick.yahooId === add.yahooId)) continue;
       if (idpGroup(add.position) && after.some((lineup, i) => {
         if (!lineup.selected.some((pick) => pick.yahooId === add.yahooId)) return false;
         const displacedPick = baseline[i].selected.find((pick) => !lineup.selected.some((next) => next.yahooId === pick.yahooId));
@@ -268,35 +284,52 @@ export function compareMultiweekRoster(report, snapshot, now = Date.now()) {
           !finite(oldRole.expectedSnaps) || !finite(oldRole.tacklePoints) || !finite(newRole.expectedSnaps) || !finite(newRole.tacklePoints) ||
           newRole.expectedSnaps <= oldRole.expectedSnaps || newRole.tacklePoints <= oldRole.tacklePoints);
       })) continue;
-      const weeklyGains = after.map((lineup, i) => ({ week: lineup.week, starterPointGain: lineup.points - baseline[i].points }));
+      const weeklyGains = after.map((lineup, i) => ({ week: lineup.week,
+        starterPointGain: unknownAddWeeks.includes(lineup.week) ? null : lineup.points - baseline[i].points }));
+      const currentWeekDefenseStream = add.position === "DEF" && drop.position === "DEF" && drop.slot !== "BN" &&
+        baseline[0].selected.some((pick) => pick.yahooId === drop.yahooId) &&
+        after[0].selected.some((pick) => pick.yahooId === add.yahooId);
+      if (currentDefenseOnly && !currentWeekDefenseStream) continue;
+      const summedStarterPointGain = unknownAddWeeks.length ? null : weeklyGains.reduce((sum, row) => sum + row.starterPointGain, 0);
       alternatives.push({ addYahooId: add.yahooId, addName: add.name, addPosition: add.position,
         dropYahooId: drop.yahooId, dropName: drop.name, dropPosition: drop.position, weeklyGains,
-        summedStarterPointGain: weeklyGains.reduce((sum, row) => sum + row.starterPointGain, 0),
-        after: after.map((lineup, i) => ({ week: lineup.week, points: lineup.points,
-          changes: lineup.selected.filter((pick) => baseline[i].selected.find((prior) => prior.slot === pick.slot)?.yahooId !== pick.yahooId) })),
-        tradeoff: weeklyGains.some((r) => r.starterPointGain < 0) ? "HORIZON_GAIN_WITH_WEEKLY_STARTER_LOSS_REQUIRES_REVIEW" : "NO_MODELED_WEEKLY_STARTER_LOSS",
+        summedStarterPointGain,
+        currentWeekStarterPointGain: weeklyGains[0].starterPointGain, currentWeekDefenseStream,
+        planningStrategy: currentWeekDefenseStream ? "CURRENT_WEEK_ONE_FOR_ONE_DEF_STREAM" : "HELD_ROSTER_HORIZON_COMPARISON",
+        horizonBasis: currentDefenseOnly ? "UNKNOWN_LATER_FORECASTS_CURRENT_WEEK_COMPARISON_ONLY" : "EXACT_ADD_HELD_ACROSS_HORIZON_NOT_A_SEQUENCE_OF_WEEKLY_STREAMS",
+        unknownHorizonWeeks: unknownAddWeeks,
+        after: after.flatMap((lineup, i) => unknownAddWeeks.includes(lineup.week) ? [] : [{ week: lineup.week, points: lineup.points,
+          changes: lineup.selected.filter((pick) => baseline[i].selected.find((prior) => prior.slot === pick.slot)?.yahooId !== pick.yahooId) }]),
+        tradeoff: currentDefenseOnly ? "CURRENT_WEEK_ONLY_LATER_FORECASTS_UNKNOWN" :
+          currentWeekDefenseStream && weeklyGains[0].starterPointGain > 0 && summedStarterPointGain <= 0 ? "CURRENT_WEEK_GAIN_WITH_NONPOSITIVE_HELD_HORIZON_GAIN" :
+          weeklyGains.some((r) => r.starterPointGain < 0) ? "HORIZON_GAIN_WITH_WEEKLY_STARTER_LOSS_REQUIRES_REVIEW" : "NO_MODELED_WEEKLY_STARTER_LOSS",
         dropCostLimit: "INJURY_INSURANCE_AND_UPSIDE_UNMODELED_NO_AUTOMATIC_DROP",
         defensePairYahooIds: [ ...roster.filter((r) => r.position === "DEF" && r.yahooId !== drop.yahooId), ...(add.position === "DEF" ? [add] : []) ].map((r) => r.yahooId),
         availability: add.availability, injuryStatus: add.injuryStatus, approvalRequired: true, executableNow: false,
         transactionHolds: add.futureOnlyResearch ? ["CANDIDATE_CURRENT_LOCK_UNKNOWN_FUTURE_ONLY_RESEARCH"] : [],
         executionCondition: add.availability === "W" ? "FRESH_VERIFIED_FA_AFTER_RELEASE_AND_EXACT_APPROVAL" : "FRESH_VERIFIED_FA_AND_EXACT_APPROVAL",
         expiresAt: add.availability === "W" ? add.conditionalExpiresAt : snapshot.expiresAt,
-        futureAvailability: "NOT_ASSUMED_PLAN_VALUES_CONDITION_ON_ACQUIRING_EXACT_ADD", legalConstraints: { exactEligibility: true, droppable: drop.droppable, dropLocked: drop.locked,
+        futureAvailability: "NOT_ASSUMED_PLAN_VALUES_CONDITION_ON_ACQUIRING_EXACT_ADD",
+        futureReacquisition: "DROPPED_PLAYER_AND_LATER_STREAMERS_AVAILABILITY_UNKNOWN", legalConstraints: { exactEligibility: true, droppable: drop.droppable, dropLocked: drop.locked,
           candidateLocked: add.locked, currentWeekUseForbidden: add.currentWeekForbidden,
           currentLocksPinnedToExactSlot: true, futureLocksNotAssumed: true, snapshotExpiresAt: snapshot.expiresAt } });
     }
   }
-  alternatives.sort((a, b) => b.summedStarterPointGain - a.summedStarterPointGain);
-  const conditionalProposals = alternatives.flatMap((row, index) => row.summedStarterPointGain > 0 ? [index] : []);
+  alternatives.sort((a, b) => finite(a.summedStarterPointGain) && finite(b.summedStarterPointGain) ?
+    b.summedStarterPointGain - a.summedStarterPointGain : finite(a.summedStarterPointGain) ? -1 : finite(b.summedStarterPointGain) ? 1 : 0);
+  const currentWeekDefenseStreams = alternatives.flatMap((row, index) => row.currentWeekDefenseStream && row.currentWeekStarterPointGain > 0 ? [index] : [])
+    .sort((a, b) => alternatives[b].currentWeekStarterPointGain - alternatives[a].currentWeekStarterPointGain);
+  const conditionalProposals = [...currentWeekDefenseStreams, ...alternatives.flatMap((row, index) =>
+    row.summedStarterPointGain > 0 && !currentWeekDefenseStreams.includes(index) ? [index] : [])];
   if (report.availabilityScenario) transactionHolds.push("SCENARIO_COMPARISON_REQUIRES_PAIRED_REVIEW_NOT_EXPECTED_FORECAST");
   const proposals = transactionHolds.length ? [] : conditionalProposals.filter(index => !alternatives[index].transactionHolds.length);
   return { disposition: proposals.length ? "PROPOSE_FOR_EXACT_APPROVAL" : "HOLD",
     reason: transactionHolds.length ? transactionHolds.join(";") : proposals.length ? null : conditionalProposals.length ? "ONLY_CONDITIONAL_RESEARCH_ALTERNATIVES" : "NO_POSITIVE_MODELED_STARTER_GAIN",
     approvalRequired: true, executableNow: false, baseline, hold: { summedStarterPointGain: 0, approvalRequired: true, executableNow: false },
     proposals, conditionalProposals, alternatives, transactionReadiness: { status: transactionHolds.length ? "HOLD" : "ADVISORY_FACTS_KNOWN_FRESH_EXECUTION_PREFLIGHT_REQUIRED", holds: transactionHolds },
-    defenseAlternatives: alternatives.flatMap((row, index) => row.addPosition === "DEF" ? [index] : []),
+    currentWeekDefenseStreams, defenseAlternatives: alternatives.flatMap((row, index) => row.addPosition === "DEF" ? [index] : []),
     outputContract: "PROPOSAL_AND_DEFENSE_INDICES_INTO_ALTERNATIVES_AFTER_SLOT_CHANGES_FROM_BASELINE",
-    benchAudit, coverageReviews, excludedCandidates, unknownReserves, unknownRosterForecasts, gameChecks,
+    benchAudit, benchIdpReviews, coverageReviews, excludedCandidates, unknownReserves, unknownRosterForecasts, gameChecks,
     horizonComparisonBasis: unknownRosterForecasts.length ? "CONDITIONAL_ON_KNOWN_FORECASTS_UNKNOWN_ROSTER_FORECASTS_EXCLUDED" : "KNOWN_ROSTER_FORECASTS",
     forecastAssumptions: report.forecastAssumptions, availabilityScenario: report.availabilityScenario ?? null,
     snapshotCapturedAt: snapshot.capturedAt, snapshotExpiresAt: snapshot.expiresAt,
