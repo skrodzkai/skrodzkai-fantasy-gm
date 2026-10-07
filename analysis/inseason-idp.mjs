@@ -53,25 +53,44 @@ export function buildIdpOpportunityModel(weekStatsList, playersMap, targetWeek) 
   if (!Number.isInteger(targetWeek) || targetWeek < 2 || targetWeek > 18) throw new Error("invalid targetWeek");
   if (!Array.isArray(weekStatsList) || weekStatsList.length !== targetWeek - 1 ||
       weekStatsList.some(({ week }, index) => week !== index + 1)) throw new Error("completed weeks must be exactly 1 through targetWeek-1");
-  const groups = Object.fromEntries(["DL", "LB", "DB"].map((group) => [group, { snaps: 0, tackles: 0, events: 0, teamSnaps: [], playerWeeks: 0 }]));
+  const groups = Object.fromEntries(["DL", "LB", "DB"].map((group) => [group, { snaps: 0, tackles: 0, events: 0, teamGames: new Map(), playerWeeks: 0 }]));
   const byIdentity = new Map();
   const bySleeperId = new Map();
   const teamsPlayed = new Map();
-  const coverage = { defensiveRows: 0, validDenominators: 0, missingDenominators: 0, duplicateAliases: 0 };
+  const teamGames = new Map();
+  const coverage = { defensiveRows: 0, validDenominators: 0, missingDenominators: 0, duplicateAliases: 0,
+    inconsistentTeamGames: 0, inconsistentDenominatorRows: 0 };
   for (const { week, stats } of weekStatsList) {
     const seen = new Set();
     const played = new Set();
+    const denominators = new Map();
     teamsPlayed.set(week, played);
+    // Current player-team metadata is the available attribution, not a historical roster.
+    // A shared team denominator contributes once per completed week, regardless of roster size.
+    for (const [key, raw] of Object.entries(stats ?? {})) {
+      const team = /^\d+$/.test(key) ? playersMap[key]?.team : null;
+      if (!team || !hasNumber(raw?.tm_def_snp) || Number(raw.tm_def_snp) <= 0) continue;
+      played.add(team);
+      const values = denominators.get(team) ?? new Set();
+      values.add(Number(raw.tm_def_snp));
+      denominators.set(team, values);
+    }
+    for (const [team, values] of denominators) {
+      if (values.size !== 1) { coverage.inconsistentTeamGames += 1; continue; }
+      const games = teamGames.get(team) ?? new Map();
+      games.set(week, [...values][0]);
+      teamGames.set(team, games);
+    }
     for (const [key, raw] of Object.entries(stats ?? {})) {
       if (!/^\d+$/.test(key)) continue;
       const entry = playersMap[key];
-      if (entry?.team && hasNumber(raw?.tm_def_snp) && Number(raw.tm_def_snp) > 0) played.add(entry.team);
       const group = (entry?.fantasy_positions ?? []).map(idpGroup).find(Boolean) ?? idpGroup(entry?.position);
       if (!group) continue;
       if (!hasNumber(raw?.def_snp)) continue;
       coverage.defensiveRows += 1;
       const sample = defensiveWeek(raw);
       if (!sample) { coverage.missingDenominators += 1; continue; }
+      if (entry?.team && denominators.get(entry.team)?.size !== 1) { coverage.inconsistentDenominatorRows += 1; continue; }
       coverage.validDenominators += 1;
       const identity = String(entry?.gsis_id || key);
       bySleeperId.set(key, identity);
@@ -84,17 +103,18 @@ export function buildIdpOpportunityModel(weekStatsList, playersMap, targetWeek) 
       pooled.snaps += sample.snaps;
       pooled.tackles += sample.tackle;
       pooled.events += sample.events;
-      pooled.teamSnaps.push(sample.teamSnaps);
+      if (entry?.team) pooled.teamGames.set(`${entry.team}:${week}`, sample.teamSnaps);
       pooled.playerWeeks += 1;
     }
   }
   const rates = Object.fromEntries(Object.entries(groups).map(([group, value]) => [group, {
     tacklePerSnap: value.snaps ? value.tackles / value.snaps : null,
     eventPerSnap: value.snaps ? value.events / value.snaps : null,
-    equivalentSnaps: value.teamSnaps.length ? average(value.teamSnaps) : null,
+    equivalentSnaps: value.teamGames.size ? average([...value.teamGames.values()]) : null,
+    sampledTeamGames: value.teamGames.size,
     sampledSnaps: value.snaps, sampledPlayerWeeks: value.playerWeeks,
   }]));
-  return { targetWeek, rates, coverage, teamsPlayed, byIdentity, bySleeperId };
+  return { targetWeek, rates, coverage, teamsPlayed, teamGames, byIdentity, bySleeperId };
 }
 
 /** The latest measured role drives workload. Individual splash events are diagnostic only. */
@@ -105,6 +125,9 @@ export function projectIdp(model, sleeperId) {
   const samples = [...record.weeks].sort(([a], [b]) => a - b);
   const latest = samples.at(-1);
   const latestPlayedWeek = record.team ? [...model.teamsPlayed].filter(([, teams]) => teams.has(record.team)).at(-1)?.[0] : null;
+  if (latestPlayedWeek != null && !model.teamGames.get(record.team)?.has(latestPlayedWeek))
+    return { status: "INCONSISTENT_TEAM_DEFENSIVE_SNAP_DENOMINATORS", weeklyExpectation: null,
+      validWeeks: samples.map(([week]) => week), latestPlayedWeek };
   const missingLatestTeamSnaps = !model.teamsPlayed.get(model.targetWeek - 1)?.has(record.team);
   const uncertainCarry = missingLatestTeamSnaps && latest[0] === model.targetWeek - 2;
   if (latest[0] !== latestPlayedWeek || (latest[0] !== model.targetWeek - 1 && !uncertainCarry))
@@ -115,7 +138,10 @@ export function projectIdp(model, sleeperId) {
   const shareChange = previousShares.length ? latest[1].share - average(previousShares) : null;
   const roleChanging = shareChange != null && Math.abs(shareChange) >= 0.20;
   const expectedShare = roleChanging ? latest[1].share : average(recent.map((sample) => sample.share));
-  const expectedSnaps = expectedShare * latest[1].teamSnaps;
+  const volumeGames = [...model.teamGames.get(record.team) ?? []];
+  if (!volumeGames.length) return { status: "NO_VALID_TEAM_DEFENSIVE_VOLUME_HISTORY", weeklyExpectation: null };
+  const expectedTeamSnaps = average(volumeGames.map(([, teamSnaps]) => teamSnaps));
+  const expectedSnaps = expectedShare * expectedTeamSnaps;
   const pooled = model.rates[record.group];
   if (!pooled || pooled.tacklePerSnap == null || pooled.equivalentSnaps == null) return { status: "NO_GROUP_RATE", weeklyExpectation: null };
   const snaps = samples.reduce((sum, [, sample]) => sum + sample.snaps, 0);
@@ -130,6 +156,9 @@ export function projectIdp(model, sleeperId) {
     status: "SNAP_ROLE_MODEL", group: record.group, validWeeks: samples.map(([week]) => week),
     latestPlayedWeek, roleContinuity: uncertainCarry ? "UNVERIFIED_NO_TEAM_SNAP_ROWS" : "LATEST_WEEK_MEASURED",
     latestShare: latest[1].share, expectedShare, expectedSnaps,
+    expectedTeamSnaps, teamVolumeSampleGames: volumeGames.length, teamVolumeWeeks: volumeGames.map(([week]) => week),
+    teamVolumeBasis: "COMPLETED_TEAM_GAME_MEAN_DEDUPLICATED_UNCALIBRATED",
+    teamAttribution: "CURRENT_PLAYER_TEAM_METADATA_NOT_VERIFIED_HISTORICAL_MEMBERSHIP",
     latestTeamSnaps: latest[1].teamSnaps, shareChange, roleChanging,
     tacklePerSnap, groupTacklePerSnap: pooled.tacklePerSnap,
     tacklePoints, eventBaseline, observedEventPoints: samples.reduce((sum, [, sample]) => sum + sample.events, 0),
@@ -162,7 +191,8 @@ function bestLineup(rows, slots) {
 
 /** Strict Yahoo snapshot join. Never infer free agency from the model universe. */
 export function compareIdpStreaming(rankings, snapshot) {
-  const fail = (reason, excludedCandidates = []) => ({ disposition: "HOLD", reason, proposals: [], excludedCandidates, nextWeekCoverage: "VERIFIED_NEXT_WEEK_SCHEDULE_NOT_SUPPLIED" });
+  let benchIdpReviews = [];
+  const fail = (reason, excludedCandidates = []) => ({ disposition: "HOLD", reason, proposals: [], excludedCandidates, benchIdpReviews, nextWeekCoverage: "VERIFIED_NEXT_WEEK_SCHEDULE_NOT_SUPPLIED" });
   if (snapshot?.season !== rankings.season || snapshot?.week !== rankings.targetWeek ||
       String(snapshot?.leagueId) !== "420010" || String(snapshot?.teamId) !== "7" ||
       snapshot?.source !== "YAHOO_VERIFIED_READBACK" ||
@@ -208,7 +238,12 @@ export function compareIdpStreaming(rankings, snapshot) {
   }
   const slots = snapshot.slots;
   if (!Array.isArray(slots) || slots.length !== 3 || [...slots].sort().join(",") !== "D,DB,LB" ||
-      roster.some((row) => ![...slots, "BN"].includes(row.slot) || (row.locked && row.slot === "BN"))) return fail("UNKNOWN_LINEUP_OR_LOCK_STATE");
+      roster.some((row) => ![...slots, "BN"].includes(row.slot))) return fail("UNKNOWN_LINEUP_OR_LOCK_STATE");
+  benchIdpReviews = roster.filter((row) => row.slot === "BN").map((row) => ({ yahooId: row.yahooId, name: row.name,
+    reason: "OWNER_NO_BENCH_IDP_POLICY", action: "EXACT_OWNER_APPROVED_REMOVAL_OR_REPLACEMENT_REVIEW",
+    forecastKnown: row.points != null, droppable: row.droppable, locked: row.locked,
+    approvalRequired: true, executableNow: false, automaticDrop: false }));
+  if (roster.some((row) => row.locked && row.slot === "BN")) return fail("UNKNOWN_LINEUP_OR_LOCK_STATE");
   if (roster.some((row) => row.slot !== "BN" && row.points == null)) return fail("STARTER_ROLE_OR_STATUS_UNKNOWN", excludedCandidates);
   if (roster.some((row) => row.slot !== "BN" && row.evidence?.roleContinuity === "UNVERIFIED_NO_TEAM_SNAP_ROWS"))
     return fail("STARTER_ROLE_CONTINUITY_REQUIRES_REVIEW", excludedCandidates);
@@ -226,7 +261,8 @@ export function compareIdpStreaming(rankings, snapshot) {
     }
     let proposed = false;
     let bestGain = null;
-    for (const drop of roster.filter((row) => row.droppable && !row.locked)) {
+    for (const drop of roster.filter((row) => row.droppable && !row.locked && row.slot !== "BN" &&
+      baseline.selected.some((pick) => pick.yahooId === row.yahooId))) {
       const alternate = bestLineup([...roster.filter((row) => row.yahooId !== drop.yahooId), add], slots);
       if (!alternate || !alternate.selected.some((pick) => pick.yahooId === add.yahooId)) continue;
       const gain = alternate.points - baseline.points;
@@ -256,5 +292,5 @@ export function compareIdpStreaming(rankings, snapshot) {
   proposals.sort((a, b) => b.gain - a.gain);
   return { disposition: proposals.length ? "PROPOSE_FOR_EXACT_APPROVAL" : "HOLD",
     ...(proposals.length ? {} : { reason: "NO_DEFENSIBLE_UNLOCKED_IDP_IMPROVEMENT" }),
-    proposals, heldCandidates, excludedCandidates, nextWeekCoverage: "VERIFIED_NEXT_WEEK_SCHEDULE_NOT_SUPPLIED" };
+    proposals, heldCandidates, excludedCandidates, benchIdpReviews, nextWeekCoverage: "VERIFIED_NEXT_WEEK_SCHEDULE_NOT_SUPPLIED" };
 }

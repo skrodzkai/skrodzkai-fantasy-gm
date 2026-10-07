@@ -13,8 +13,18 @@ actuals are fetched or invented. A numeric Sleeper player row needs an
 explicit `def_snp` and positive `tm_def_snp` to supply role evidence. Missing data is unknown;
 explicit zero defensive snaps is a measured zero. GSIS identity collapses aliases. S and CB
 normalize to DB, and DL/LB/DB can fill generic D. The latest snap share and recent trend drive
-expected snaps. A pooled position tackle rate shrinks each player's rate by one observed
-team-game of snaps; position pooled non-tackle event scoring is separate from individual splash.
+expected role share; expected snaps multiply that share by the arithmetic mean of completed
+team-game defensive snap volume, deduplicated by team/week. The latest game's denominator is
+diagnostic only. Conflicting positive denominators for a team/week exclude that game's volume
+and role samples; `coverage.inconsistentDenominatorRows` counts affected otherwise-valid rows.
+A latest team-game conflict returns `INCONSISTENT_TEAM_DEFENSIVE_SNAP_DENOMINATORS`, never a
+bye/source-gap role carry. Absent/invalid player denominators remain unknown. The pooled position tackle
+rate shrinks each player's rate by one observed team-game of snaps, also deduplicated by
+team/week within the group; position pooled non-tackle event scoring is separate from individual splash.
+Output gives expected team snaps, volume sample count/weeks and uncalibrated mean provenance.
+Historical attribution uses the current player-team map; it does not prove historical membership
+after trades or source metadata changes. No historical roster join or calibrated volume forecast
+is claimed.
 The league scorer supplies exact category points. The role-change threshold (20 share points)
 and one-game smoothing strength are transparent model choices, not calibrated weights. An
 aggregate historical opponent IDP factor is omitted because it does not measure a defender's
@@ -63,8 +73,8 @@ expiry must reflect that collector's actual freshness policy. Unknown or duplica
 expired/wrong-period input, an unknown starting IDP role, incomplete lineup and absent legal
 edge return `HOLD`.
 
-The planner jointly fills D/DB/LB, respects locked starters, and compares each exact legal
-drop, including legal bench drops, plus a verified available add to the current lineup. It
+The planner jointly fills D/DB/LB, respects locked starters, and compares exact legal
+one-for-one starting-IDP drops plus a verified available add to the current lineup. It
 requires a positive lineup gain plus more expected snaps and tackle points than the starter
 actually displaced, except for a confirmed unavailable starter. High-uncertainty role risers
 remain eligible for review when that evidence gate passes; their uncertainty is shown with the
@@ -73,7 +83,12 @@ before/after, gain, components, snapshot expiry and `approvalRequired:true`; the
 uncalibrated review proposals, not approved transactions. The output explicitly says next-week
 coverage is unavailable when no separately verified next-week schedule was supplied. The
 target-week schedule from Monday's refresh governs target-week byes; never infer later byes
-from the preseason board.
+from the preseason board. Joe's no-bench-IDP directive applies in both planning modes:
+`benchIdpReviews` names existing surplus IDPs for exact owner-approved removal/replacement
+review, including unknown forecasts, before starter/horizon forecast holds. Unknown value is
+never scored as zero. These reviews retain observed locks/drop legality and grant no drop
+permission. Adding an IDP by dropping an offense reserve while retaining the displaced IDP
+as a bench stash is excluded.
 
 ## Candidate block for the existing heartbeat
 
@@ -187,17 +202,31 @@ incomplete known horizon lineups yield `HOLD`. IR never fills a starter slot. Cu
 the exact slot, including locked bench exclusion; future locks are not presumed. Established
 IDP continuity and expected-snap/tackle edge gates remain.
 
-Polynomial slot matching compares every legal single add/drop across positions. Weekly starter
-gains and horizon sums are separate; a horizon gain with a weekly loss is a review tradeoff.
-Bench QB/K/DEF/IDP/offense contribution is audited; defense pairs/current-plus-available stash
-options are compared. Zero deterministic contribution does not mean a bench player is worthless:
+Polynomial slot matching compares legal single add/drop across positions, with IDP additions
+limited to starting-IDP swaps that start the addition in the current week's modeled lineup.
+Later held-roster comparisons do not guarantee retention or clear future bench IDP policy review.
+Weekly starter gains
+and horizon sums are separate; a horizon gain with a weekly loss is a review tradeoff.
+`currentWeekDefenseStreams` ranks positive current-week one-for-one starting DEF swaps by that
+week's gain and includes them in review proposals even when their held-horizon sum is zero or
+negative. Each alternative labels its planning strategy and held-across-horizon basis; its
+later gains assume retaining that exact defense, not reacquiring a dropped defense or obtaining
+other future streamers. Their future availability/reacquisition remains unknown. Horizon stash
+comparisons are separately labeled and do not imply a bench-stash preference. Unknown horizon
+forecasts still limit complete horizon comparison. A verified current-week DEF add with unknown
+later forecasts can enter a one-for-one current starter swap; unknown later gains and the
+horizon sum remain `null`, `unknownHorizonWeeks` identifies them, and `after` omits those weeks.
+An incomplete baseline horizon still returns `HOLD` under the existing lineup contract.
+Bench QB/K/DEF/IDP/offense contribution is audited; existing surplus bench IDPs receive the
+owner-policy review even when unknown forecasts require `HOLD`. Zero deterministic contribution does not mean a bench player is worthless:
 injury insurance and upside are unmodeled. Each package has `approvalRequired:true`,
 `executableNow:false`, exact IDs and legal constraints. Future acquisition availability is not
 assumed or called safe/risky. W remains conditional on fresh verified FA after release and exact
 approval; existing release, single-flight and receipt controls still govern execution.
 
 The output stores readable package objects once in `alternatives`, sorted by summed starter
-gain. `proposals` and `defenseAlternatives` are zero-based indices into that array: display
+gain. `proposals`, `defenseAlternatives` and `currentWeekDefenseStreams` are zero-based indices
+into that array: display
 `alternatives[index]` for approval review. The common `baseline` has the full before lineups.
 Each alternative's `after` contains `{week,points,changes}`: reconstruct its selected lineup by
 replacing each baseline pick with the same-slot entry in `changes`, leaving other slots unchanged.
