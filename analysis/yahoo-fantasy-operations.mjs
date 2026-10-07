@@ -142,8 +142,83 @@ function transactions(payload, membership) {
   return list;
 }
 
+const targetFreshnessMs = 5 * 60 * 1000;
+function validateTargetContext(packet, now = Date.now()) {
+  const expiry = Date.parse(packet?.expiresAt);
+  if (!Array.isArray(packet?.playerIds) || packet.playerIds.length < 1 || packet.playerIds.length > 25 ||
+      packet.playerIds.some(id => typeof id !== "string" || !/^[1-9][0-9]*$/.test(id)) ||
+      new Set(packet.playerIds).size !== packet.playerIds.length) fail("yahoo_target_ids_invalid");
+  if (!Number.isSafeInteger(packet.expectedWeek) || packet.expectedWeek < 1 || packet.expectedWeek > 18)
+    fail("yahoo_target_week_invalid");
+  if (typeof packet.expiresAt !== "string" || !Number.isFinite(expiry) ||
+      new Date(expiry).toISOString() !== packet.expiresAt || expiry <= now || expiry - now > targetFreshnessMs)
+    fail("yahoo_target_expiry_invalid");
+}
+
+function targetPlayers(payload, membership, packet) {
+  const leagueKeys = findValues(payload?.fantasy_content, "league_key");
+  if (leagueKeys.length !== 1 || leagueKeys[0] !== membership.leagueKey) fail("yahoo_target_league_mismatch");
+  const league = exactResource(payload, "league_key", membership.leagueKey);
+  if (["game_code", "season", "league_id", "current_week"].some(field => findValues(league, field).length !== 1))
+    fail("yahoo_target_period_mismatch");
+  if (scalar(league, "game_code") !== TARGET.gameCode || Number(scalar(league, "season")) !== TARGET.season ||
+      scalar(league, "league_id") !== TARGET.leagueId || Number(scalar(league, "current_week")) !== packet.expectedWeek)
+    fail("yahoo_target_period_mismatch");
+  const requested = new Set(packet.playerIds.map(id => `${membership.gameKey}.p.${id}`));
+  const seen = new Set();
+  const list = collection(league, "players", "player").map(resource => {
+    const keys = findValues(resource, "player_key"), ids = findValues(resource, "player_id");
+    const key = keys[0];
+    if (keys.length !== 1 || !requested.has(key) || seen.has(key) || ids.length !== 1 ||
+        String(ids[0]) !== key.split(".p.")[1]) fail("yahoo_target_player_identity_mismatch");
+    // Yahoo may nest an owner's team (with its own name/status) in ownership.
+    // Only direct player metadata describes this requested player's identity.
+    const metadata = Array.isArray(resource) ? resource.flat(Infinity) : [resource];
+    const metadataValues = field => metadata.filter(node => node && typeof node === "object" && Object.hasOwn(node, field)).map(node => node[field]);
+    const names = metadataValues("name");
+    if (names.length !== 1 || typeof names[0]?.full !== "string" || !names[0].full)
+      fail("yahoo_target_player_identity_mismatch");
+    seen.add(key);
+    const ownerships = findValues(resource, "ownership");
+    const ownership = ownerships[0];
+    if (ownerships.length !== 1 || !ownership || typeof ownership !== "object" || Array.isArray(ownership))
+      fail("yahoo_target_ownership_invalid");
+    const field = (node, name, required = false) => {
+      const values = findValues(node, name);
+      if (values.length > 1 || required && values.length !== 1 ||
+          values.length === 1 && (typeof values[0] !== "string" || !values[0])) fail("yahoo_target_ownership_invalid");
+      return values[0] ?? null;
+    };
+    const type = field(ownership, "ownership_type", true);
+    const ownerTeamKey = field(ownership, "owner_team_key");
+    const ownerTeamId = field(ownership, "owner_team_id");
+    const waiverDate = field(ownership, "waiver_date");
+    if (waiverDate && (!/^\d{4}-\d{2}-\d{2}$/.test(waiverDate) ||
+        !Number.isFinite(Date.parse(waiverDate)) || new Date(waiverDate).toISOString().slice(0, 10) !== waiverDate))
+      fail("yahoo_target_ownership_invalid");
+    if (!["freeagents", "waivers", "team"].includes(type) ||
+        type === "team" && (!ownerTeamKey || !new RegExp(`^${membership.leagueKey.replaceAll(".", "\\.")}\\.t\\.[1-9][0-9]*$`).test(ownerTeamKey) || waiverDate) ||
+        type !== "team" && (ownerTeamKey || ownerTeamId) || type === "freeagents" && waiverDate ||
+        ownerTeamId && ownerTeamId !== ownerTeamKey?.split(".t.")[1])
+      fail("yahoo_target_ownership_conflict");
+    const player = parsePlayer(resource, membership.gameKey);
+    // Status is a reported designation only; absence never clears health or locks.
+    const statuses = metadataValues("status");
+    if (statuses.length > 1 || statuses.length === 1 && (typeof statuses[0] !== "string" || !statuses[0]))
+      fail("yahoo_target_status_invalid");
+    const status = statuses[0] ?? null;
+    return { playerKey: key, yahooId: String(ids[0]), name: player.name,
+      displayPosition: player.displayPosition, eligiblePositions: player.eligiblePositions,
+      ownership: type === "freeagents" ? "FA" : type === "waivers" ? "W" : "owned",
+      ownerTeamKey, waiverDate, status };
+  });
+  if (seen.size !== requested.size) fail("yahoo_target_players_missing");
+  return list;
+}
+
 function validateRequest(command, packet) {
-  if (!["snapshot", "candidates"].includes(command)) fail("yahoo_readonly_command_required");
+  if (!["snapshot", "candidates", "targets"].includes(command)) fail("yahoo_readonly_command_required");
+  if (command === "targets") validateTargetContext(packet);
   if (command === "candidates" && (!["FA", "W"].includes(packet?.status) ||
       !Number.isSafeInteger(packet?.start) || packet.start < 0 ||
       !Number.isSafeInteger(packet?.count) || packet.count < 1 || packet.count > 25 ||
@@ -154,14 +229,32 @@ function validateRequest(command, packet) {
 
 export async function operate({ command, packet, transport }) {
   validateRequest(command, packet);
+  const requestStartedAt = new Date().toISOString();
   if (!transport || typeof transport.get !== "function") fail("yahoo_transport_missing");
   if (typeof transport.expectedGuid !== "string" || !transport.expectedGuid.trim()) fail("yahoo_identity_binding_missing");
   const membership = parseMembership(await transport.get(membershipPath), transport.expectedGuid);
   const settings = parseSettings(await transport.get(`/league/${membership.leagueKey}/settings?format=json`), membership);
+  if (command === "targets" && settings.week !== packet.expectedWeek) fail("yahoo_target_week_mismatch");
   const base = {
     verifiedAt: new Date().toISOString(), identityVerified: true, membershipVerified: true,
     target: TARGET, settings, apiReadOnly: true,
   };
+  if (command === "targets") {
+    validateTargetContext(packet);
+    const keys = packet.playerIds.map(id => `${membership.gameKey}.p.${id}`).join(",");
+    const ownershipRequestStartedAt = new Date().toISOString();
+    const payload = await transport.get(`/league/${membership.leagueKey}/players;player_keys=${keys}/ownership?format=json`);
+    const ownershipRequestCompletedAt = new Date().toISOString();
+    const list = targetPlayers(payload, membership, packet);
+    const requestCompletedAt = new Date().toISOString();
+    if (Date.parse(requestCompletedAt) >= Date.parse(packet.expiresAt) ||
+        Date.parse(requestCompletedAt) - Date.parse(requestStartedAt) > targetFreshnessMs) fail("yahoo_target_read_expired");
+    return { ...base, verifiedAt: requestCompletedAt, requestStartedAt, requestCompletedAt,
+      ownershipRequestStartedAt, ownershipRequestCompletedAt,
+      expiresAt: packet.expiresAt, maximumAgeSeconds: targetFreshnessMs / 1000,
+      expectedWeek: packet.expectedWeek, requestedPlayerIds: packet.playerIds, players: list,
+      transactionReady: false, posture: "OWNERSHIP_READ_ONLY_FRESH_EXECUTION_PREFLIGHT_REQUIRED" };
+  }
   if (command === "candidates") {
     const { status, start, count } = packet;
     const payload = await transport.get(`/league/${membership.leagueKey}/players;status=${status};start=${start};count=${count}/ownership?format=json`);
@@ -350,6 +443,8 @@ async function main(args) {
     packet = { status, start: Number(start), count: Number(count) };
   } else if (command === "snapshot" && args.length === 2 && /^all:[0-9]+$/.test(arg)) {
     packet = { collectCandidates: true, maximumPages: Number(arg.slice(4)) };
+  } else if (command === "targets" && args.length === 4 && /^[1-9][0-9]*$/.test(args[2])) {
+    packet = { playerIds: arg.split(","), expectedWeek: Number(args[2]), expiresAt: args[3] };
   } else if (command === "planner-input" && [4, 5].includes(args.length)) {
     // Offline bridge. Validate/read facts without accessing Keychain or network.
     const raw = JSON.parse(await readFile(arg, "utf8"));

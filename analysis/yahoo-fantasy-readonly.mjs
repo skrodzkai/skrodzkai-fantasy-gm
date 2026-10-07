@@ -271,7 +271,18 @@ export async function yahooFantasyGet(path, accessToken, fetchImpl = fetch) {
     headers: { accept: "application/json", authorization: `Bearer ${requireText(accessToken, "yahoo_access_token_missing")}` },
     redirect: "error",
   });
-  if (!response.ok) fail(`yahoo_resource_request_failed:${response.status}`);
+  if (!response.ok) {
+    let retryAfter = "";
+    if ([429, 503].includes(response.status)) {
+      const header = response.headers?.get("retry-after");
+      if (typeof header === "string" && /^[0-9]{1,10}$/.test(header) && Number.isSafeInteger(Number(header)))
+        retryAfter = `:retry_after_seconds=${Number(header)}`;
+      else if (typeof header === "string" && header.length <= 64 && Number.isFinite(Date.parse(header)) &&
+          new Date(Date.parse(header)).toUTCString() === header)
+        retryAfter = `:retry_after_at=${new Date(Date.parse(header)).toISOString()}`;
+    }
+    fail(`yahoo_resource_request_failed:${response.status}${retryAfter}`);
+  }
   try {
     return await response.json();
   } catch {
