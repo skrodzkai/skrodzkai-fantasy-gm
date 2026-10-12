@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
-import { readFile, writeFile } from "node:fs/promises";
+import { lstat, readFile, stat, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import process from "node:process";
 import {
   TARGET, directField, findResources, findValues,
@@ -423,53 +424,148 @@ export function toPlannerSnapshot(raw, pool, { report, expiresAt, verifiedSupple
   return result;
 }
 
-async function main(args) {
-  const outputs = args.filter(arg => arg.startsWith("--out="));
-  if (outputs.length > 1 || outputs.some(arg => arg === "--out=")) fail("yahoo_output_path_invalid");
-  const outputPath = outputs[0]?.slice(6);
-  args = args.filter(arg => !arg.startsWith("--out="));
-  const emit = async result => {
-    if (outputPath) {
-      await writeFile(outputPath, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-      process.stdout.write(`${JSON.stringify({ output: outputPath, apiReadOnly: true })}\n`);
-    } else process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-  };
-  const [command, arg] = args;
-  let packet;
-  if (command === "snapshot" && args.length === 1) {
-    // No paging input.
-  } else if (command === "candidates" && args.length === 2 && /^(FA|W):[0-9]+:[0-9]+$/.test(arg)) {
-    const [status, start, count] = arg.split(":");
-    packet = { status, start: Number(start), count: Number(count) };
-  } else if (command === "snapshot" && args.length === 2 && /^all:[0-9]+$/.test(arg)) {
-    packet = { collectCandidates: true, maximumPages: Number(arg.slice(4)) };
-  } else if (command === "targets" && args.length === 4 && /^[1-9][0-9]*$/.test(args[2])) {
-    packet = { playerIds: arg.split(","), expectedWeek: Number(args[2]), expiresAt: args[3] };
-  } else if (command === "planner-input" && [4, 5].includes(args.length)) {
-    // Offline bridge. Validate/read facts without accessing Keychain or network.
-    const raw = JSON.parse(await readFile(arg, "utf8"));
-    const report = JSON.parse(await readFile(args[2], "utf8"));
-    const verifiedSupplement = args[4] ? JSON.parse(await readFile(args[4], "utf8")) : null;
-    const result = toPlannerSnapshot(raw, raw.candidatePool, { report, expiresAt: args[3], verifiedSupplement });
-    await emit(result);
-    return;
-  } else fail("yahoo_readonly_command_required");
-  // Validate before accessing Keychain, not only inside the read operation.
-  validateRequest(command, packet);
-  const access = await refreshBoundAccess();
-  const result = await operate({
-    command, packet,
-    transport: {
-      expectedGuid: access.yahooGuid,
-      get: path => yahooFantasyGet(path, access.accessToken),
-    },
+// Only exact known codes may cross the CLI error boundary. Exception text is not
+// safe merely because it starts with yahoo_ or resembles a system error code.
+const operationCodes = new Set(`
+  readonly_command_required output_path_invalid output_directory_missing output_directory_not_directory output_exists
+  resource_identity_unverified league_target_mismatch current_week_unverified settings_unverified roster_positions_invalid
+  player_key_invalid player_name_missing player_duplicate roster_week_mismatch roster_incomplete
+  transaction_target_mismatch transaction_duplicate target_ids_invalid target_week_invalid target_expiry_invalid
+  target_league_mismatch target_period_mismatch target_player_identity_mismatch target_ownership_invalid
+  target_ownership_conflict target_status_invalid target_players_missing page_invalid collection_bound_required
+  transport_missing identity_binding_missing target_week_mismatch target_read_expired candidate_page_unverified
+  pending_claims_incomplete candidate_collection_incomplete candidate_settings_changed candidate_pagination_gap
+  candidate_duplicate_or_ownership_changed planner_readback_invalid planner_supplement_invalid
+  planner_supplement_duplicate planner_player_invalid planner_report_period_mismatch
+  identity_ambiguous target_game_membership_missing game_key_missing game_key_invalid target_team_ownership_missing
+  identity_mismatch identity_missing refresh_identity_mismatch token_response_invalid access_token_missing
+  refresh_token_missing client_id_missing client_secret_missing
+  resource_path_invalid resource_origin_invalid resource_response_invalid keychain_field_invalid
+`.trim().split(/\s+/).map(code => `yahoo_${code}`));
+for (const collectionName of ["players", "transactions"]) {
+  for (const suffix of ["collection_missing", "count_invalid", "entry_missing"])
+    operationCodes.add(`yahoo_${collectionName}_${suffix}`);
+}
+const systemCodes = new Set([
+  "ENOENT", "ENOTDIR", "EEXIST", "EACCES", "EPERM", "ENOSPC", "EDQUOT", "EROFS", "EIO", "EMFILE", "ENFILE",
+  "EINVAL", "ENAMETOOLONG", "ELOOP", "EPIPE", "ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT",
+  "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_SOCKET",
+]);
+function safeOperationCode(error) {
+  const message = error?.message;
+  if (operationCodes.has(message)) return message;
+  if (typeof message !== "string") return "yahoo_operation_failed";
+  if (/^yahoo_keychain_(?:read_failed|item_empty|item_too_long|write_failed):(?:client-id|client-secret|refresh-token|yahoo-guid)$/.test(message))
+    return message;
+  if (/^yahoo_token_request_failed:[1-5][0-9]{2}$/.test(message)) return message;
+  const http = /^yahoo_resource_request_failed:([1-5][0-9]{2})(?::retry_after_(seconds|at)=(.+))?$/.exec(message);
+  if (http && (!http[2] || ["429", "503"].includes(http[1]) && (
+    http[2] === "seconds" && /^[0-9]{1,10}$/.test(http[3]) && String(Number(http[3])) === http[3] ||
+    http[2] === "at" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(http[3]) &&
+      Number.isFinite(Date.parse(http[3])) && new Date(http[3]).toISOString() === http[3]
+  ))) return message;
+  return "yahoo_operation_failed";
+}
+
+function writeStream(stream, text) {
+  return new Promise((resolve, reject) => {
+    const onError = error => reject(error);
+    stream.once("error", onError);
+    stream.write(text, error => {
+      if (error) reject(error);
+      else { stream.removeListener("error", onError); resolve(); }
+    });
   });
-  await emit(result);
+}
+
+/** The production argv/emit/error path; tests replace only I/O, never validation. */
+export async function runCli(args, {
+  refreshAccess = refreshBoundAccess, getResource = yahooFantasyGet, writeOutput = writeFile,
+  stdout = text => writeStream(process.stdout, text), stderr = text => writeStream(process.stderr, text),
+} = {}) {
+  let stage = "input", accessStatus = "not_attempted", readStatus = "not_attempted";
+  let persistence = "not_attempted", resourceRequests = 0;
+  try {
+    const outputs = args.filter(arg => arg.startsWith("--out="));
+    if (outputs.length > 1 || outputs.some(arg => arg === "--out=" || arg.endsWith("/") || arg.includes("\0"))) fail("yahoo_output_path_invalid");
+    const outputPath = outputs[0]?.slice(6);
+    args = args.filter(arg => !arg.startsWith("--out="));
+    const [command, arg] = args;
+    let packet;
+    if (command === "snapshot" && args.length === 1) {
+      // No paging input.
+    } else if (command === "candidates" && args.length === 2 && /^(FA|W):[0-9]+:[0-9]+$/.test(arg)) {
+      const [status, start, count] = arg.split(":");
+      packet = { status, start: Number(start), count: Number(count) };
+    } else if (command === "snapshot" && args.length === 2 && /^all:[0-9]+$/.test(arg)) {
+      packet = { collectCandidates: true, maximumPages: Number(arg.slice(4)) };
+    } else if (command === "targets" && args.length === 4 && /^[1-9][0-9]*$/.test(args[2])) {
+      packet = { playerIds: arg.split(","), expectedWeek: Number(args[2]), expiresAt: args[3] };
+    } else if (command === "planner-input" && [4, 5].includes(args.length)) {
+      // Offline bridge; file reads follow destination preflight below.
+    } else fail("yahoo_readonly_command_required");
+    if (command !== "planner-input") validateRequest(command, packet);
+    if (outputPath) {
+      stage = "output_preflight";
+      let parent;
+      try { parent = await stat(dirname(outputPath)); }
+      catch (error) {
+        if (error?.code === "ENOENT") fail("yahoo_output_directory_missing");
+        if (error?.code === "ENOTDIR") fail("yahoo_output_directory_not_directory");
+        throw error;
+      }
+      if (!parent.isDirectory()) fail("yahoo_output_directory_not_directory");
+      let exists = false;
+      try { await lstat(outputPath); exists = true; }
+      catch (error) { if (error?.code !== "ENOENT") throw error; }
+      if (exists) fail("yahoo_output_exists");
+    }
+    let result;
+    if (command === "planner-input") {
+      stage = "input";
+      const raw = JSON.parse(await readFile(arg, "utf8"));
+      const report = JSON.parse(await readFile(args[2], "utf8"));
+      const verifiedSupplement = args[4] ? JSON.parse(await readFile(args[4], "utf8")) : null;
+      stage = "read_validation"; readStatus = "started";
+      result = toPlannerSnapshot(raw, raw.candidatePool, { report, expiresAt: args[3], verifiedSupplement });
+    } else {
+      // Access includes Keychain reads, token refresh and possible rotation storage.
+      // Its internals are deliberately not inferred from a thrown exception.
+      stage = "access"; accessStatus = "started";
+      const access = await refreshAccess();
+      accessStatus = "completed";
+      stage = "read_validation"; readStatus = "started";
+      result = await operate({ command, packet, transport: {
+        expectedGuid: access.yahooGuid,
+        get: path => { resourceRequests += 1; return getResource(path, access.accessToken); },
+      } });
+    }
+    readStatus = "completed";
+    stage = "output_write";
+    // Serialize before exclusive create: serialization failure cannot reserve a name.
+    const json = `${JSON.stringify(result, null, 2)}\n`;
+    if (outputPath) {
+      persistence = "incomplete";
+      await writeOutput(outputPath, json, { mode: 0o600, flag: "wx" });
+      persistence = "completed";
+    }
+    stage = "receipt";
+    await stdout(outputPath ? `${JSON.stringify({ output: outputPath, apiReadOnly: true })}\n` : json);
+    return 0;
+  } catch (error) {
+    const diagnostic = {
+      stage, code: safeOperationCode(error),
+      errorType: ["Error", "TypeError", "RangeError", "SyntaxError", "AbortError"].includes(error?.name) ? error.name : "UNKNOWN",
+      errorCode: systemCodes.has(error?.code) ? error.code : "UNKNOWN",
+      causeCode: systemCodes.has(error?.cause?.code) ? error.cause.code : "UNKNOWN",
+      accessStatus, readStatus, resourceRequests, persistence,
+    };
+    try { await stderr(`${JSON.stringify(diagnostic)}\n`); }
+    catch { /* No alternate output or live call when diagnostic delivery fails. */ }
+    return 1;
+  }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main(process.argv.slice(2)).catch(error => {
-    process.stderr.write(`${error instanceof Error && /^yahoo_/.test(error.message) ? error.message : "yahoo_operation_failed"}\n`);
-    process.exitCode = 1;
-  });
+  process.exitCode = await runCli(process.argv.slice(2));
 }
