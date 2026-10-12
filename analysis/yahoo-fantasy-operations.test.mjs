@@ -32,9 +32,9 @@ function harness(overrides = {}) {
   const payloads = responses(), calls = [], output = [], errors = [];
   let accessCalls = 0;
   const dependencies = {
-    refreshAccess: async () => { accessCalls += 1; return { yahooGuid: "synthetic-guid", accessToken: "synthetic-token" }; },
+    refreshAccess: async () => { accessCalls += 1; return { yahooGuid: "synthetic-guid", accessToken: "test" }; },
     getResource: async (path, token) => {
-      assert.equal(token, "synthetic-token");
+      assert.equal(token, "test");
       calls.push(path);
       assert.ok(payloads.length, "no repeated read sequence");
       return payloads.shift();
@@ -48,7 +48,7 @@ function harness(overrides = {}) {
 const directory = () => mkdtemp(join(tmpdir(), "yahoo-operations-"));
 
 test("argument validation precedes output preparation and access", async () => {
-  for (const args of [["snapshot", "--out="], ["snapshot", "--out=a", "--out=b"], ["candidates", "FA:0:99"], ["unknown"]]) {
+  for (const args of [["snapshot", "--out="], ["snapshot", "--out=/tmp/x/"], ["snapshot", "--out=a", "--out=b"], ["candidates", "FA:0:99"], ["unknown"]]) {
     const h = harness();
     assert.equal(await h.run(args), 1);
     assert.equal(h.failure().stage, "input");

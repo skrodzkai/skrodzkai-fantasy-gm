@@ -487,7 +487,7 @@ export async function runCli(args, {
   let persistence = "not_attempted", resourceRequests = 0;
   try {
     const outputs = args.filter(arg => arg.startsWith("--out="));
-    if (outputs.length > 1 || outputs.some(arg => arg === "--out=" || arg.includes("\0"))) fail("yahoo_output_path_invalid");
+    if (outputs.length > 1 || outputs.some(arg => arg === "--out=" || arg.endsWith("/") || arg.includes("\0"))) fail("yahoo_output_path_invalid");
     const outputPath = outputs[0]?.slice(6);
     args = args.filter(arg => !arg.startsWith("--out="));
     const [command, arg] = args;
