@@ -139,6 +139,14 @@ node analysis/refresh-weekly-projection.mjs --full --season=2026 --target-week=5
 ```
 
 `--full` stamps actual report generation after acquisition; `--generated-at` is rejected.
+Historical matchup CSVs default to
+`/Volumes/TradingFloor/skrodzkai-disk-offload/fantasy-gm-2026/source-cache`;
+`--matchup-dir=/path/to/source-cache` overrides that directory. The full refresh reads
+`nflverse-player-stats-week-<season>.csv` for each selected completed season (by default
+the two preceding seasons) and `nflverse-games.csv` before fetching live inputs or writing
+captures. Missing/unreadable files stop the refresh; there is no automatic download or
+legacy-path fallback. Explicit `--no-matchup` skips those historical inputs and retains its
+existing neutral-matchup behavior.
 The completed cutoff is weeks 1–4 here, with separately verified week 5/6/7 schedules. It
 writes each `weekN-full-rankings.json` and HTML plus `week5-multiweek-rankings.json`. Week 18
 ends the horizon. Offense algorithms remain unchanged. IDP role is estimated at the cutoff

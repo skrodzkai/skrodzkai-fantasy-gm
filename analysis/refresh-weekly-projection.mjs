@@ -1633,6 +1633,24 @@ export function buildMultiweekRankings({ targetWeek, schedules, ...inputs }) {
 }
 
 async function runFullRankings(args, { season, targetWeek, week1Weight, opportunityShare, generatedAt, capturedAt }) {
+  // Read required local matchup history before acquiring any live sources or writing captures.
+  // Only completed seasons strictly before the target season are allowed (no leakage).
+  let matchupInput = null;
+  if (!args["no-matchup"]) {
+    const matchupDir = args["matchup-dir"] || "/Volumes/TradingFloor/skrodzkai-disk-offload/fantasy-gm-2026/source-cache";
+    const matchupSeasons = String(args["matchup-seasons"] ?? `${season - 2},${season - 1}`).split(",").map((value) => Number(value.trim())).filter(Number.isInteger);
+    if (matchupSeasons.some((matchupSeason) => matchupSeason >= season)) {
+      throw new Error("matchup seasons must be completed seasons strictly before the target season (no leakage)");
+    }
+    const seasonTexts = [];
+    for (const matchupSeason of matchupSeasons) {
+      const text = await readFile(join(matchupDir, `nflverse-player-stats-week-${matchupSeason}.csv`), "utf8");
+      seasonTexts.push({ season: matchupSeason, text });
+    }
+    const gamesText = await readFile(join(matchupDir, "nflverse-games.csv"), "utf8");
+    matchupInput = { seasonTexts, gamesText };
+  }
+
   // Completed weeks are every week before the target week — no hardcoded Week 1.
   const completedWeeks = Array.from({ length: targetWeek - 1 }, (_, index) => index + 1);
   const [rosterInputs, board] = await Promise.all([
@@ -1668,23 +1686,11 @@ async function runFullRankings(args, { season, targetWeek, week1Weight, opportun
   const { rates: opportunityRates, sampledPlayers, dedupedAliases } = buildOpportunityRatesMultiWeek(board, weekStatsList);
   const { mean: teamDefenseMean, sampledTeamWeeks } = teamDefenseLeagueMeanMultiWeek(weekStatsList);
 
-  // Sourced opponent-matchup adjustment from real scored history. Point-in-time: completed seasons
-  // strictly before the target season (default the two most recent), so there is NO leakage.
+  // Build the historical matchup adjustment using the measured current-season DST baseline.
   let matchupProvider = null;
   let matchupMeta = null;
-  if (!args["no-matchup"]) {
-    const matchupDir = args["matchup-dir"] || "/Volumes/TradingFloor/openclaw-disk-offload/fantasy-gm-2026/source-cache";
-    const matchupSeasons = String(args["matchup-seasons"] ?? `${season - 2},${season - 1}`).split(",").map((value) => Number(value.trim())).filter(Number.isInteger);
-    if (matchupSeasons.some((matchupSeason) => matchupSeason >= season)) {
-      throw new Error("matchup seasons must be completed seasons strictly before the target season (no leakage)");
-    }
-    const seasonTexts = [];
-    for (const matchupSeason of matchupSeasons) {
-      const text = await readFile(join(matchupDir, `nflverse-player-stats-week-${matchupSeason}.csv`), "utf8");
-      seasonTexts.push({ season: matchupSeason, text });
-    }
-    const gamesText = await readFile(join(matchupDir, "nflverse-games.csv"), "utf8");
-    matchupProvider = buildOpponentMatchup({ seasonTexts, gamesText, dstBaselineMean: teamDefenseMean });
+  if (matchupInput) {
+    matchupProvider = buildOpponentMatchup({ ...matchupInput, dstBaselineMean: teamDefenseMean });
     matchupMeta = matchupProvider.meta;
   }
 
