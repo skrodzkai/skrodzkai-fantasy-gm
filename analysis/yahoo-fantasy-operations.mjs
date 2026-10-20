@@ -424,6 +424,129 @@ export function toPlannerSnapshot(raw, pool, { report, expiresAt, verifiedSupple
   return result;
 }
 
+// add:<id>:<slot> | drop:<id> | move:<id>:<slot> | keep:<id>, comma-separated, one token per player.
+export function parseDeltaSpec(spec) {
+  const changes = typeof spec === "string" && spec ? spec.split(",").map(token => {
+    const match = /^(?:(add|move):([1-9][0-9]*):([A-Z/]+)|(drop|keep):([1-9][0-9]*))$/.exec(token);
+    if (!match) fail("yahoo_delta_spec_invalid");
+    return { kind: match[1] ?? match[4], id: match[2] ?? match[5], slot: match[3] ?? null };
+  }) : fail("yahoo_delta_spec_invalid");
+  if (new Set(changes.map(change => change.id)).size !== changes.length) fail("yahoo_delta_spec_invalid");
+  return changes;
+}
+
+// Identity comes from the exact keys, not only from the saved verification flags.
+function deltaRoster(raw, now) {
+  const team = /^([1-9][0-9]*)\.l\.([0-9]+)\.t\.([0-9]+)$/.exec(raw?.roster?.teamKey ?? "");
+  const verifiedMs = Date.parse(raw?.verifiedAt), week = raw?.settings?.week;
+  if (raw?.apiReadOnly !== true || raw.identityVerified !== true || raw.membershipVerified !== true ||
+      raw.target?.gameCode !== TARGET.gameCode || raw.target.season !== TARGET.season ||
+      raw.target.leagueId !== TARGET.leagueId || raw.target.teamId !== TARGET.teamId ||
+      !team || team[2] !== TARGET.leagueId || team[3] !== TARGET.teamId ||
+      raw.settings.leagueKey !== `${team[1]}.l.${TARGET.leagueId}` ||
+      !Number.isSafeInteger(week) || week < 1 || raw.roster.week !== week ||
+      !Number.isFinite(verifiedMs) || new Date(verifiedMs).toISOString() !== raw.verifiedAt || verifiedMs > now ||
+      !Array.isArray(raw.settings.rosterPositions) || !Array.isArray(raw.roster.players) || !raw.roster.players.length)
+    fail("yahoo_delta_snapshot_invalid");
+  const positions = new Map();
+  for (const { position, count } of raw.settings.rosterPositions) {
+    if (typeof position !== "string" || !position || positions.has(position) || !Number.isSafeInteger(count) || count < 0)
+      fail("yahoo_delta_snapshot_invalid");
+    positions.set(position, count);
+  }
+  const playerKey = new RegExp(`^${team[1]}\\.p\\.([1-9][0-9]*)$`), byId = new Map();
+  for (const player of raw.roster.players) {
+    const id = playerKey.exec(player?.playerKey ?? "")?.[1];
+    if (!id || byId.has(id) || !positions.has(player.selectedPosition)) fail("yahoo_delta_snapshot_invalid");
+    byId.set(id, player);
+  }
+  return { gameKey: team[1], teamKey: raw.roster.teamKey, week, verifiedMs, positions, byId };
+}
+
+/**
+ * Offline comparison of two saved snapshots; every unlisted player must keep its exact slot.
+ * PASS proves only that saved-roster comparison. It is not a preflight, freshness or execution clearance.
+ */
+export function verifyRosterDelta(before, after, changes, now = Date.now()) {
+  const prior = deltaRoster(before, now), current = deltaRoster(after, now);
+  const was = prior.byId, is = current.byId, listed = new Map(changes.map(change => [change.id, change]));
+  const mismatches = [];
+  if (prior.teamKey !== current.teamKey) mismatches.push("team_changed");
+  if (prior.week !== current.week) mismatches.push("week_changed");
+  if (current.verifiedMs <= prior.verifiedMs) mismatches.push("after_not_later");
+  // FA-only release packages expect no claims; a missing collection is unknown, not empty.
+  if (!Array.isArray(after.pending)) mismatches.push("pending_unknown");
+  else if (after.pending.length) mismatches.push("pending_not_empty");
+  for (const { kind, id, slot } of changes) {
+    if (slot && !current.positions.has(slot)) { mismatches.push(`unknown_slot:${id}:${slot}`); continue; }
+    const from = was.get(id)?.selectedPosition, to = is.get(id)?.selectedPosition;
+    const ok = kind === "add" ? !was.has(id) && to === slot
+      : kind === "drop" ? was.has(id) && !is.has(id)
+      : kind === "move" ? was.has(id) && from !== slot && to === slot
+      : was.has(id) && is.has(id) && from === to;
+    if (!ok) mismatches.push(`${kind}_unverified:${id}:${from ?? "absent"}>${to ?? "absent"}`);
+  }
+  for (const id of new Set([...was.keys(), ...is.keys()])) {
+    if (listed.has(id)) continue;
+    if (!is.has(id)) mismatches.push(`unexpected_drop:${id}`);
+    else if (!was.has(id)) mismatches.push(`unexpected_add:${id}`);
+    else if (was.get(id).selectedPosition !== is.get(id).selectedPosition) mismatches.push(`unexpected_slot_change:${id}`);
+  }
+  // A server time is attributed only to one in-window transaction that matches this exact add.
+  // Older or unmatched records are reported as uncorroborated, never as this change's receipt.
+  const recent = Array.isArray(after.completedRecent) ? after.completedRecent : null;
+  const drops = new Set(changes.filter(change => change.kind === "drop").map(change => change.id));
+  const idOf = key => new RegExp(`^${current.gameKey}\\.p\\.([1-9][0-9]*)$`).exec(key ?? "")?.[1] ?? null;
+  const windowStart = Math.floor(prior.verifiedMs / 1000), windowEnd = Math.floor(current.verifiedMs / 1000);
+  const claimedDrops = new Set();
+  const addTransactions = changes.filter(change => change.kind === "add").map(({ id }) => {
+    if (!recent) return { id, corroboration: "UNKNOWN_RECENT_UNAVAILABLE" };
+    const matches = recent.filter(transaction => Array.isArray(transaction?.players) && transaction.players.some(player =>
+      idOf(player?.playerKey) === id && player.action === "add" && player.destinationTeamKey === current.teamKey));
+    const seconds = transaction => /^[0-9]+$/.test(transaction.timestamp ?? "") ? Number(transaction.timestamp) : NaN;
+    const inWindow = matches.filter(transaction => seconds(transaction) >= windowStart && seconds(transaction) <= windowEnd);
+    const priorKeys = matches.filter(transaction => !inWindow.includes(transaction)).map(transaction => transaction.transactionKey ?? null);
+    if (!inWindow.length) return { id, corroboration: priorKeys.length ? "UNCORROBORATED_PRIOR_RECORD_ONLY" : "UNCORROBORATED_NOT_IN_RECENT", priorKeys };
+    const transaction = inWindow[0], adds = transaction.players.filter(player => player?.action === "add");
+    const dropped = transaction.players.filter(player => player?.action === "drop");
+    const reasons = [];
+    if (inWindow.length > 1) reasons.push("ambiguous");
+    if (!new RegExp(`^${current.gameKey}\\.l\\.${TARGET.leagueId}\\.tr\\.[0-9]+$`).test(transaction.transactionKey ?? "")) reasons.push("key");
+    if (transaction.status !== "successful") reasons.push("status");
+    if (adds.length !== 1 || adds[0].sourceType !== "freeagents") reasons.push("source");
+    if (transaction.players.length !== adds.length + dropped.length) reasons.push("players");
+    for (const player of dropped) {
+      const dropId = idOf(player.playerKey);
+      if (player.sourceTeamKey !== current.teamKey || !drops.has(dropId) || claimedDrops.has(dropId)) reasons.push("drop");
+      claimedDrops.add(dropId);
+    }
+    if (reasons.length) {
+      mismatches.push(`add_transaction_mismatch:${id}:${[...new Set(reasons)].join("+")}`);
+      return { id, corroboration: "MISMATCH", transactionKey: transaction.transactionKey ?? null, priorKeys };
+    }
+    return { id, corroboration: "CORROBORATED", transactionKey: transaction.transactionKey, type: transaction.type,
+      serverTime: new Date(seconds(transaction) * 1000).toISOString(), dropped: dropped.map(player => idOf(player.playerKey)), priorKeys };
+  });
+  // Every expected drop must be attributed to a corroborated add. While one is not, an add whose
+  // transaction dropped nobody cannot claim it, so it is reported as unattributed with no server time.
+  const unattributedDrops = [...drops].filter(dropId => !claimedDrops.has(dropId));
+  if (unattributedDrops.length) for (const entry of addTransactions) {
+    if (entry.corroboration !== "CORROBORATED" || entry.dropped.length) continue;
+    entry.corroboration = "UNCORROBORATED_DROP_UNATTRIBUTED"; delete entry.serverTime;
+  }
+  const emptyStarterSlots = [...current.positions].filter(([position]) => !["BN", "IR"].includes(position))
+    .flatMap(([position, count]) => Array(Math.max(0, count - [...is.values()].filter(player => player.selectedPosition === position).length)).fill(position));
+  return { verdict: mismatches.length ? "FAIL" : "PASS", mismatches, week: current.week,
+    beforeVerifiedAt: before.verifiedAt, afterVerifiedAt: after.verifiedAt, afterAgeSeconds: Math.round((now - current.verifiedMs) / 1000),
+    playerCount: is.size, pendingCount: Array.isArray(after.pending) ? after.pending.length : null, emptyStarterSlots,
+    players: changes.map(({ id }) => {
+      const player = is.get(id);
+      return player ? { id, name: player.name, slot: player.selectedPosition, editable: player.editable,
+        undroppable: player.undroppable, status: player.status, eligible: player.eligiblePositions } : { id, slot: null };
+    }),
+    addTransactions, unattributedDrops, offline: true, posture: "SAVED_ROSTER_COMPARISON_ONLY_NOT_PREFLIGHT_OR_EXECUTION_CLEARANCE" };
+}
+
 // Only exact known codes may cross the CLI error boundary. Exception text is not
 // safe merely because it starts with yahoo_ or resembles a system error code.
 const operationCodes = new Set(`
@@ -437,6 +560,7 @@ const operationCodes = new Set(`
   pending_claims_incomplete candidate_collection_incomplete candidate_settings_changed candidate_pagination_gap
   candidate_duplicate_or_ownership_changed planner_readback_invalid planner_supplement_invalid
   planner_supplement_duplicate planner_player_invalid planner_report_period_mismatch
+  delta_spec_invalid delta_snapshot_invalid
   identity_ambiguous target_game_membership_missing game_key_missing game_key_invalid target_team_ownership_missing
   identity_mismatch identity_missing refresh_identity_mismatch token_response_invalid access_token_missing
   refresh_token_missing client_id_missing client_secret_missing
@@ -503,8 +627,10 @@ export async function runCli(args, {
       packet = { playerIds: arg.split(","), expectedWeek: Number(args[2]), expiresAt: args[3] };
     } else if (command === "planner-input" && [4, 5].includes(args.length)) {
       // Offline bridge; file reads follow destination preflight below.
+    } else if (command === "verify-delta" && args.length === 4) {
+      packet = { changes: parseDeltaSpec(args[3]) };
     } else fail("yahoo_readonly_command_required");
-    if (command !== "planner-input") validateRequest(command, packet);
+    if (!["planner-input", "verify-delta"].includes(command)) validateRequest(command, packet);
     if (outputPath) {
       stage = "output_preflight";
       let parent;
@@ -528,6 +654,12 @@ export async function runCli(args, {
       const verifiedSupplement = args[4] ? JSON.parse(await readFile(args[4], "utf8")) : null;
       stage = "read_validation"; readStatus = "started";
       result = toPlannerSnapshot(raw, raw.candidatePool, { report, expiresAt: args[3], verifiedSupplement });
+    } else if (command === "verify-delta") {
+      stage = "input";
+      const before = JSON.parse(await readFile(arg, "utf8"));
+      const after = JSON.parse(await readFile(args[2], "utf8"));
+      stage = "read_validation"; readStatus = "started";
+      result = verifyRosterDelta(before, after, packet.changes);
     } else {
       // Access includes Keychain reads, token refresh and possible rotation storage.
       // Its internals are deliberately not inferred from a thrown exception.
@@ -551,7 +683,8 @@ export async function runCli(args, {
     }
     stage = "receipt";
     await stdout(outputPath ? `${JSON.stringify({ output: outputPath, apiReadOnly: true })}\n` : json);
-    return 0;
+    // A completed delta comparison that FAILs exits 2 so a chained shell step stops.
+    return command === "verify-delta" && result.verdict !== "PASS" ? 2 : 0;
   } catch (error) {
     const diagnostic = {
       stage, code: safeOperationCode(error),

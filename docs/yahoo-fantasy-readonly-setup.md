@@ -71,6 +71,22 @@ node analysis/yahoo-fantasy-operations.mjs targets 33994,30121 5 2026-10-07T20:0
 - Waiver rules/days are not a verified processing clock; `verifiedReleaseTime` remains null. Verify the actual deadline/release in Yahoo before scheduling an execution event.
 - No Yahoo projection replaces the existing custom weekly model. Match available-player keys/identities to that model and retain its season/week/source cutoffs.
 
+### Offline roster delta verification
+
+```sh
+node analysis/yahoo-fantasy-operations.mjs verify-delta <before-snapshot.json> <after-snapshot.json> add:1001:BN,drop:1002,keep:1003
+```
+
+`verify-delta` compares two previously saved `snapshot` outputs without Keychain access or any network request. The change list is comma-separated, one token per player: `add:<id>:<slot>` (absent before, now in that exact slot), `drop:<id>` (rostered before, absent now), `move:<id>:<slot>` (retained, now in that different slot) and `keep:<id>` (retained in the same slot; its facts are echoed). Every unlisted player must be retained in exactly the same slot, and every named slot must be a configured roster position.
+
+Each file must be a saved verified snapshot whose identity is consistent in its exact keys, not only its flags: the target team's key (`<game>.l.<league>.t.<team>`) and settings league key must name the fixed target league/team, every roster player key must carry that same game prefix, the week must be a positive integer shared by settings and roster, and `verifiedAt` must be a canonical ISO time not in the future. Otherwise the command fails with `yahoo_delta_snapshot_invalid`. Both files must share team and week, and the second must be strictly later. A missing or non-empty pending claim/trade collection fails.
+
+A recent transaction is attributed to an add only when exactly one matching record falls between the two snapshot clocks (second resolution), is a successful single `freeagents` add to the target team, and drops only players named by `drop:` tokens. Such a record is `CORROBORATED` with its key and server time. Every expected drop must be attributed: while any `drop:` player is not dropped by a corroborated add, an add whose matching record dropped nobody is `UNCORROBORATED_DROP_UNATTRIBUTED` with no server time, and the unmatched IDs are listed in `unattributedDrops`. A matching record outside that window is `UNCORROBORATED_PRIOR_RECORD_ONLY` and is never reported as this change's server time. No record is `UNCORROBORATED_NOT_IN_RECENT`, because only the 25 most recent league transactions are read. A missing transaction list is `UNKNOWN_RECENT_UNAVAILABLE`. An in-window record with the wrong source, status, drop, key or multiplicity is `MISMATCH` and fails the comparison.
+
+Output is one JSON result: `verdict` `PASS`/`FAIL`, exact `mismatches`, `afterAgeSeconds`, `emptyStarterSlots`, current facts for each listed player, per-add corroboration and `unattributedDrops`. An uncorroborated or unknown receipt is not evidence that an add failed; the exact roster comparison still controls the verdict. Exit status is `0` for PASS, `2` for a completed FAIL comparison and `1` with the diagnostic below for malformed input or invalid snapshots. Change-list validation precedes file reads and output preparation.
+
+PASS proves only the exact saved-roster comparison (posture `SAVED_ROSTER_COMPARISON_ONLY_NOT_PREFLIGHT_OR_EXECUTION_CLEARANCE`). It is not freshness, preflight, transaction authority, approval, lock or health clearance, or proof of the browser-visible confirmation. Mutable final checks and the canonical decision record remain required.
+
 ### Saved output and failure diagnosis
 
 Append `--out=/approved/capture/root/<event>/snapshot.json` to any operations command to save JSON instead of printing the full result. The caller verifies the mounted destination, applicable free-space floor and approved existing capture root, then prepares only the exact event leaf with mode `0700`. Do not recursively create missing ancestors, repair a mount, silently chmod an existing directory or choose a new destination. The generic CLI does not create directories or enforce a household-specific mount/root policy.
