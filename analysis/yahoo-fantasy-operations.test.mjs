@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { runCli } from "./yahoo-fantasy-operations.mjs";
 import { yahooFantasyGet } from "./yahoo-fantasy-readonly.mjs";
+import { RELEASE_BROWSER_VERSION, createReleaseBrowser, releaseBrowserLoadSource } from "./yahoo-release-browser.mjs";
 
 const cli = fileURLToPath(new URL("./yahoo-fantasy-operations.mjs", import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -226,4 +227,182 @@ test("the actual subprocess runs planner-input offline and reports local failure
     assert.equal(failure.accessStatus, "not_attempted"); assert.equal(failure.resourceRequests, 0);
     assert.ok(!error.stderr.includes("PRIVATE_INPUT_SENTINEL")); return error.code === 1;
   });
+});
+
+// Release browser functions, loaded from the exact generated REPL source against a mock tab.
+// Pages are snapshot lines keyed by state; `after:<locator>` is the state a click leads to and
+// `later:<state>` is what finishes rendering if the caller waits (as observed: the drop click returned
+// before the confirmation rendered).
+const BASE = "https://football.fantasysports.yahoo.com/f1/100200/", TEAM = `${BASE}3`, FUTURE = "2099-01-01T00:00:00.000Z";
+const LB = { add: { id: "90001", name: "Avery Synthetic" }, drop: { name: "Blake Fixture" }, week: "Week 4" };
+const BENCH = { add: { id: "90002", name: "Casey Example Jr." }, drop: { name: "Drew Placeholder" }, week: "Week 4" };
+// Synthetic copy of the observed shape: ad iframe metadata holding escaped script source with "Error", then its child lines.
+const AD = `- iframe [id="google_ads_iframe_/10000001/example/sports/fixture_top_0"] [name="1-0-1;100001;<!doctype html><html><head><script nonce=\\"c3ludGhldGlj\\">(new function _0a0b0c0d_e(){try{${"v".repeat(4000)}}catch(e){throw new Error(\\"ad limit\\")}})()</script></head></html>"]:`;
+const ads = [AD, "- generic: Advertisement", AD.replace("fixture_top", "fixture_btm").replace("- iframe ", "- iframe [active] ")];
+const addUrl = id => `${BASE}addplayer?apid=${id}`;
+const roleKey = (role, name) => JSON.stringify({ role, opts: { name, exact: true }, filters: [] });
+const dropKey = name => JSON.stringify({ role: "row", filters: [{ hasText: name }], inner: ["button", { name: "—", exact: true }] });
+const faForm = n => ['- heading "Add Free Agent" [level=2]', `- heading "${n} Open player notes for ${n} Xyz - LB Sun 10:00 am vs Abc" [level=1]:`,
+  '- heading "Select a player to drop" [level=4]', '- generic: "Waiver Priority: 2nd"', ...ads];
+const confirm = (a, d) => ['- heading "Add Free Agent" [level=2]', `- heading "${a} Open player notes for ${a} Xyz - LB" [level=1]:`,
+  '- heading "Player to Drop Select another player" [level=4]:', "- strong: Week 4", `- button "Add ${a}, Drop ${d}"`, ...ads];
+const success = (a, d) => [`- paragraph: You have successfully added ${a} and dropped ${d}`, ...ads];
+const legPages = (L, extra = {}) => ({ [addUrl(L.add.id)]: faForm(L.add.name), [`after:${dropKey(L.drop.name)}`]: `confirm:${L.add.id}`,
+  [`confirm:${L.add.id}`]: confirm(L.add.name, L.drop.name), [`after:${roleKey("button", `Add ${L.add.name}, Drop ${L.drop.name}`)}`]: `done:${L.add.id}`,
+  [`done:${L.add.id}`]: success(L.add.name, L.drop.name), ...extra });
+function browserTab(pages, deniedWaits = []) {
+  const log = []; let current = "start", waits = 0;
+  const shown = chain => (pages[current] ?? []).some(x => chain.text === undefined ? x.startsWith(`- ${chain.role} "${chain.opts.name}"`)
+    : chain.text instanceof RegExp ? chain.text.test(x.replace(/^- \w+: /, "")) : x.endsWith(`: ${chain.text}`));
+  const locator = chain => ({
+    filter: f => locator({ ...chain, filters: [...chain.filters, f] }), getByRole: (role, opts) => locator({ ...chain, inner: [role, opts] }),
+    first: () => locator(chain),
+    waitFor: async () => { log.push(["wait"]);
+      if (deniedWaits.includes(++waits)) throw new Error("PermissionDenied: browser tool access blocked by policy");
+      current = pages[`later:${current}`] ?? current; if (!shown(chain)) throw Object.assign(new Error("Timeout 1000ms exceeded"), { name: "TimeoutError" }); },
+    click: async () => { const key = JSON.stringify(chain); log.push(["click", key]);
+      if (!pages[`after:${key}`]) throw new Error("locator.click: Timeout exceeded"); current = pages[`after:${key}`]; },
+  });
+  return { log,
+    goto: async url => { log.push(["goto", url]); current = url; },
+    url: async () => current.startsWith("http") ? current : current.startsWith("confirm") ? `${addUrl(current.slice(8))}&stage=2` : TEAM,
+    playwright: { domSnapshot: async () => (pages[current] ?? []).join("\n"),
+      getByRole: (role, opts) => locator({ role, opts, filters: [] }), getByText: text => locator({ text, filters: [] }) } };
+}
+const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+const loadRelease = (tab, expires = FUTURE) => new AsyncFunction("nodeRepl", "releaseTab", releaseBrowserLoadSource({
+  binding: "hpv2", tab: "releaseTab", league: "100200", team: "3", expires, waitMs: 1000 }) + "return hpv2;")({ write() {} }, tab);
+const finals = (tab, L) => tab.log.filter(x => x[0] === "click" && x[1] === roleKey("button", `Add ${L.add.name}, Drop ${L.drop.name}`)).length;
+const clicks = tab => tab.log.filter(x => x[0] === "click").length;
+// Every output keeps version, alarm evidence, final-action/click state and client timestamps.
+const evidence = r => {
+  assert.equal(r.v, RELEASE_BROWSER_VERSION); assert.ok(Number.isInteger(r.alarmCount) && Array.isArray(r.alarms));
+  assert.equal(typeof r.finalActionMayHaveOccurred, "boolean"); assert.ok("click" in r);
+  assert.ok(r.t0 <= r.t1 && !Number.isNaN(Date.parse(r.t0)) && !Number.isNaN(Date.parse(r.t1))); return r;
+};
+
+test("release browser source is versioned, self-contained and defines without navigating", async () => {
+  const body = createReleaseBrowser.toString();
+  assert.ok(!/\b(process|require|Buffer|globalThis|import|RELEASE_BROWSER_VERSION)\b/.test(body));
+  assert.ok(body.includes(`"${RELEASE_BROWSER_VERSION}"`));
+  const tab = browserTab({}), hp = await loadRelease(tab);
+  assert.equal(hp.version, RELEASE_BROWSER_VERSION); assert.equal(tab.log.length, 0);
+  for (const bad of [{ waitMs: 0 }, { expires: "2026-10-21T19:00Z" }, { tab: undefined }, { team: "07" }])
+    assert.throws(() => createReleaseBrowser({ tab, league: "100200", team: "3", expires: FUTURE, waitMs: 1000, ...bad }), /release_browser_config_invalid/);
+  assert.throws(() => releaseBrowserLoadSource({ binding: "a;b", tab: "releaseTab" }), /release_browser_binding_invalid/);
+});
+
+test("ad iframe metadata never alarms and an explicit success clicks the final button exactly once", async () => {
+  const tab = browserTab({ ...legPages(LB), ...legPages(BENCH) }), hp = await loadRelease(tab);
+  assert.equal(evidence(await hp.stage(LB)).result, "STAGED_NOT_SUBMITTED");
+  const r = evidence(await hp.submit(LB, BENCH));
+  assert.equal(r.result, "SUBMITTED_SUCCESS_TEXT"); assert.equal(r.alarmCount, 0); assert.equal(r.err, null); assert.equal(typeof r.click, "string");
+  assert.deepEqual(r.lines, ["- paragraph: You have successfully added Avery Synthetic and dropped Blake Fixture"]);
+  assert.equal(evidence(r.next).result, "STAGED_NOT_SUBMITTED"); assert.ok(r.next.t0 >= r.click); assert.equal(r.next.finalActionMayHaveOccurred, false);
+  assert.equal(finals(tab, LB), 1); assert.equal(finals(tab, BENCH), 0);
+  assert.equal(evidence(await hp.submit(LB, null)).result, "STOP_STAGE_STALE_OR_CHANGED_NOT_CLICKED"); assert.equal(finals(tab, LB), 1);
+  const seen = evidence(await hp.inspect());
+  assert.equal(seen.result, "INSPECTED_NO_ALARM"); assert.equal(seen.iframeMetadataLines, 2);
+});
+
+test("visible iframe content, unparsed iframe lines and top-level stop signals alarm before any final click", async () => {
+  for (const signal of [[AD, "- paragraph: Error loading roster"], ['- iframe [id="frame"]: Something went wrong'],
+    ['- iframe [name="1-0-45;<script>throw new Error(\\"x'], ["- paragraph: Transaction limit reached"], ["- alert: Your account is restricted"],
+    ["- dialog: Verify it's you"], ['- alert: "Please sign in to continue"'], ["- paragraph: Too many requests. Try again later."]]) {
+    const tab = browserTab({ ...legPages(LB), ...legPages(BENCH) }), hp = await loadRelease(tab);
+    assert.equal((await hp.stage(LB)).result, "STAGED_NOT_SUBMITTED");
+    tab.playwright.domSnapshot = async () => [...confirm(LB.add.name, LB.drop.name), ...signal].join("\n");
+    const r = evidence(await hp.submit(LB, BENCH));
+    assert.equal(r.result, "STOP_ALARM_NOT_CLICKED", signal.at(-1)); assert.equal(r.finalActionMayHaveOccurred, false);
+    assert.deepEqual(r.alarms, [signal.at(-1).slice(0, 200)]); assert.equal(finals(tab, LB), 0);
+    const after = evidence(await hp.stage(BENCH)); // a real stop signal halts every later write in this instance
+    assert.equal(after.result, "STOP_HALTED_AFTER_PRIOR_ALARM_OR_ERROR"); assert.equal(tab.log.filter(x => x[0] === "goto").length, 1);
+  }
+  const tab = browserTab(legPages(LB, { [addUrl(LB.add.id)]: [...faForm(LB.add.name), "- alert: Daily add limit reached"] })), hp = await loadRelease(tab);
+  assert.equal(evidence(await hp.stage(LB)).result, "STOP_ALARM_NOT_CLICKED"); assert.equal(clicks(tab), 0);
+});
+
+test("a delayed confirmation is awaited within the bound; errors during the wait stop without a final click", async () => {
+  const pending = { [`after:${dropKey(LB.drop.name)}`]: "pending", pending: faForm(LB.add.name) };
+  let tab = browserTab(legPages(LB, { ...pending, "later:pending": `confirm:${LB.add.id}` })), hp = await loadRelease(tab);
+  let r = evidence(await hp.stage(LB));
+  assert.equal(r.result, "STAGED_NOT_SUBMITTED"); assert.equal(clicks(tab), 1); assert.equal(r.waits.length, 2);
+  tab = browserTab(legPages(LB, pending)); hp = await loadRelease(tab);
+  r = evidence(await hp.stage(LB));
+  assert.equal(r.result, "STOP_CONFIRMATION_MISMATCH"); assert.match(r.waits[1], /^timeout/);
+  assert.equal(evidence(await hp.submit(LB, null)).result, "STOP_STAGE_STALE_OR_CHANGED_NOT_CLICKED"); assert.equal(clicks(tab), 1);
+  tab = browserTab(legPages(LB, { ...pending, "later:pending": "failed", failed: [...faForm(LB.add.name), "- alert: Something went wrong. Please try again later."] }));
+  hp = await loadRelease(tab); r = evidence(await hp.stage(LB));
+  assert.equal(r.result, "STOP_ALARM_NOT_CLICKED"); assert.equal(clicks(tab), 1);
+  assert.equal((await hp.submit(LB, null)).result, "STOP_HALTED_AFTER_PRIOR_ALARM_OR_ERROR"); assert.equal(finals(tab, LB), 0);
+  tab = browserTab({ [addUrl(LB.add.id)]: faForm(LB.add.name) }); hp = await loadRelease(tab); // drop control missing: a tool error is a STOP
+  r = evidence(await hp.stage(LB)); assert.equal(r.result, "STOP_TOOL_ERROR_NO_FINAL_ACTION"); assert.match(r.err, /Timeout/);
+});
+
+test("expired, inexact, ambiguous or failed submissions never click or resubmit", async () => {
+  let tab = browserTab(legPages(LB)), hp = await loadRelease(tab, "2026-01-01T00:00:00.000Z");
+  await hp.stage(LB); let r = evidence(await hp.submit(LB, null));
+  assert.equal(r.result, "STOP_EXPIRED_NOT_CLICKED"); assert.equal(r.click, null); assert.equal(finals(tab, LB), 0);
+  for (const page of [[...confirm(LB.add.name, LB.drop.name), '- button "Add Avery Synthetic, Drop Drew Placeholder"'],
+    confirm(LB.add.name, LB.drop.name).map(x => x.replace("Week 4", "Week 5")), [...confirm(LB.add.name, LB.drop.name), "- paragraph: Your claim will process Wednesday"]]) {
+    tab = browserTab(legPages(LB, { [`confirm:${LB.add.id}`]: page })); hp = await loadRelease(tab);
+    assert.equal(evidence(await hp.stage(LB)).result, "STOP_CONFIRMATION_MISMATCH");
+    assert.equal((await hp.submit(LB, null)).result, "STOP_STAGE_STALE_OR_CHANGED_NOT_CLICKED"); assert.equal(finals(tab, LB), 0);
+  }
+  for (const [done, expected] of [[["- paragraph: Your request is being processed"], "POSSIBLE_SUBMISSION_RECONCILE_READ_ONLY"],
+    [[...success(LB.add.name, LB.drop.name), "- paragraph: Weekly add limit reached"], "STOP_ALARM_AFTER_CLICK_POSSIBLE_SUBMISSION"],
+    [undefined, "POSSIBLE_SUBMISSION_RECONCILE_READ_ONLY"]]) {
+    const pages = legPages(LB, { [`done:${LB.add.id}`]: done, ...legPages(BENCH) });
+    if (!done) delete pages[`after:${roleKey("button", "Add Avery Synthetic, Drop Blake Fixture")}`]; // the click itself fails
+    tab = browserTab(pages); hp = await loadRelease(tab); await hp.stage(LB);
+    r = evidence(await hp.submit(LB, BENCH));
+    assert.equal(r.result, expected); assert.equal(r.success, false); assert.equal(r.finalActionMayHaveOccurred, true); assert.equal(r.next, undefined);
+    assert.equal(finals(tab, LB), 1); assert.equal(tab.log.filter(x => x[1] === addUrl(BENCH.add.id)).length, 0);
+    assert.equal((await hp.stage(LB)).result, "STOP_HALTED_AFTER_PRIOR_ALARM_OR_ERROR");
+    assert.equal((await hp.submit(LB, null)).result, "STOP_HALTED_AFTER_PRIOR_ALARM_OR_ERROR"); assert.equal(finals(tab, LB), 1);
+  }
+});
+
+test("start awaits the exact destination and stops on alarm or expiry before the destination click", async () => {
+  const src = roleKey("button", "Click here to edit BN Avery Synthetic"), dest = roleKey("button", "Click here to edit LB");
+  const roster = ['- button "Click here to edit BN Avery Synthetic"', '- button "Click here to edit D Jordan Sample"', ...ads];
+  const picked = ["- generic: The LB slot on your roster is empty.", '- button "Click here to edit LB"', '- button "Click here to edit D Jordan Sample"', ...ads];
+  const pages = extra => ({ [TEAM]: roster, [`after:${src}`]: "picking", picking: roster, "later:picking": "picked", picked,
+    [`after:${dest}`]: "saved", saved: ["- text: Moved", "- paragraph: All changes saved", ...ads], ...extra });
+  let tab = browserTab(pages()), hp = await loadRelease(tab);
+  let r = evidence(await hp.start({ name: "Avery Synthetic", slot: "LB" }, null));
+  assert.equal(r.result, "DESTINATION_CLICKED_VERIFY_NEXT"); assert.deepEqual(r.saved, ["- text: Moved", "- paragraph: All changes saved"]);
+  assert.deepEqual(tab.log.filter(x => x[0] === "click").map(x => x[1]), [src, dest]);
+  tab = browserTab(pages({ picked: [...picked, "- alert: Lineup changes are not allowed"] })); hp = await loadRelease(tab);
+  r = evidence(await hp.start({ name: "Avery Synthetic", slot: "LB" }, null)); assert.equal(r.result, "STOP_ALARM_NOT_CLICKED"); assert.equal(clicks(tab), 1);
+  tab = browserTab(pages()); hp = await loadRelease(tab, "2026-01-01T00:00:00.000Z");
+  r = evidence(await hp.start({ name: "Avery Synthetic", slot: "LB" }, null));
+  assert.equal(r.result, "STOP_EXPIRED_NOT_CLICKED"); assert.equal(r.finalActionMayHaveOccurred, false); assert.equal(clicks(tab), 1);
+});
+
+test("a tool/permission denial during any bounded wait stops before further clicks and halts the instance", async () => {
+  const final = roleKey("button", "Add Avery Synthetic, Drop Blake Fixture");
+  for (const [denied, expected, clickCount] of [[[1], "STOP_TOOL_ERROR_NO_FINAL_ACTION", 0], [[2], "STOP_TOOL_ERROR_NO_FINAL_ACTION", 1]]) {
+    const tab = browserTab(legPages(LB), denied), hp = await loadRelease(tab); // expected control stays visible
+    const r = evidence(await hp.stage(LB));
+    assert.equal(r.result, expected); assert.match(r.err, /^PermissionDenied: browser tool access blocked/); assert.equal(clicks(tab), clickCount);
+    assert.equal((await hp.submit(LB, null)).result, "STOP_HALTED_AFTER_PRIOR_ALARM_OR_ERROR"); assert.equal(finals(tab, LB), 0);
+  }
+  let tab = browserTab({ ...legPages(LB), ...legPages(BENCH) }, [3]), hp = await loadRelease(tab);
+  assert.equal((await hp.stage(LB)).result, "STAGED_NOT_SUBMITTED");
+  let r = evidence(await hp.submit(LB, BENCH)); // denied after the final click while the success text is visible
+  assert.equal(r.result, "POSSIBLE_ACTION_RECONCILE_READ_ONLY"); assert.equal(r.finalActionMayHaveOccurred, true); assert.match(r.err, /PermissionDenied/);
+  assert.equal(r.success, undefined); assert.equal(r.next, undefined); assert.equal(tab.log.filter(x => x[1] === final).length, 1);
+  assert.equal(tab.log.filter(x => x[1] === addUrl(BENCH.add.id)).length, 0);
+  assert.equal((await hp.stage(BENCH)).result, "STOP_HALTED_AFTER_PRIOR_ALARM_OR_ERROR");
+  const src = roleKey("button", "Click here to edit BN Avery Synthetic"), dest = roleKey("button", "Click here to edit LB");
+  const roster = ['- button "Click here to edit BN Avery Synthetic"'], picked = ["- generic: The LB slot on your roster is empty.", '- button "Click here to edit LB"'];
+  const pages = { [TEAM]: roster, [`after:${src}`]: "picked", picked, [`after:${dest}`]: "saved", saved: ["- text: Moved"] };
+  for (const [denied, expected, clickCount, mayHave] of [[[2], "STOP_TOOL_ERROR_NO_FINAL_ACTION", 1, false], [[3], "POSSIBLE_ACTION_RECONCILE_READ_ONLY", 2, true]]) {
+    tab = browserTab(pages, denied); hp = await loadRelease(tab);
+    r = evidence(await hp.start({ name: "Avery Synthetic", slot: "LB" }, LB));
+    assert.equal(r.result, expected); assert.match(r.err, /PermissionDenied/); assert.equal(clicks(tab), clickCount);
+    assert.equal(r.finalActionMayHaveOccurred, mayHave); assert.equal(r.next, undefined);
+    assert.equal((await hp.start({ name: "Avery Synthetic", slot: "LB" }, null)).result, "STOP_HALTED_AFTER_PRIOR_ALARM_OR_ERROR"); assert.equal(clicks(tab), clickCount);
+  }
 });
