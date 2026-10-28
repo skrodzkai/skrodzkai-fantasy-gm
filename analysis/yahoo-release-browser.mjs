@@ -72,7 +72,7 @@ export function createReleaseBrowser(config) {
       r.failure = { operation: r.trace.at(-1)?.name ?? null, category: "UNKNOWN_TOOL_FAILURE" };
       stop(r, r.finalActionMayHaveOccurred ? "POSSIBLE_ACTION_RECONCILE_READ_ONLY" : "STOP_TOOL_ERROR_NO_FINAL_ACTION");
     }
-    if (r.alarmCount || r.err || /^(STOP_ALARM|POSSIBLE_)/.test(r.result)) halted ??= { leg: r.leg, result: r.result, t1: r.t1 };
+    if (r.failure || r.alarmCount || r.err || /^(STOP_ALARM|POSSIBLE_)/.test(r.result)) halted ??= { leg: r.leg, result: r.result, t1: r.t1 };
     return r;
   }
   // Read-only: the current page's alarm evidence, without navigation or click.

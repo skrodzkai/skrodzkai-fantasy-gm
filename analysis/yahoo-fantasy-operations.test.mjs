@@ -345,7 +345,7 @@ test("a delayed confirmation is awaited within the bound; errors during the wait
   tab = browserTab(legPages(LB, pending)); hp = await loadRelease(tab);
   r = evidence(await hp.stage(LB));
   assert.equal(r.result, "STOP_CONFIRMATION_MISMATCH"); assert.match(r.waits[1], /^timeout/);
-  assert.equal(evidence(await hp.submit(LB, null)).result, "STOP_STAGE_STALE_OR_CHANGED_NOT_CLICKED"); assert.equal(clicks(tab), 1);
+  assert.equal(evidence(await hp.submit(LB, null)).result, "STOP_HALTED_AFTER_PRIOR_ALARM_OR_ERROR"); assert.equal(clicks(tab), 1);
   tab = browserTab(legPages(LB, { ...pending, "later:pending": "failed", failed: [...faForm(LB.add.name), "- alert: Something went wrong. Please try again later."] }));
   hp = await loadRelease(tab); r = evidence(await hp.stage(LB));
   assert.equal(r.result, "STOP_ALARM_NOT_CLICKED"); assert.equal(clicks(tab), 1);
@@ -371,7 +371,7 @@ test("a delayed confirmation is awaited within the bound; errors during the wait
     tab = browserTab(legPages(jets, { [addUrl(jets.add.id)]: faForm(jets.add.name, rows) }));
     hp = await loadRelease(tab); r = evidence(await hp.stage(jets));
     assert.equal(r.result, "STOP_DROP_ROW_NOT_EXACT"); assert.equal(r.dropRows, count); assert.equal(clicks(tab), 0);
-    assert.equal((await hp.submit(jets, null)).result, "STOP_STAGE_STALE_OR_CHANGED_NOT_CLICKED"); assert.equal(clicks(tab), 0);
+    assert.equal((await hp.submit(jets, null)).result, "STOP_HALTED_AFTER_PRIOR_ALARM_OR_ERROR"); assert.equal(clicks(tab), 0);
   }
   tab = browserTab({ [addUrl(LB.add.id)]: faForm(LB.add.name, playerRow(LB.drop.name).slice(0, -1)) }); hp = await loadRelease(tab); // exact row but missing button is a tool STOP
   r = evidence(await hp.stage(LB)); assert.equal(r.result, "STOP_TOOL_ERROR_NO_FINAL_ACTION"); assert.match(r.err, /missing drop control/); assert.equal(finals(tab, LB), 0);
@@ -385,7 +385,7 @@ test("expired, inexact, ambiguous or failed submissions never click or resubmit"
     confirm(LB.add.name, LB.drop.name).map(x => x.replace("Week 4", "Week 5")), [...confirm(LB.add.name, LB.drop.name), "- paragraph: Your claim will process Wednesday"]]) {
     tab = browserTab(legPages(LB, { [`confirm:${LB.add.id}`]: page })); hp = await loadRelease(tab);
     assert.equal(evidence(await hp.stage(LB)).result, "STOP_CONFIRMATION_MISMATCH");
-    assert.equal((await hp.submit(LB, null)).result, "STOP_STAGE_STALE_OR_CHANGED_NOT_CLICKED"); assert.equal(finals(tab, LB), 0);
+    assert.equal((await hp.submit(LB, null)).result, "STOP_HALTED_AFTER_PRIOR_ALARM_OR_ERROR"); assert.equal(finals(tab, LB), 0);
   }
   for (const [done, expected] of [[["- paragraph: Your request is being processed"], "POSSIBLE_SUBMISSION_RECONCILE_READ_ONLY"],
     [[...success(LB.add.name, LB.drop.name), "- paragraph: Weekly add limit reached"], "STOP_ALARM_AFTER_CLICK_POSSIBLE_SUBMISSION"],
@@ -459,6 +459,11 @@ const { createHash } = await import("node:crypto");
 const { mkdir } = await import("node:fs/promises");
 const { recoveryGate, recoveryRecord } = await import("./yahoo-fantasy-operations.mjs");
 const hash = text => createHash("sha256").update(text).digest("hex");
+function syntheticRosterRow(id, name, slot, teamSlug = null) {
+  const control = `Click here to edit ${slot.replaceAll("/", "_")} ${name}`;
+  const url = teamSlug ? `https://sports.yahoo.com/nfl/teams/${teamSlug}/` : `https://sports.yahoo.com/nfl/players/${id}`;
+  return `    - row "${control} ${name}":\n      - cell "${control}":\n        - button "${control}": ${slot}\n      - cell "${name}":\n        - link "${name}":\n          - /url: ${url}`;
+}
 async function recoveryFixture() {
   const now = Date.now(), stamp = offset => new Date(now + offset).toISOString();
   const player = (id, name, selectedPosition) => ({ playerKey: `461.p.${id}`, name, selectedPosition,
@@ -469,14 +474,14 @@ async function recoveryFixture() {
     roster: { teamKey, week: 4, players: [player("90004", "Quarterback Synthetic", "QB"), player("90003", "Linebacker Fixture", "LB")] },
     pending: [], completedRecent: [] };
   const current = structuredClone(baseline); current.verifiedAt = stamp(-10000);
-  const trace = { v: RELEASE_BROWSER_VERSION, leg: "90001", t0: stamp(-60000), t1: stamp(-50000), click: null,
+  const trace = { v: RELEASE_BROWSER_VERSION, leg: "90001", url: "https://football.fantasysports.yahoo.com/f1/420010/addplayer?apid=90001", t0: stamp(-60000), t1: stamp(-50000), click: null,
     finalActionMayHaveOccurred: false, alarmCount: 0, alarms: [], dropRows: 2, result: "STOP_DROP_ROW_NOT_EXACT",
     failure: { operation: "stage.locate-drop", category: "PRE_FINAL_LOCATOR_COUNT_MISMATCH" },
     trace: ["stage.navigate", "stage.wait-form", "stage.snapshot-form", "stage.locate-drop"].map(name =>
       ({ name, startedAt: stamp(-60000), finishedAt: stamp(-60000), outcome: "completed" })) };
   const ui = { observedAt: stamp(-9000), method: "isolated-supported-domSnapshot", url: `https://football.fantasysports.yahoo.com/f1/420010/7`,
     rows: current.roster.players.map(p => ({ id: p.playerKey.split(".").at(-1), slot: p.selectedPosition,
-      line: `- row "${p.name}" ${p.selectedPosition} /players/${p.playerKey.split(".").at(-1)}` })) };
+      line: syntheticRosterRow(p.playerKey.split(".").at(-1), p.name, p.selectedPosition) })) };
   ui.snapshot = ui.rows.map(r => r.line).join("\n");
   const conditions = Object.fromEntries(["stop", "access", "ownership", "claimsTrades", "retainedSlots", "dropSlotLegality", "eligibilityIRCapacityLimits", "officialHealthRole", "trigger", "individualLocks"].map(key => [key, `EXACT_CURRENT_${key}`]));
   const root = { type: "RECOVERY_DELEGATED", id: "synthetic-delegation", rootId: "synthetic-acquisition", jobId: "synthetic-job", executor: "sole-synthetic-executor",
@@ -489,7 +494,7 @@ async function recoveryFixture() {
     attempts: 1, recoveryUsed: 0, status: "PRE_FINAL_TECHNICAL_STOP", startedAt: trace.t0, factoryVersion: trace.v, factorySha256: hash("synthetic prior defective factory bytes") };
   const correction = { type: "RECOVERY_CORRECTION_ADOPTED", rootId: root.rootId, jobId: root.jobId,
     failedOperation: "stage.locate-drop", diagnosis: "synthetic duplicate row selector", defectReference: "synthetic-reproduction",
-    fixReference: "synthetic-precise-selector-fix", reviewReference: "synthetic-candidate-review", adoptionReference: "synthetic-install-receipt", adoptedAt: stamp(-20000), factoryVersion: RELEASE_BROWSER_VERSION };
+    fixReference: "synthetic-precise-selector-fix", reviewReference: "synthetic-candidate-review", adoptionReference: "synthetic-install-receipt", adoptedAt: stamp(-20000), factoryVersion: `${RELEASE_BROWSER_VERSION}-synthetic-corrected` };
   const targets = { apiReadOnly: true, identityVerified: true, membershipVerified: true, target: current.target, settings: current.settings,
     expectedWeek: 4, verifiedAt: stamp(-10000), requestCompletedAt: stamp(-10000), ownershipRequestCompletedAt: stamp(-10000), expiresAt: stamp(60000),
     players: [{ yahooId: "90001", playerKey: "461.p.90001", name: "Addition Example", ownership: "FA", ownerTeamKey: null, waiverDate: null }] };
@@ -499,7 +504,7 @@ async function recoveryFixture() {
     completionAndVerificationMs: 60000, timingBasis: "synthetic measured execution plus independent verification bound" };
   const f = { now, stamp, root, stopped, correction, baseline, current, trace, ui, targets, preflight, extra: [],
     approval: "Synthetic decision evidence; never a real approval transcript.\n", policy: "Synthetic adopted policy bytes.\n",
-    factory: await readFile(new URL("./yahoo-release-browser.mjs", import.meta.url), "utf8") };
+    factory: (await readFile(new URL("./yahoo-release-browser.mjs", import.meta.url), "utf8")).replaceAll(RELEASE_BROWSER_VERSION, correction.factoryVersion) };
   f.save = async () => {
     const dir = await mkdtemp("/private/tmp/yahoo-recovery-"), operations = join(dir, "operations"); await mkdir(operations);
     const packet = { phase: "reserve", rootId: root.rootId, jobId: root.jobId, executor: root.executor, requestedAt: stamp(0), action: structuredClone(root.action), evidence: {} };
@@ -531,9 +536,9 @@ function childRecovery(f) {
   f.stopped.rootId = f.root.rootId; f.stopped.attemptId = f.root.rootId; f.correction.rootId = f.root.rootId; f.preflight.rootId = f.root.rootId;
   for (const snapshot of [f.baseline, f.current]) snapshot.roster.players[1] = { ...snapshot.roster.players[1], playerKey: "461.p.90001", name: "Addition Example", selectedPosition: "BN", eligiblePositions: ["LB"] };
   f.targets.players[0].ownership = "owned"; f.targets.players[0].ownerTeamKey = teamKey;
-  f.ui.rows[1] = { id: "90001", slot: "BN", line: '- row "Addition Example" BN /players/90001' }; f.ui.snapshot = f.ui.rows.map(r => r.line).join("\n");
+  f.ui.rows[1] = { id: "90001", slot: "BN", line: syntheticRosterRow("90001", "Addition Example", "BN") }; f.ui.snapshot = f.ui.rows.map(r => r.line).join("\n");
   f.trace.trace = ["start.navigate", "start.wait-source", "start.snapshot-source"].map(name => ({ name, startedAt: f.trace.t0, finishedAt: f.trace.t0, outcome: "completed" }));
-  f.trace.result = "STOP_SOURCE_NOT_ON_BN";
+  f.trace.result = "STOP_SOURCE_NOT_ON_BN"; f.trace.url = "https://football.fantasysports.yahoo.com/f1/420010/7"; f.trace.leg = "start:Addition Example";
   f.trace.failure = { operation: "start.snapshot-source", category: "PRE_FINAL_RENDER_MISMATCH" };
   f.correction.failedOperation = "start.snapshot-source"; f.preflight.locks = [{ id: "90001", at: f.stamp(3600000) }];
   f.extra.push({ type: "RECOVERY_VERIFIED", rootId: "synthetic-parent", jobId: f.root.jobId,
@@ -628,7 +633,7 @@ test("recovery all material preflight facts, independent evidence and locks fail
     f => { f.trace.trace = []; }, f => { f.trace.trace.push({ ...f.trace.trace.at(-1), name: "submit.final" }); },
     f => { f.trace.trace[1].outcome = "failed"; }, f => { f.stopped.status = "EXECUTION_FAILED"; },
     f => { f.stopped.status = "VERIFY_FAILED"; }, f => { f.stopped.status = "BLOCKED_OWNER_ACTION"; },
-    f => { childRecovery(f); f.extra = []; }, f => { f.extra.push({ type: "RECOVERY_JOB_STOP", jobId: f.root.jobId, rootId: "other-action", reason: "ACCOUNT_RATE_LIMIT" }); }, f => { f.root.conditions.stop = true; }, f => { f.stopped.factorySha256 = hash(f.factory); },
+    f => { childRecovery(f); f.extra = []; }, f => { f.extra.push({ type: "RECOVERY_JOB_STOP", jobId: f.root.jobId, rootId: "other-action", reason: "ACCOUNT_RATE_LIMIT" }); }, f => { f.root.conditions.stop = true; }, f => { f.stopped.factorySha256 = hash(f.factory); }, f => { f.correction.factoryVersion = f.stopped.factoryVersion; },
     ...["claimsTrades", "retainedSlots", "dropSlotLegality", "eligibilityIRCapacityLimits", "officialHealthRole", "trigger", "individualLocks", "stop", "access", "ownership"].map(key => f => { f.preflight.conditions.find(c => c.key === key).actual = "UNKNOWN"; }),
   ];
   for (const mutate of mutations) assert.equal((await evaluateRecovery(mutate)).result.verdict, "HOLD");
@@ -656,8 +661,8 @@ function observedDefenseRows(f, defense = "Jets") {
     snapshot.roster.players.push({ playerKey: "461.p.90005", name: "Matt Gay", selectedPosition: "BN", eligiblePositions: ["K"], displayPosition: "K", editable: "1", undroppable: "0" });
   }
   f.root.action.dropId = id; f.preflight.locks[1].id = id;
-  f.ui.rows[1] = { id, slot: "DEF", line: `- row "DEF ${defense} NYJ - DEF":\n  - cell "DEF"\n  - link "${defense}":\n    /url: https://sports.yahoo.com/nfl/teams/${slug}/` };
-  f.ui.rows.push({ id: "90005", slot: "BN", line: '- row "BN Matt Gay K @NY Jets":\n  - link "Matt Gay":\n    /url: https://sports.yahoo.com/nfl/players/90005/\n  - link "Jets":\n    /url: https://sports.yahoo.com/nfl/teams/ny-jets/' });
+  f.ui.rows[1] = { id, slot: "DEF", line: syntheticRosterRow(id, defense, "DEF", slug) };
+  f.ui.rows.push({ id: "90005", slot: "BN", line: `${syntheticRosterRow("90005", "Matt Gay", "BN")}\n        - link "Jets":\n          - /url: https://sports.yahoo.com/nfl/teams/ny-jets/` });
   f.ui.snapshot = f.ui.rows.map(row => row.line).join("\n");
 }
 
@@ -709,6 +714,110 @@ test("recovery excludes unknown snapshot/read/service exceptions without parsing
       // No error string at all: structured unknown failure remains ineligible.
       delete f.trace.err;
     });
+    assert.equal(result.verdict, "HOLD");
+  }
+});
+
+// Formal-review reproducers, adapted to the confirmed indented '- /url:' shape.
+test("REPRO-A bench DEF cannot alias a bench player's opponent link or share its row", async () => {
+  const { result } = await evaluateRecovery(f => {
+    observedDefenseRows(f);
+    for (const snapshot of [f.baseline, f.current]) snapshot.roster.players[1].selectedPosition = "BN";
+    f.ui.rows[1] = { id: "100020", slot: "BN", line: f.ui.rows[2].line };
+    f.ui.snapshot = [f.ui.rows[0].line, f.ui.rows[2].line].join("\n");
+  });
+  assert.equal(result.reason, "UI_STATE_UNKNOWN");
+});
+
+test("REPRO-B exact indented row boundaries cannot borrow the next row's slot", async () => {
+  const { result } = await evaluateRecovery(f => {
+    const span = `${syntheticRosterRow("90003", "Linebacker Fixture", "BN")}\n    - row "LB Empty":\n      - cell "LB"`;
+    f.ui.rows[1].line = span;
+    f.ui.snapshot = [f.ui.rows[0].line, span].join("\n");
+  });
+  assert.equal(result.reason, "UI_STATE_UNKNOWN");
+});
+
+test("REPRO-C redirected stage/start/confirmation traces never qualify as render failure", async () => {
+  for (const mutate of [
+    f => { childRecovery(f); f.trace.url = "https://login.yahoo.com/consent"; },
+    f => { f.trace.url = "https://example.test/redirect"; },
+    f => { childRecovery(f); f.trace.url = "https://football.fantasysports.yahoo.com/f1/420010/72"; },
+    f => {
+      f.trace.result = "STOP_CONFIRMATION_MISMATCH"; f.trace.confirmUrl = "https://login.yahoo.com/consent";
+      f.trace.trace = ["stage.navigate", "stage.wait-form", "stage.snapshot-form", "stage.locate-drop", "stage.select-drop", "stage.wait-confirmation", "stage.snapshot-confirmation"].map(name => ({ name, startedAt: f.trace.t0, finishedAt: f.trace.t0, outcome: "completed" }));
+      f.trace.failure = { operation: "stage.snapshot-confirmation", category: "PRE_FINAL_RENDER_MISMATCH" };
+    },
+  ]) assert.equal((await evaluateRecovery(mutate)).result.reason, "TRACE_CONTEXT_UNKNOWN");
+});
+
+test("REPRO-D same action/job under another root cannot reset budget, even with reordered action fields", async () => {
+  for (const type of ["RECOVERY_DELEGATED", "RECOVERY_RESERVED", "RECOVERY_RESULT"]) {
+    const { result } = await evaluateRecovery(f => {
+      const action = { slot: f.root.action.slot, dropId: f.root.action.dropId, addId: f.root.action.addId, kind: f.root.action.kind };
+      f.extra.push({ type, rootId: "earlier-alias-root", jobId: f.root.jobId, action, recoveryUsed: 1, status: "PRE_FINAL_TECHNICAL_STOP" });
+    });
+    assert.equal(result.reason, "ACTION_JOB_ALREADY_RECORDED");
+  }
+});
+
+test("REPRO-E stage and child traces must identify the exact approved leg", async () => {
+  for (const mutate of [f => { f.trace.leg = "99999"; }, f => { childRecovery(f); f.trace.leg = "start:Different Synthetic"; }])
+    assert.equal((await evaluateRecovery(mutate)).result.reason, "TRACE_LEG_CHANGED");
+});
+
+test("REPRO-F every identity-linked UI row must match the saved roster one to one", async () => {
+  const { result } = await evaluateRecovery(f => { f.ui.snapshot += `\n${syntheticRosterRow("90001", "Addition Example", "BN")}`; });
+  assert.equal(result.reason, "UI_STATE_UNKNOWN");
+});
+
+test("confirmed editable row format supports slash-slot labels and missing controls HOLD", async () => {
+  const accepted = await evaluateRecovery(f => {
+    for (const snapshot of [f.baseline, f.current]) {
+      snapshot.settings.rosterPositions.push({ position: "W/R/T", count: 1 });
+      snapshot.roster.players[0].selectedPosition = "W/R/T";
+    }
+    f.ui.rows[0] = { id: "90004", slot: "W/R/T", line: syntheticRosterRow("90004", "Quarterback Synthetic", "W/R/T") };
+    f.ui.snapshot = f.ui.rows.map(row => row.line).join("\n");
+  });
+  assert.equal(accepted.result.verdict, "RESERVATION_REQUIRED");
+  const pending = await evaluateRecovery(f => {
+    f.ui.rows[1].line = f.ui.rows[1].line.replace('        - button "Click here to edit LB Linebacker Fixture": LB\n', "");
+    f.ui.snapshot = f.ui.rows.map(row => row.line).join("\n");
+  });
+  assert.equal(pending.result.reason, "UI_STATE_UNKNOWN");
+});
+
+test("all structured locator/render stops permanently halt old stage/submit/start without tool activity", async () => {
+  const src = roleKey("button", "Click here to edit BN Avery Synthetic");
+  const scenarios = [
+    { pages: legPages(LB, { [addUrl(LB.add.id)]: faForm(LB.add.name, [...playerRow(LB.drop.name), ...playerRow(LB.drop.name)]) }), call: hp => hp.stage(LB), stop: "STOP_DROP_ROW_NOT_EXACT" },
+    { pages: legPages(LB, { [`after:${dropKey(LB.drop.name)}`]: "pending", pending: faForm(LB.add.name) }), call: hp => hp.stage(LB), stop: "STOP_CONFIRMATION_MISMATCH" },
+    { pages: { [TEAM]: [] }, call: hp => hp.start({ name: "Avery Synthetic", slot: "LB" }), stop: "STOP_SOURCE_NOT_ON_BN" },
+    { pages: { [TEAM]: ['- button "Click here to edit BN Avery Synthetic"'], [`after:${src}`]: "picked", picked: [] }, call: hp => hp.start({ name: "Avery Synthetic", slot: "LB" }), stop: "STOP_DESTINATION_NOT_EXACT_EMPTY_SLOT" },
+  ];
+  for (const scenario of scenarios) {
+    const tab = browserTab(scenario.pages), hp = await loadRelease(tab), stopped = await scenario.call(hp);
+    assert.equal(stopped.result, scenario.stop); assert.ok(stopped.failure); const log = structuredClone(tab.log);
+    for (const call of [() => hp.stage(LB), () => hp.submit(LB), () => hp.start({ name: "Avery Synthetic", slot: "LB" })]) {
+      assert.equal((await call()).result, "STOP_HALTED_AFTER_PRIOR_ALARM_OR_ERROR"); assert.deepEqual(tab.log, log);
+    }
+  }
+});
+
+test("known locked retained row uses exact plain slot cell; source/drop remains editable", async () => {
+  const locked = f => {
+    for (const snapshot of [f.baseline, f.current]) snapshot.roster.players[0].editable = "0";
+    f.ui.rows[0].line = f.ui.rows[0].line.replace('      - cell "Click here to edit QB Quarterback Synthetic":\n        - button "Click here to edit QB Quarterback Synthetic": QB', '      - cell "QB":\n        - generic: QB');
+    f.ui.snapshot = f.ui.rows.map(row => row.line).join("\n");
+  };
+  assert.equal((await evaluateRecovery(locked)).result.verdict, "RESERVATION_REQUIRED");
+  for (const change of [
+    f => { f.ui.rows[0].line = f.ui.rows[0].line.replace('- generic: QB', '- generic: BN'); },
+    f => { for (const snapshot of [f.baseline, f.current]) snapshot.roster.players[0].editable = "1"; },
+    f => { for (const snapshot of [f.baseline, f.current]) snapshot.roster.players[1].editable = "0"; },
+  ]) {
+    const { result } = await evaluateRecovery(f => { locked(f); change(f); f.ui.snapshot = f.ui.rows.map(row => row.line).join("\n"); });
     assert.equal(result.verdict, "HOLD");
   }
 });

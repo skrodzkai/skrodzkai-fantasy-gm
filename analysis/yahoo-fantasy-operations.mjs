@@ -563,6 +563,39 @@ const recoveryDefenseTeams = new Map([
   ["100020", { name: "Jets", slug: "ny-jets" }],
   ["100030", { name: "Jaguars", slug: "jacksonville" }],
 ]);
+// Exact row boundaries come from snapshot indentation, not substring matches.
+// Returns only identity-linked rows; extra/unknown identities remain visible to
+// the one-to-one comparison rather than disappearing from the UI evidence.
+export function parseRecoveryRosterRows(snapshot) {
+  if (typeof snapshot !== "string") return null;
+  const lines = snapshot.split("\n"), rows = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const header = /^( *)- row(?: |:|$)/.exec(lines[i]);
+    if (!header) continue;
+    const indent = header[1].length;
+    let end = i + 1;
+    while (end < lines.length && lines[end].trim() && /^ */.exec(lines[end])[0].length > indent) end += 1;
+    const blockLines = lines.slice(i, end), block = blockLines.join("\n");
+    if (blockLines.slice(1).some(line => /^ *- row(?: |:|$)/.test(line))) return null;
+    if (!/\/(?:nfl\/)?(?:players|teams)\//.test(block)) { i = end - 1; continue; }
+    const links = [];
+    for (let j = 0; j < blockLines.length - 1; j += 1) {
+      const link = /^( *)- link ("(?:[^"\\]|\\.)*"):$/.exec(blockLines[j]);
+      const url = /^( *)- \/url: (\S+)$/.exec(blockLines[j + 1]);
+      if (link && url && url[1].length === link[1].length + 2 && /^https:\/\/sports\.yahoo\.com\/nfl\/(?:players|teams)\//.test(url[2])) {
+        try { links.push({ name: JSON.parse(link[2]), url: url[2] }); } catch { return null; }
+      }
+    }
+    const firstCellIndex = blockLines.findIndex(line => /^ */.exec(line)[0].length === indent + 2 && line.trimStart().startsWith("- cell"));
+    let cellEnd = firstCellIndex + 1;
+    while (cellEnd < blockLines.length && /^ */.exec(blockLines[cellEnd])[0].length > indent + 2) cellEnd += 1;
+    rows.push({ block, links, firstCell: blockLines[firstCellIndex]?.trimStart(),
+      slotChildren: firstCellIndex < 0 ? [] : blockLines.slice(firstCellIndex + 1, cellEnd).map(line => line.trimStart()) });
+    i = end - 1;
+  }
+  return rows;
+}
+
 export const recoveryRecord = record => `${recoveryMarker}${JSON.stringify(record)}\n\x60\x60\x60\n`;
 
 // Read only explicitly named regular evidence files. No directories, symlinks,
@@ -615,6 +648,10 @@ export async function recoveryGate(packet, now = Date.now()) {
   const roots = scoped.filter(r => r.type === "RECOVERY_DELEGATED");
   if (roots.length !== 1) return hold("DELEGATION_UNKNOWN");
   const root = roots[0], action = root.action;
+  const actionKey = a => a?.kind === "add_drop" ? [a.kind, a.addId, a.dropId, a.slot]
+    : a?.kind === "lineup_change" ? [a.kind, a.playerId, a.from, a.to] : null;
+  if (records.some(r => r.jobId === packet.jobId && r.rootId !== packet.rootId && r.action &&
+      same(actionKey(r.action), actionKey(action)))) return hold("ACTION_JOB_ALREADY_RECORDED");
   const conditions = ["stop", "access", "ownership", "claimsTrades", "retainedSlots", "dropSlotLegality", "eligibilityIRCapacityLimits", "officialHealthRole", "trigger", "individualLocks"];
   if (root.jobId !== packet.jobId || root.executor !== packet.executor || root.approvedBy !== "Joe" || root.status !== "DELEGATED_TO_MODELS" ||
       root.season !== TARGET.season || root.leagueId !== TARGET.leagueId || root.teamId !== TARGET.teamId ||
@@ -670,13 +707,20 @@ export async function recoveryGate(packet, now = Date.now()) {
     STOP_SOURCE_NOT_ON_BN: ["start.snapshot-source", "PRE_FINAL_RENDER_MISMATCH"],
     STOP_DESTINATION_NOT_EXACT_EMPTY_SLOT: ["start.snapshot-destination", "PRE_FINAL_RENDER_MISMATCH"],
   };
+  const leagueUrl = `https://football.fantasysports.yahoo.com/f1/${root.leagueId}/`;
+  const teamUrl = `${leagueUrl}${root.teamId}`;
+  if (typeof trace.url !== "string" || !(kind === "stage" ? trace.url.startsWith(leagueUrl)
+      : trace.url === teamUrl || trace.url.startsWith(`${teamUrl}?`)) ||
+      kind === "stage" && last.name === "stage.snapshot-confirmation" &&
+        (typeof trace.confirmUrl !== "string" || !trace.confirmUrl.startsWith(leagueUrl)))
+    return hold("TRACE_CONTEXT_UNKNOWN");
   const eligibleFailure = failures[trace.result];
   if (!eligibleFailure || !same([trace.failure?.operation, trace.failure?.category], eligibleFailure) ||
       last.name !== trace.failure.operation || trace.result === "STOP_DROP_ROW_NOT_EXACT" && (!Number.isSafeInteger(trace.dropRows) || trace.dropRows === 1))
     return hold("TRACE_UNKNOWN");
   if (correction.jobId !== root.jobId || correction.traceSha256 !== evidence.trace.sha256 || correction.failedOperation !== last.name ||
       !correction.diagnosis || !correction.defectReference || !correction.fixReference || !correction.reviewReference || !correction.adoptionReference ||
-      correction.factorySha256 !== evidence.factory.sha256 || correction.factorySha256 === stopped.factorySha256 || !correction.factoryVersion ||
+      correction.factorySha256 !== evidence.factory.sha256 || correction.factorySha256 === stopped.factorySha256 || !correction.factoryVersion || correction.factoryVersion === stopped.factoryVersion ||
       !files.factory.toString("utf8").includes(`export const RELEASE_BROWSER_VERSION = "${correction.factoryVersion}";`) ||
       !Number.isFinite(isoClock(correction.adoptedAt)) || isoClock(correction.adoptedAt) > isoClock(packet.requestedAt))
     return hold("REPAIR_ADOPTION_UNKNOWN");
@@ -702,6 +746,7 @@ export async function recoveryGate(packet, now = Date.now()) {
     return hold("OWNERSHIP_UNKNOWN");
   const source = after.byId.get(kind === "stage" ? action.dropId : action.playerId);
   const target = targets.players.find(p => p.yahooId === (kind === "stage" ? action.addId : action.playerId));
+  if (trace.leg !== (kind === "stage" ? action.addId : `start:${source?.name}`)) return hold("TRACE_LEG_CHANGED");
   if (!source || source.editable !== "1" || !target || target.playerKey !== `${after.gameKey}.p.${target.yahooId}` ||
       kind === "stage" && (action.slot !== "BN" || root.costMode !== "FA_ONLY_ZERO_COST" || target.ownership !== "FA" || target.ownerTeamKey !== null || target.waiverDate !== null ||
         after.byId.has(action.addId) || source.undroppable !== "0" || source.selectedPosition === "IR") ||
@@ -720,18 +765,24 @@ export async function recoveryGate(packet, now = Date.now()) {
     tab: { playwright: { domSnapshot: async () => ui.snapshot }, url: async () => ui.url },
     league: root.leagueId, team: root.teamId, expires: root.expiresAt, waitMs: 1000,
   }).inspect() : null;
+  const uiRows = parseRecoveryRosterRows(ui.snapshot);
   if (!fresh(ui.observedAt) || ui.method !== "isolated-supported-domSnapshot" || ui.url !== `https://football.fantasysports.yahoo.com/f1/${root.leagueId}/${root.teamId}` ||
-      inspection?.result !== "INSPECTED_NO_ALARM" ||
-      !Array.isArray(ui.rows) || ui.rows.length !== after.byId.size || new Set(ui.rows.map(r => r.id)).size !== after.byId.size || ui.rows.some(row => {
+      inspection?.result !== "INSPECTED_NO_ALARM" || !uiRows ||
+      !Array.isArray(ui.rows) || ui.rows.length !== after.byId.size || uiRows.length !== after.byId.size ||
+      new Set(ui.rows.map(r => r.id)).size !== after.byId.size || new Set(ui.rows.map(r => r.line)).size !== after.byId.size || ui.rows.some(row => {
         const player = after.byId.get(row.id), defense = recoveryDefenseTeams.get(row.id);
-        const teamDefense = player?.displayPosition === "DEF" || player?.eligiblePositions?.includes("DEF");
-        const identityLink = teamDefense ? defense && player.name === defense.name &&
-          row.line?.split("\n").some((line, index, lines) => line.trim() === `- link "${defense.name}":` &&
-            lines[index + 1]?.trim() === `/url: https://sports.yahoo.com/nfl/teams/${defense.slug}/`)
-          : new RegExp(`/players/${row.id}(?:/|[?#\\s]|$)`).test(row.line ?? "");
-        return !player || row.slot !== player.selectedPosition || typeof row.line !== "string" || !row.line.startsWith("- row ") ||
-          row.line.includes("\n- row ") || !ui.snapshot.includes(row.line) || !row.line.includes(`"${player.name}"`) ||
-          !identityLink || !new RegExp(`(?:\\s|")${row.slot}(?:\\s|")`).test(row.line);
+        const parsed = uiRows.find(candidate => candidate.block === row.line);
+        if (!player || !parsed || row.slot !== player.selectedPosition) return true;
+        const teamDefense = player.displayPosition === "DEF" || player.eligiblePositions?.includes("DEF");
+        const primary = parsed.links[0];
+        const identityLink = teamDefense ? defense && player.name === defense.name && primary?.name === defense.name &&
+          primary.url === `https://sports.yahoo.com/nfl/teams/${defense.slug}/` && !/\/players\//.test(parsed.block)
+          : primary?.name === player.name && primary.url === `https://sports.yahoo.com/nfl/players/${row.id}`;
+        const control = `Click here to edit ${row.slot.replaceAll("/", "_")} ${player.name}`;
+        const exactSlot = player.editable === "1" ? parsed.firstCell === `- cell "${control}":` &&
+          parsed.slotChildren.includes(`- button "${control}": ${row.slot}`)
+          : player.editable === "0" && parsed.firstCell === `- cell "${row.slot}":` && parsed.slotChildren.includes(`- generic: ${row.slot}`);
+        return !identityLink || !exactSlot;
       })) return hold("UI_STATE_UNKNOWN");
   if (!fresh(preflight.observedAt) || preflight.jobId !== root.jobId || preflight.rootId !== root.rootId || preflight.executor !== root.executor ||
       preflight.snapshotSha256 !== evidence.current.sha256 || preflight.uiSha256 !== evidence.ui.sha256 || preflight.targetsSha256 !== evidence.targets.sha256 ||
