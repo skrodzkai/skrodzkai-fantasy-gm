@@ -241,26 +241,41 @@ const AD = `- iframe [id="google_ads_iframe_/10000001/example/sports/fixture_top
 const ads = [AD, "- generic: Advertisement", AD.replace("fixture_top", "fixture_btm").replace("- iframe ", "- iframe [active] ")];
 const addUrl = id => `${BASE}addplayer?apid=${id}`;
 const roleKey = (role, name) => JSON.stringify({ role, opts: { name, exact: true }, filters: [] });
-const dropKey = name => JSON.stringify({ role: "row", filters: [{ hasText: name }], inner: ["button", { name: "—", exact: true }] });
-const faForm = n => ['- heading "Add Free Agent" [level=2]', `- heading "${n} Open player notes for ${n} Xyz - LB Sun 10:00 am vs Abc" [level=1]:`,
-  '- heading "Select a player to drop" [level=4]', '- generic: "Waiver Priority: 2nd"', ...ads];
+const dropKey = name => JSON.stringify({ role: "row", filters: [{ has: { role: "link", opts: { name, exact: true }, filters: [] } }], inner: ["button", { name: "—", exact: true }] });
+const playerRow = (name, opponent = "Opponent") => [`- row "— ${name} ${opponent}":`, `  - link "${name}":`, '  - button "—"'];
+const faForm = (n, rows = [...playerRow(LB.drop.name), ...playerRow(BENCH.drop.name)]) => ['- heading "Add Free Agent" [level=2]', `- heading "${n} Open player notes for ${n} Xyz - LB Sun 10:00 am vs Abc" [level=1]:`,
+  '- heading "Select a player to drop" [level=4]', '- generic: "Waiver Priority: 2nd"', ...ads, ...rows];
 const confirm = (a, d) => ['- heading "Add Free Agent" [level=2]', `- heading "${a} Open player notes for ${a} Xyz - LB" [level=1]:`,
   '- heading "Player to Drop Select another player" [level=4]:', "- strong: Week 4", `- button "Add ${a}, Drop ${d}"`, ...ads];
 const success = (a, d) => [`- paragraph: You have successfully added ${a} and dropped ${d}`, ...ads];
 const legPages = (L, extra = {}) => ({ [addUrl(L.add.id)]: faForm(L.add.name), [`after:${dropKey(L.drop.name)}`]: `confirm:${L.add.id}`,
   [`confirm:${L.add.id}`]: confirm(L.add.name, L.drop.name), [`after:${roleKey("button", `Add ${L.add.name}, Drop ${L.drop.name}`)}`]: `done:${L.add.id}`,
   [`done:${L.add.id}`]: success(L.add.name, L.drop.name), ...extra });
-function browserTab(pages, deniedWaits = []) {
+function browserTab(pages, deniedWaits = [], waitErrors = {}) {
   const log = []; let current = "start", waits = 0;
   const shown = chain => (pages[current] ?? []).some(x => chain.text === undefined ? x.startsWith(`- ${chain.role} "${chain.opts.name}"`)
     : chain.text instanceof RegExp ? chain.text.test(x.replace(/^- \w+: /, "")) : x.endsWith(`: ${chain.text}`));
+  const rows = chain => {
+    const groups = [];
+    for (const line of pages[current] ?? []) {
+      if (line.startsWith('- row "')) groups.push([line]);
+      else if (line.startsWith("  ") && groups.length) groups.at(-1).push(line.trim());
+    }
+    return groups.filter(row => chain.filters.every(f => f.has
+      ? row.includes(`- link "${f.has.opts.name}":`) : row.join(" ").includes(f.hasText)));
+  };
   const locator = chain => ({
-    filter: f => locator({ ...chain, filters: [...chain.filters, f] }), getByRole: (role, opts) => locator({ ...chain, inner: [role, opts] }),
+    toJSON: () => chain,
+    count: async () => { log.push(["count", JSON.stringify(chain)]); return rows(chain).length; },
+    filter: f => locator({ ...chain, filters: [...chain.filters, f.has ? { has: f.has.toJSON() } : f] }), getByRole: (role, opts) => locator({ ...chain, inner: [role, opts] }),
     first: () => locator(chain),
     waitFor: async () => { log.push(["wait"]);
       if (deniedWaits.includes(++waits)) throw new Error("PermissionDenied: browser tool access blocked by policy");
+      if (waitErrors[waits]) { current = pages[`later:${current}`] ?? current; throw waitErrors[waits]; }
       current = pages[`later:${current}`] ?? current; if (!shown(chain)) throw Object.assign(new Error("Timeout 1000ms exceeded"), { name: "TimeoutError" }); },
     click: async () => { const key = JSON.stringify(chain); log.push(["click", key]);
+      if (chain.role === "row" && (rows(chain).length !== 1 || !rows(chain)[0].includes(`- ${chain.inner[0]} "${chain.inner[1].name}"`)))
+        throw new Error("strict mode violation or missing drop control");
       if (!pages[`after:${key}`]) throw new Error("locator.click: Timeout exceeded"); current = pages[`after:${key}`]; },
   });
   return { log,
@@ -335,8 +350,31 @@ test("a delayed confirmation is awaited within the bound; errors during the wait
   hp = await loadRelease(tab); r = evidence(await hp.stage(LB));
   assert.equal(r.result, "STOP_ALARM_NOT_CLICKED"); assert.equal(clicks(tab), 1);
   assert.equal((await hp.submit(LB, null)).result, "STOP_HALTED_AFTER_PRIOR_ALARM_OR_ERROR"); assert.equal(finals(tab, LB), 0);
-  tab = browserTab({ [addUrl(LB.add.id)]: faForm(LB.add.name) }); hp = await loadRelease(tab); // drop control missing: a tool error is a STOP
-  r = evidence(await hp.stage(LB)); assert.equal(r.result, "STOP_TOOL_ERROR_NO_FINAL_ACTION"); assert.match(r.err, /Timeout/);
+  // The supported browser sometimes wraps its expected selector wait deadline in a generic Error.
+  for (const message of ["Playwright selector deadline exceeded", "Error: Playwright selector deadline exceeded"]) {
+    for (const [later, expected] of [[`confirm:${LB.add.id}`, "STAGED_NOT_SUBMITTED"], ["pending", "STOP_CONFIRMATION_MISMATCH"],
+      ["failed", "STOP_ALARM_NOT_CLICKED"]]) {
+      tab = browserTab(legPages(LB, { ...pending, "later:pending": later,
+        failed: [...faForm(LB.add.name), "- alert: Daily add limit reached"] }), [], { 2: new Error(message) });
+      hp = await loadRelease(tab); r = evidence(await hp.stage(LB));
+      assert.equal(r.result, expected); assert.match(r.waits[1], /^timeout/); assert.equal(clicks(tab), 1); assert.equal(finals(tab, LB), 0);
+    }
+  }
+  // Reproduce Matt Gay's opponent text colliding with the Jets DEF player name.
+  const jets = { ...LB, drop: { name: "Jets" } };
+  tab = browserTab(legPages(jets, { [addUrl(jets.add.id)]: faForm(jets.add.name,
+    [...playerRow("Matt Gay", "@NY Jets"), ...playerRow("Jets", "Las Vegas")]) }));
+  hp = await loadRelease(tab); r = evidence(await hp.stage(jets));
+  assert.equal(r.result, "STAGED_NOT_SUBMITTED"); assert.equal(r.dropRows, 1); assert.equal(clicks(tab), 1); assert.equal(finals(tab, jets), 0);
+  for (const [rows, count] of [[playerRow("Matt Gay", "@NY Jets"), 0], [playerRow("Jets Reserve"), 0],
+    [[...playerRow("Jets"), ...playerRow("Jets")], 2]]) {
+    tab = browserTab(legPages(jets, { [addUrl(jets.add.id)]: faForm(jets.add.name, rows) }));
+    hp = await loadRelease(tab); r = evidence(await hp.stage(jets));
+    assert.equal(r.result, "STOP_DROP_ROW_NOT_EXACT"); assert.equal(r.dropRows, count); assert.equal(clicks(tab), 0);
+    assert.equal((await hp.submit(jets, null)).result, "STOP_STAGE_STALE_OR_CHANGED_NOT_CLICKED"); assert.equal(clicks(tab), 0);
+  }
+  tab = browserTab({ [addUrl(LB.add.id)]: faForm(LB.add.name, playerRow(LB.drop.name).slice(0, -1)) }); hp = await loadRelease(tab); // exact row but missing button is a tool STOP
+  r = evidence(await hp.stage(LB)); assert.equal(r.result, "STOP_TOOL_ERROR_NO_FINAL_ACTION"); assert.match(r.err, /missing drop control/); assert.equal(finals(tab, LB), 0);
 });
 
 test("expired, inexact, ambiguous or failed submissions never click or resubmit", async () => {
@@ -386,6 +424,14 @@ test("a tool/permission denial during any bounded wait stops before further clic
     const tab = browserTab(legPages(LB), denied), hp = await loadRelease(tab); // expected control stays visible
     const r = evidence(await hp.stage(LB));
     assert.equal(r.result, expected); assert.match(r.err, /^PermissionDenied: browser tool access blocked/); assert.equal(clicks(tab), clickCount);
+    assert.equal((await hp.submit(LB, null)).result, "STOP_HALTED_AFTER_PRIOR_ALARM_OR_ERROR"); assert.equal(finals(tab, LB), 0);
+  }
+  for (const error of [new Error("PermissionDenied: Playwright selector deadline exceeded"),
+    new Error("Browser Use encountered an error: Playwright selector deadline exceeded"), new Error("locator.click: Timeout exceeded"),
+    Object.assign(new Error("browser tool access blocked by policy"), { name: "TimeoutError" })]) {
+    const tab = browserTab(legPages(LB), [], { 2: error }), hp = await loadRelease(tab);
+    const r = evidence(await hp.stage(LB));
+    assert.equal(r.result, "STOP_TOOL_ERROR_NO_FINAL_ACTION"); assert.equal(r.err, error.message); assert.equal(clicks(tab), 1);
     assert.equal((await hp.submit(LB, null)).result, "STOP_HALTED_AFTER_PRIOR_ALARM_OR_ERROR"); assert.equal(finals(tab, LB), 0);
   }
   let tab = browserTab({ ...legPages(LB), ...legPages(BENCH) }, [3]), hp = await loadRelease(tab);
