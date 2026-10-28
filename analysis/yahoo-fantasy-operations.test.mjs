@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -506,7 +506,7 @@ async function recoveryFixture() {
     approval: "Synthetic decision evidence; never a real approval transcript.\n", policy: "Synthetic adopted policy bytes.\n",
     factory: (await readFile(new URL("./yahoo-release-browser.mjs", import.meta.url), "utf8")).replaceAll(RELEASE_BROWSER_VERSION, correction.factoryVersion) };
   f.save = async () => {
-    const dir = await mkdtemp("/private/tmp/yahoo-recovery-"), operations = join(dir, "operations"); await mkdir(operations);
+    const dir = await mkdtemp(join(await realpath(tmpdir()), "yahoo-recovery-")), operations = join(dir, "operations"); await mkdir(operations);
     const packet = { phase: "reserve", rootId: root.rootId, jobId: root.jobId, executor: root.executor, requestedAt: stamp(0), action: structuredClone(root.action), evidence: {} };
     for (const key of ["approval", "policy", "baseline", "current", "trace", "ui", "targets", "factory"]) {
       const bytes = typeof f[key] === "string" ? f[key] : JSON.stringify(f[key]);
