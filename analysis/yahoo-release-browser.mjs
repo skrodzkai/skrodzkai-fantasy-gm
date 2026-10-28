@@ -4,10 +4,10 @@
 // globals or references to anything else in this module. All site interaction goes through
 // the bound tab's goto/url and playwright domSnapshot/semantic locators.
 
-export const RELEASE_BROWSER_VERSION = "yahoo-release-browser-2026-10-28.1";
+export const RELEASE_BROWSER_VERSION = "yahoo-release-browser-2026-10-28.2";
 
 export function createReleaseBrowser(config) {
-  const VERSION = "yahoo-release-browser-2026-10-28.1";
+  const VERSION = "yahoo-release-browser-2026-10-28.2";
   const { tab: T, league, team, expires: EXPIRES, waitMs: WAIT } = config ?? {};
   if (!T?.playwright || !/^[1-9][0-9]*$/.test(league ?? "") || !/^[1-9][0-9]*$/.test(team ?? "") ||
       !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(EXPIRES ?? "") || Number.isNaN(Date.parse(EXPIRES)) ||
@@ -45,14 +45,31 @@ export function createReleaseBrowser(config) {
       r.waits.push(`timeout ${Date.now() - t}`);
     }
   };
-  const begin = leg => ({ v: VERSION, leg, t0: now(), alarmCount: 0, alarms: [], click: null, finalActionMayHaveOccurred: false, waits: [] });
-  const stop = (r, result) => { r.result = result; r.t1 = now(); };
+  const begin = leg => ({ v: VERSION, leg, t0: now(), alarmCount: 0, alarms: [], click: null, finalActionMayHaveOccurred: false, waits: [], trace: [] });
+  // The saved ordered trace identifies the precise failing operation. Mutation entry
+  // is recorded before invoking the tool, including rejected/uncertain clicks.
+  const operation = async (r, name, body) => {
+    const entry = { name, startedAt: now(), outcome: "started" }; r.trace.push(entry);
+    try { const result = await body(); entry.outcome = "completed"; return result; }
+    catch (error) { entry.outcome = "failed"; throw error; }
+    finally { entry.finishedAt = now(); }
+  };
+  const stop = (r, result) => {
+    const locatorMismatch = result === "STOP_DROP_ROW_NOT_EXACT";
+    const renderMismatch = ["STOP_CONFIRMATION_MISMATCH", "STOP_SOURCE_NOT_ON_BN", "STOP_DESTINATION_NOT_EXACT_EMPTY_SLOT"].includes(result);
+    if (locatorMismatch || renderMismatch) r.failure = {
+      operation: r.trace.at(-1)?.name ?? null,
+      category: locatorMismatch ? "PRE_FINAL_LOCATOR_COUNT_MISMATCH" : "PRE_FINAL_RENDER_MISMATCH",
+    };
+    r.result = result; r.t1 = now();
+  };
   let last = null; // the one staged confirmation submit() may click; consumed by any stage/submit/start
   let halted = null; // any alarm, tool error or unconfirmed final action stops every later write here
   async function run(r, body, readOnly) {
     if (halted && !readOnly) { r.halted = halted; stop(r, "STOP_HALTED_AFTER_PRIOR_ALARM_OR_ERROR"); return r; }
     try { await body(r); } catch (e) {
       r.err = String(e?.message ?? e).slice(0, 160);
+      r.failure = { operation: r.trace.at(-1)?.name ?? null, category: "UNKNOWN_TOOL_FAILURE" };
       stop(r, r.finalActionMayHaveOccurred ? "POSSIBLE_ACTION_RECONCILE_READ_ONLY" : "STOP_TOOL_ERROR_NO_FINAL_ACTION");
     }
     if (r.alarmCount || r.err || /^(STOP_ALARM|POSSIBLE_)/.test(r.result)) halted ??= { leg: r.leg, result: r.result, t1: r.t1 };
@@ -71,9 +88,9 @@ export function createReleaseBrowser(config) {
     last = null;
     return run(begin(L.add.id), async r => {
       const final = `Add ${L.add.name}, Drop ${L.drop.name}`;
-      await T.goto(`${BASE}addplayer?apid=${L.add.id}`);
-      await settle(r, PW.getByRole("heading", { name: "Add Free Agent", exact: true }));
-      let s = await lines(); r.url = await T.url();
+      await operation(r, "stage.navigate", () => T.goto(`${BASE}addplayer?apid=${L.add.id}`));
+      await operation(r, "stage.wait-form", () => settle(r, PW.getByRole("heading", { name: "Add Free Agent", exact: true })));
+      let s = await operation(r, "stage.snapshot-form", lines); r.url = await T.url();
       if (alarmCheck(r, s)) return stop(r, "STOP_ALARM_NOT_CLICKED");
       r.bad = claimish(s);
       if (!r.url.startsWith(BASE) || !s.includes('- heading "Add Free Agent" [level=2]') || !s.some(x => x.startsWith(`- heading "${L.add.name} `)) || r.bad.length) {
@@ -82,11 +99,11 @@ export function createReleaseBrowser(config) {
       // Opponent text can contain another roster player's name (Matt Gay @NY Jets).
       // Bind the row to its exact player link, and never choose first() from ambiguous rows.
       const dropRow = PW.getByRole("row").filter({ has: PW.getByRole("link", { name: L.drop.name, exact: true }) });
-      r.dropRows = await dropRow.count();
+      r.dropRows = await operation(r, "stage.locate-drop", () => dropRow.count());
       if (r.dropRows !== 1) return stop(r, "STOP_DROP_ROW_NOT_EXACT");
-      await dropRow.getByRole("button", { name: "—", exact: true }).click();
-      await settle(r, PW.getByRole("button", { name: final, exact: true }));
-      s = await lines(); r.confirmUrl = await T.url();
+      await operation(r, "stage.select-drop", () => dropRow.getByRole("button", { name: "—", exact: true }).click());
+      await operation(r, "stage.wait-confirmation", () => settle(r, PW.getByRole("button", { name: final, exact: true })));
+      s = await operation(r, "stage.snapshot-confirmation", lines); r.confirmUrl = await T.url();
       if (alarmCheck(r, s)) return stop(r, "STOP_ALARM_NOT_CLICKED");
       r.bad = claimish(s);
       r.buttons = s.filter(x => x.startsWith('- button "Add ')); r.week = s.filter(x => x.startsWith("- strong: Week"));
@@ -109,7 +126,7 @@ export function createReleaseBrowser(config) {
       if (!exact) return stop(r, "STOP_STAGE_STALE_OR_CHANGED_NOT_CLICKED");
       if (expired()) return stop(r, "STOP_EXPIRED_NOT_CLICKED");
       r.click = now(); r.finalActionMayHaveOccurred = true;
-      try { await PW.getByRole("button", { name: final, exact: true }).click(); } catch (e) { r.err = String(e?.message ?? e).slice(0, 160); }
+      try { await operation(r, "submit.final", () => PW.getByRole("button", { name: final, exact: true }).click()); } catch (e) { r.err = String(e?.message ?? e).slice(0, 160); }
       await settle(r, PW.getByText(done, { exact: true }));
       s = await lines(); r.t1 = now();
       const alarmed = alarmCheck(r, s), shown = s.includes(`- paragraph: ${done}`);
@@ -124,21 +141,21 @@ export function createReleaseBrowser(config) {
     last = null;
     return run(begin(`start:${P.name}`), async r => {
       const src = `Click here to edit BN ${P.name}`, dest = `Click here to edit ${P.slot}`;
-      await T.goto(TEAM);
-      await settle(r, PW.getByRole("button", { name: src, exact: true }));
-      let s = await lines(); r.url = await T.url();
+      await operation(r, "start.navigate", () => T.goto(TEAM));
+      await operation(r, "start.wait-source", () => settle(r, PW.getByRole("button", { name: src, exact: true })));
+      let s = await operation(r, "start.snapshot-source", lines); r.url = await T.url();
       if (alarmCheck(r, s)) return stop(r, "STOP_ALARM_NOT_CLICKED");
       if (!r.url.startsWith(TEAM) || !s.some(x => x.startsWith(`- button "${src}"`))) return stop(r, "STOP_SOURCE_NOT_ON_BN");
-      await PW.getByRole("button", { name: src, exact: true }).click();
-      await settle(r, PW.getByRole("button", { name: dest, exact: true }));
-      s = await lines();
+      await operation(r, "start.select-source", () => PW.getByRole("button", { name: src, exact: true }).click());
+      await operation(r, "start.wait-destination", () => settle(r, PW.getByRole("button", { name: dest, exact: true })));
+      s = await operation(r, "start.snapshot-destination", lines);
       if (alarmCheck(r, s)) return stop(r, "STOP_ALARM_NOT_CLICKED");
       r.dest = s.filter(x => x.startsWith(`- button "${dest}"`));
       r.empty = s.filter(x => /^- generic: The .+ slot on your roster is empty\.$/.test(x));
       if (r.dest.length !== 1 || !r.empty.includes(`- generic: The ${P.slot} slot on your roster is empty.`)) return stop(r, "STOP_DESTINATION_NOT_EXACT_EMPTY_SLOT");
       if (expired()) return stop(r, "STOP_EXPIRED_NOT_CLICKED");
       r.click = now(); r.finalActionMayHaveOccurred = true;
-      try { await PW.getByRole("button", { name: dest, exact: true }).click(); } catch (e) { r.err = String(e?.message ?? e).slice(0, 160); }
+      try { await operation(r, "start.final", () => PW.getByRole("button", { name: dest, exact: true }).click()); } catch (e) { r.err = String(e?.message ?? e).slice(0, 160); }
       await settle(r, PW.getByText(/^(Moved|All changes saved)/));
       s = await lines(); r.t1 = now();
       const alarmed = alarmCheck(r, s);

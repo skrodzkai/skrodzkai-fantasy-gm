@@ -1,7 +1,9 @@
 import { fileURLToPath } from "node:url";
 import { lstat, readFile, stat, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { basename, dirname, resolve } from "node:path";
+import { createHash } from "node:crypto";
 import process from "node:process";
+import { createReleaseBrowser } from "./yahoo-release-browser.mjs";
 import {
   TARGET, directField, findResources, findValues,
   refreshBoundAccess, parseMembership, yahooFantasyGet,
@@ -547,6 +549,213 @@ export function verifyRosterDelta(before, after, changes, now = Date.now()) {
     addTransactions, unattributedDrops, offline: true, posture: "SAVED_ROSTER_COMPARISON_ONLY_NOT_PREFLIGHT_OR_EXECUTION_CLEARANCE" };
 }
 
+// Offline bounded recovery protocol. The coordinator pins the canonical mounted
+// ledger/anchor and records Joe's actual delegation BEFORE the initial attempt.
+// No local packet/boolean creates approval; absent canonical records mean HOLD.
+const digest = bytes => createHash("sha256").update(bytes).digest("hex");
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const recoveryHold = reason => ({ verdict: "HOLD", reason, offline: true, transactionReady: false });
+const isoClock = text => typeof text === "string" && Number.isFinite(Date.parse(text)) && new Date(text).toISOString() === text ? Date.parse(text) : NaN;
+const recoveryMarker = "```yahoo-recovery-record\n";
+// Observed Yahoo DEF identities use team links, not numeric player links.
+// These exact public ID/name/slug triples cover this package; unknown DEFs HOLD.
+const recoveryDefenseTeams = new Map([
+  ["100020", { name: "Jets", slug: "ny-jets" }],
+  ["100030", { name: "Jaguars", slug: "jacksonville" }],
+]);
+export const recoveryRecord = record => `${recoveryMarker}${JSON.stringify(record)}\n\x60\x60\x60\n`;
+
+// Read only explicitly named regular evidence files. No directories, symlinks,
+// secret-shaped names or automatic path repair/alternative reads.
+async function recoveryBytes(path) {
+  if (typeof path !== "string" || path.includes("\0") || /auth|credentials|secret/i.test(path))
+    fail("yahoo_recovery_evidence_invalid");
+  let current = resolve(path);
+  while (true) {
+    if ((await lstat(current)).isSymbolicLink()) fail("yahoo_recovery_evidence_invalid");
+    const parent = dirname(current); if (parent === current) break; current = parent;
+  }
+  const info = await stat(path);
+  if (!info.isFile() || info.size > 16 * 1024 * 1024) fail("yahoo_recovery_evidence_invalid");
+  return readFile(path);
+}
+async function recoveryFile(descriptor) {
+  if (!/^[a-f0-9]{64}$/.test(descriptor?.sha256 ?? "")) fail("yahoo_recovery_evidence_invalid");
+  const bytes = await recoveryBytes(descriptor.path);
+  if (digest(bytes) !== descriptor.sha256) fail("yahoo_recovery_evidence_invalid");
+  return bytes;
+}
+
+/** Evaluates saved evidence only; CHECK is required after normal anchored append.
+ * The caller must supply the ORIGINAL job's trusted canonical path/anchor, never
+ * an input-selected substitute or a freshly minted anchor after a conflict.
+ */
+export async function recoveryGate(packet, now = Date.now()) {
+  const hold = reason => recoveryHold(reason);
+  if (!["reserve", "check"].includes(packet?.phase) || !packet.rootId || !packet.jobId || !packet.executor ||
+      !Number.isFinite(isoClock(packet.requestedAt)) || isoClock(packet.requestedAt) > now || now - isoClock(packet.requestedAt) > targetFreshnessMs)
+    return hold("REQUEST_UNKNOWN");
+  const anchor = packet.anchor;
+  if (basename(anchor?.path ?? "") !== "decision-log.md" || basename(dirname(anchor?.path ?? "")) !== "operations" ||
+      !Number.isSafeInteger(anchor?.bytes) || anchor.bytes < 1 || typeof anchor.lastLine !== "string") return hold("ANCHOR_UNKNOWN");
+  // Check phase reads the exact appended image with the original prefix pin.
+  const ledger = await recoveryFile({ path: anchor.path, sha256: packet.phase === "check" ? packet.reservedLedgerSha256 : anchor.sha256 });
+  const prefix = ledger.subarray(0, anchor.bytes), text = prefix.toString("utf8");
+  if (prefix.length !== anchor.bytes || digest(prefix) !== anchor.sha256 || !text.endsWith("\n") ||
+      text.slice(0, -1).split("\n").at(-1) !== anchor.lastLine || packet.phase === "reserve" && ledger.length !== anchor.bytes)
+    return hold("ANCHOR_CONFLICT");
+  const records = [];
+  for (const part of text.split(recoveryMarker).slice(1)) {
+    const end = part.indexOf("\n```\n");
+    if (end < 0) return hold("LEDGER_UNKNOWN");
+    try { records.push(JSON.parse(part.slice(0, end))); } catch { return hold("LEDGER_UNKNOWN"); }
+  }
+  if (records.some(r => r.type === "RECOVERY_JOB_STOP" && r.jobId === packet.jobId)) return hold("JOB_STOPPED");
+  const scoped = records.filter(r => r.rootId === packet.rootId);
+  const roots = scoped.filter(r => r.type === "RECOVERY_DELEGATED");
+  if (roots.length !== 1) return hold("DELEGATION_UNKNOWN");
+  const root = roots[0], action = root.action;
+  const conditions = ["stop", "access", "ownership", "claimsTrades", "retainedSlots", "dropSlotLegality", "eligibilityIRCapacityLimits", "officialHealthRole", "trigger", "individualLocks"];
+  if (root.jobId !== packet.jobId || root.executor !== packet.executor || root.approvedBy !== "Joe" || root.status !== "DELEGATED_TO_MODELS" ||
+      root.season !== TARGET.season || root.leagueId !== TARGET.leagueId || root.teamId !== TARGET.teamId ||
+      !Number.isSafeInteger(root.week) || root.week < 1 || root.week > 18 || !root.id ||
+      !root.approvalSource?.reference || !root.policyAdoptionReference || !root.policySha256 ||
+      !Number.isFinite(isoClock(root.expiresAt)) || !Number.isFinite(isoClock(root.approvedAt)) || isoClock(root.approvedAt) > isoClock(packet.requestedAt) ||
+      !Number.isSafeInteger(root.minimumCompletionAndVerificationMs) || root.minimumCompletionAndVerificationMs <= 0 ||
+      root.recoveryBudget?.additional !== 1 || root.recoveryBudget?.total !== 2 ||
+      root.recoveryBudget.attemptId !== `${root.rootId}-recovery-1` ||
+      !same(packet.action, action) || !conditions.every(key => Object.hasOwn(root.conditions ?? {}, key) && root.conditions[key] != null && typeof root.conditions[key] !== "boolean"))
+    return hold("DELEGATION_UNKNOWN");
+  // No alternate option, clock extension, job/executor change, or implicit child budget.
+  const stops = scoped.filter(r => r.type === "RECOVERY_INITIAL_STOP");
+  const corrections = scoped.filter(r => r.type === "RECOVERY_CORRECTION_ADOPTED");
+  if (scoped.some(r => !["RECOVERY_DELEGATED", "RECOVERY_INITIAL_STOP", "RECOVERY_CORRECTION_ADOPTED"].includes(r.type)))
+    return hold("BUDGET_OR_TERMINAL_STATE");
+  if (stops.length !== 1 || corrections.length !== 1) return hold("COUNTER_OR_CORRECTION_UNKNOWN");
+  const stopped = stops[0], correction = corrections[0];
+  if (stopped.jobId !== root.jobId || stopped.attemptId !== root.rootId || stopped.attempts !== 1 ||
+      !/^[a-f0-9]{64}$/.test(stopped.factorySha256 ?? "") || stopped.recoveryUsed !== 0 || stopped.status !== "PRE_FINAL_TECHNICAL_STOP" ||
+      isoClock(stopped.startedAt) < isoClock(root.approvedAt) || !Number.isFinite(isoClock(stopped.startedAt)))
+    return hold("COUNTER_OR_TERMINAL_STATE");
+  const evidence = packet.evidence;
+  if (!evidence || !["approval", "policy", "baseline", "current", "trace", "ui", "preflight", "targets", "factory"].every(key => evidence[key]))
+    return hold("EVIDENCE_UNKNOWN");
+  const files = {};
+  for (const key of Object.keys(evidence)) files[key] = await recoveryFile(evidence[key]);
+  if (evidence.approval.sha256 !== root.approvalSource.sha256 || evidence.policy.sha256 !== root.policySha256 ||
+      evidence.baseline.sha256 !== stopped.baselineSha256 || evidence.trace.sha256 !== stopped.traceSha256)
+    return hold("EVIDENCE_BINDING_UNKNOWN");
+  let baseline, current, trace, ui, preflight, targets;
+  try { [baseline, current, trace, ui, preflight, targets] = ["baseline", "current", "trace", "ui", "preflight", "targets"].map(key => JSON.parse(files[key])); }
+  catch { return hold("EVIDENCE_UNKNOWN"); }
+  const fresh = stamp => Number.isFinite(isoClock(stamp)) && isoClock(stamp) <= isoClock(packet.requestedAt) && now - isoClock(stamp) <= targetFreshnessMs && isoClock(stamp) >= isoClock(trace.t1);
+  if (trace.click !== null || trace.finalActionMayHaveOccurred !== false || trace.alarmCount !== 0 || !same(trace.alarms, []) ||
+      trace.v !== stopped.factoryVersion || trace.t0 !== stopped.startedAt || !Number.isFinite(isoClock(trace.t1)) || isoClock(trace.t1) < isoClock(trace.t0) ||
+      trace.err != null)
+    return hold("NO_SUBMISSION_UNPROVED");
+  const kind = action?.kind === "add_drop" ? "stage" : action?.kind === "lineup_change" ? "start" : null;
+  const sequence = kind === "stage" ? ["stage.navigate", "stage.wait-form", "stage.snapshot-form", "stage.locate-drop", "stage.select-drop", "stage.wait-confirmation", "stage.snapshot-confirmation"]
+    : ["start.navigate", "start.wait-source", "start.snapshot-source", "start.select-source", "start.wait-destination", "start.snapshot-destination"];
+  const entries = trace.trace, last = entries?.at(-1);
+  let clock = isoClock(trace.t0);
+  if (!kind || !Array.isArray(entries) || entries.length < 2 || entries.length > sequence.length || entries.some((entry, i) => {
+    const start = isoClock(entry.startedAt), end = isoClock(entry.finishedAt);
+    const invalid = entry.name !== sequence[i] || !Number.isFinite(start) || !Number.isFinite(end) || start < clock || end < start || end > isoClock(trace.t1) ||
+      entry.outcome !== "completed";
+    clock = end; return invalid;
+  })) return hold("TRACE_UNKNOWN");
+  const failures = {
+    STOP_DROP_ROW_NOT_EXACT: ["stage.locate-drop", "PRE_FINAL_LOCATOR_COUNT_MISMATCH"],
+    STOP_CONFIRMATION_MISMATCH: ["stage.snapshot-confirmation", "PRE_FINAL_RENDER_MISMATCH"],
+    STOP_SOURCE_NOT_ON_BN: ["start.snapshot-source", "PRE_FINAL_RENDER_MISMATCH"],
+    STOP_DESTINATION_NOT_EXACT_EMPTY_SLOT: ["start.snapshot-destination", "PRE_FINAL_RENDER_MISMATCH"],
+  };
+  const eligibleFailure = failures[trace.result];
+  if (!eligibleFailure || !same([trace.failure?.operation, trace.failure?.category], eligibleFailure) ||
+      last.name !== trace.failure.operation || trace.result === "STOP_DROP_ROW_NOT_EXACT" && (!Number.isSafeInteger(trace.dropRows) || trace.dropRows === 1))
+    return hold("TRACE_UNKNOWN");
+  if (correction.jobId !== root.jobId || correction.traceSha256 !== evidence.trace.sha256 || correction.failedOperation !== last.name ||
+      !correction.diagnosis || !correction.defectReference || !correction.fixReference || !correction.reviewReference || !correction.adoptionReference ||
+      correction.factorySha256 !== evidence.factory.sha256 || correction.factorySha256 === stopped.factorySha256 || !correction.factoryVersion ||
+      !files.factory.toString("utf8").includes(`export const RELEASE_BROWSER_VERSION = "${correction.factoryVersion}";`) ||
+      !Number.isFinite(isoClock(correction.adoptedAt)) || isoClock(correction.adoptedAt) > isoClock(packet.requestedAt))
+    return hold("REPAIR_ADOPTION_UNKNOWN");
+  let prior, after, delta;
+  try {
+    prior = deltaRoster(baseline, now); after = deltaRoster(current, now);
+    delta = verifyRosterDelta(baseline, current, [], now);
+  } catch { return hold("SAVED_STATE_UNKNOWN"); }
+  if (!fresh(current.verifiedAt) || isoClock(baseline.verifiedAt) > isoClock(trace.t0) || after.week !== root.week ||
+      delta.verdict !== "PASS" || !same(baseline.pending, []) || !same(current.pending, []) || !Array.isArray(current.completedRecent))
+    return hold("STATE_CHANGED_OR_UNKNOWN");
+  const actionIds = kind === "stage" ? [action.addId, action.dropId] : [action.playerId];
+  if (actionIds.some(id => !/^[1-9][0-9]*$/.test(id ?? "")) || actionIds.length !== new Set(actionIds).size ||
+      current.completedRecent.some(t => !Array.isArray(t.players) || t.players.some(p => actionIds.some(id => p.playerKey === `${after.gameKey}.p.${id}`) &&
+        (!/^[0-9]+$/.test(t.timestamp ?? "") || Number(t.timestamp) * 1000 >= prior.verifiedMs))))
+    return hold("POSSIBLE_ACTION_OR_ID_UNKNOWN");
+  // Validate the saved targets schema produced by the installed GET-only command.
+  if (targets.apiReadOnly !== true || targets.identityVerified !== true || targets.membershipVerified !== true ||
+      !same(targets.target, current.target) || targets.expectedWeek !== root.week || !fresh(targets.verifiedAt) ||
+      !fresh(targets.requestCompletedAt) || !fresh(targets.ownershipRequestCompletedAt) ||
+      !(isoClock(targets.expiresAt) > now) || targets.settings?.leagueKey !== current.settings.leagueKey || targets.settings?.week !== root.week ||
+      !Array.isArray(targets.players) || new Set(targets.players.map(p => p.yahooId)).size !== targets.players.length)
+    return hold("OWNERSHIP_UNKNOWN");
+  const source = after.byId.get(kind === "stage" ? action.dropId : action.playerId);
+  const target = targets.players.find(p => p.yahooId === (kind === "stage" ? action.addId : action.playerId));
+  if (!source || source.editable !== "1" || !target || target.playerKey !== `${after.gameKey}.p.${target.yahooId}` ||
+      kind === "stage" && (action.slot !== "BN" || root.costMode !== "FA_ONLY_ZERO_COST" || target.ownership !== "FA" || target.ownerTeamKey !== null || target.waiverDate !== null ||
+        after.byId.has(action.addId) || source.undroppable !== "0" || source.selectedPosition === "IR") ||
+      kind === "start" && (action.from !== "BN" || source.selectedPosition !== action.from || target.ownership !== "owned" || target.ownerTeamKey !== after.teamKey ||
+        !source.eligiblePositions?.includes(action.to) || !after.positions.has(action.to) ||
+        [...after.byId.values()].filter(p => p.selectedPosition === action.to).length >= after.positions.get(action.to)))
+    return hold("ACTION_PREFLIGHT_CHANGED");
+  if (kind === "start") {
+    const parents = records.filter(r => r.type === "RECOVERY_VERIFIED" && r.rootId === action.parentRootId);
+    if (parents.length !== 1 || parents[0].jobId !== root.jobId || parents[0].snapshotSha256 !== evidence.baseline.sha256 ||
+        parents[0].addedId !== action.playerId) return hold("PARENT_NOT_VERIFIED");
+  }
+  // Isolated UI supplies actual full snapshot lines plus one exact source row per
+  // roster member. Cross-bind rows to the independently saved roster, not flags.
+  const inspection = typeof ui.snapshot === "string" ? await createReleaseBrowser({
+    tab: { playwright: { domSnapshot: async () => ui.snapshot }, url: async () => ui.url },
+    league: root.leagueId, team: root.teamId, expires: root.expiresAt, waitMs: 1000,
+  }).inspect() : null;
+  if (!fresh(ui.observedAt) || ui.method !== "isolated-supported-domSnapshot" || ui.url !== `https://football.fantasysports.yahoo.com/f1/${root.leagueId}/${root.teamId}` ||
+      inspection?.result !== "INSPECTED_NO_ALARM" ||
+      !Array.isArray(ui.rows) || ui.rows.length !== after.byId.size || new Set(ui.rows.map(r => r.id)).size !== after.byId.size || ui.rows.some(row => {
+        const player = after.byId.get(row.id), defense = recoveryDefenseTeams.get(row.id);
+        const teamDefense = player?.displayPosition === "DEF" || player?.eligiblePositions?.includes("DEF");
+        const identityLink = teamDefense ? defense && player.name === defense.name &&
+          row.line?.split("\n").some((line, index, lines) => line.trim() === `- link "${defense.name}":` &&
+            lines[index + 1]?.trim() === `/url: https://sports.yahoo.com/nfl/teams/${defense.slug}/`)
+          : new RegExp(`/players/${row.id}(?:/|[?#\\s]|$)`).test(row.line ?? "");
+        return !player || row.slot !== player.selectedPosition || typeof row.line !== "string" || !row.line.startsWith("- row ") ||
+          row.line.includes("\n- row ") || !ui.snapshot.includes(row.line) || !row.line.includes(`"${player.name}"`) ||
+          !identityLink || !new RegExp(`(?:\\s|")${row.slot}(?:\\s|")`).test(row.line);
+      })) return hold("UI_STATE_UNKNOWN");
+  if (!fresh(preflight.observedAt) || preflight.jobId !== root.jobId || preflight.rootId !== root.rootId || preflight.executor !== root.executor ||
+      preflight.snapshotSha256 !== evidence.current.sha256 || preflight.uiSha256 !== evidence.ui.sha256 || preflight.targetsSha256 !== evidence.targets.sha256 ||
+      !Array.isArray(preflight.conditions) || preflight.conditions.length !== conditions.length ||
+      new Set(preflight.conditions.map(c => c.key)).size !== conditions.length || preflight.conditions.some(c => !conditions.includes(c.key) ||
+        !same(c.actual, root.conditions[c.key]) || typeof c.source !== "string" || !c.source.trim() || !fresh(c.verifiedAt))) return hold("PREFLIGHT_UNKNOWN");
+  const locks = preflight.locks;
+  const deadline = Math.min(isoClock(root.expiresAt), ...(Array.isArray(locks) ? locks.map(l => isoClock(l.at)) : [NaN]));
+  if (!Array.isArray(locks) || locks.length !== actionIds.length || !same([...locks.map(l => l.id)].sort(), [...actionIds].sort()) ||
+      !Number.isSafeInteger(preflight.completionAndVerificationMs) || preflight.completionAndVerificationMs < root.minimumCompletionAndVerificationMs ||
+      !preflight.timingBasis || !Number.isFinite(deadline) || now + preflight.completionAndVerificationMs >= deadline)
+    return hold("EXPIRED_LOCKED_OR_TIME_UNKNOWN");
+  const reservation = { type: "RECOVERY_RESERVED", rootId: root.rootId, jobId: root.jobId, delegationId: root.id,
+    predecessor: stopped.attemptId, attemptId: root.recoveryBudget.attemptId, executor: root.executor, recoveryUsed: 1, attempts: 2,
+    expiresAt: root.expiresAt, reservedAt: packet.requestedAt, anchorSha256: anchor.sha256, action,
+    evidence: Object.fromEntries(Object.keys(evidence).sort().map(key => [key, evidence[key].sha256])),
+    failedOperation: last.name, factoryVersion: correction.factoryVersion, factorySha256: correction.factorySha256 };
+  const event = recoveryRecord(reservation), expected = Buffer.concat([prefix, Buffer.from(event)]);
+  if (packet.phase === "check" && !ledger.equals(expected)) return hold("RESERVATION_READBACK_INEXACT");
+  return { verdict: packet.phase === "check" ? "RESERVED_READBACK_EXACT" : "RESERVATION_REQUIRED", offline: true, transactionReady: false,
+    attemptId: reservation.attemptId, reservation, event, eventSha256: digest(event), reservedLedgerSha256: digest(expected),
+    next: packet.phase === "check" ? "FRESH_EXACT_FACTORY_THEN_NORMAL_STAGE_LEDGER_SUBMIT_VERIFY" : "NORMAL_ANCHORED_APPEND_THEN_RECOVERY_GATE_CHECK_REQUIRED" };
+}
+
 // Only exact known codes may cross the CLI error boundary. Exception text is not
 // safe merely because it starts with yahoo_ or resembles a system error code.
 const operationCodes = new Set(`
@@ -560,7 +769,7 @@ const operationCodes = new Set(`
   pending_claims_incomplete candidate_collection_incomplete candidate_settings_changed candidate_pagination_gap
   candidate_duplicate_or_ownership_changed planner_readback_invalid planner_supplement_invalid
   planner_supplement_duplicate planner_player_invalid planner_report_period_mismatch
-  delta_spec_invalid delta_snapshot_invalid
+  delta_spec_invalid delta_snapshot_invalid recovery_evidence_invalid
   identity_ambiguous target_game_membership_missing game_key_missing game_key_invalid target_team_ownership_missing
   identity_mismatch identity_missing refresh_identity_mismatch token_response_invalid access_token_missing
   refresh_token_missing client_id_missing client_secret_missing
@@ -627,10 +836,12 @@ export async function runCli(args, {
       packet = { playerIds: arg.split(","), expectedWeek: Number(args[2]), expiresAt: args[3] };
     } else if (command === "planner-input" && [4, 5].includes(args.length)) {
       // Offline bridge; file reads follow destination preflight below.
+    } else if (command === "recovery-gate" && args.length === 2) {
+      // Offline only; canonical/evidence reads follow destination preflight.
     } else if (command === "verify-delta" && args.length === 4) {
       packet = { changes: parseDeltaSpec(args[3]) };
     } else fail("yahoo_readonly_command_required");
-    if (!["planner-input", "verify-delta"].includes(command)) validateRequest(command, packet);
+    if (!["planner-input", "verify-delta", "recovery-gate"].includes(command)) validateRequest(command, packet);
     if (outputPath) {
       stage = "output_preflight";
       let parent;
@@ -647,7 +858,12 @@ export async function runCli(args, {
       if (exists) fail("yahoo_output_exists");
     }
     let result;
-    if (command === "planner-input") {
+    if (command === "recovery-gate") {
+      stage = "input";
+      const request = JSON.parse((await recoveryBytes(arg)).toString("utf8"));
+      stage = "read_validation"; readStatus = "started";
+      result = await recoveryGate(request);
+    } else if (command === "planner-input") {
       stage = "input";
       const raw = JSON.parse(await readFile(arg, "utf8"));
       const report = JSON.parse(await readFile(args[2], "utf8"));
@@ -684,7 +900,7 @@ export async function runCli(args, {
     stage = "receipt";
     await stdout(outputPath ? `${JSON.stringify({ output: outputPath, apiReadOnly: true })}\n` : json);
     // A completed delta comparison that FAILs exits 2 so a chained shell step stops.
-    return command === "verify-delta" && result.verdict !== "PASS" ? 2 : 0;
+    return command === "verify-delta" && result.verdict !== "PASS" || command === "recovery-gate" && result.verdict === "HOLD" ? 2 : 0;
   } catch (error) {
     const diagnostic = {
       stage, code: safeOperationCode(error),
