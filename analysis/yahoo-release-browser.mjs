@@ -4,10 +4,10 @@
 // globals or references to anything else in this module. All site interaction goes through
 // the bound tab's goto/url and playwright domSnapshot/semantic locators.
 
-export const RELEASE_BROWSER_VERSION = "yahoo-release-browser-2026-10-21.2";
+export const RELEASE_BROWSER_VERSION = "yahoo-release-browser-2026-10-28.1";
 
 export function createReleaseBrowser(config) {
-  const VERSION = "yahoo-release-browser-2026-10-21.2";
+  const VERSION = "yahoo-release-browser-2026-10-28.1";
   const { tab: T, league, team, expires: EXPIRES, waitMs: WAIT } = config ?? {};
   if (!T?.playwright || !/^[1-9][0-9]*$/.test(league ?? "") || !/^[1-9][0-9]*$/.test(team ?? "") ||
       !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(EXPIRES ?? "") || Number.isNaN(Date.parse(EXPIRES)) ||
@@ -33,12 +33,17 @@ export function createReleaseBrowser(config) {
     return /waiver|claim|faab|\bbid\b/i.test(v) && !/^- generic: "?Waiver Priority: \d+(st|nd|rd|th)"?$/.test(v); }).map(x => x.slice(0, 200));
   // Bounded wait for one specific expected control or text. It decides nothing: every decision
   // is made from a fresh full snapshot taken after it returns or times out. Only Playwright's
-  // TimeoutError is a wait result; any other rejection (tool/permission denial) propagates to
+  // TimeoutError or the exact selector-deadline wrapper is a wait result; other rejections propagate to
   // run(), which stops before any further click and halts the instance.
   const settle = async (r, locator) => {
     const t = Date.now();
     try { await locator.first().waitFor({ state: "visible", timeoutMs: WAIT }); r.waits.push(Date.now() - t); }
-    catch (e) { if (e?.name !== "TimeoutError") throw e; r.waits.push(`timeout ${Date.now() - t}`); }
+    catch (e) {
+      const message = String(e?.message ?? e);
+      if (/permission|denied|forbidden|blocked|restriction|not authorized|tool access/i.test(message) ||
+          (e?.name !== "TimeoutError" && !/^(?:Error: )?Playwright selector deadline exceeded$/.test(message))) throw e;
+      r.waits.push(`timeout ${Date.now() - t}`);
+    }
   };
   const begin = leg => ({ v: VERSION, leg, t0: now(), alarmCount: 0, alarms: [], click: null, finalActionMayHaveOccurred: false, waits: [] });
   const stop = (r, result) => { r.result = result; r.t1 = now(); };
@@ -74,7 +79,12 @@ export function createReleaseBrowser(config) {
       if (!r.url.startsWith(BASE) || !s.includes('- heading "Add Free Agent" [level=2]') || !s.some(x => x.startsWith(`- heading "${L.add.name} `)) || r.bad.length) {
         r.form = s.filter(x => x.startsWith("- heading ")).slice(0, 8); return stop(r, "STOP_NOT_EXACT_FA_ADD_FORM");
       }
-      await PW.getByRole("row").filter({ hasText: L.drop.name }).getByRole("button", { name: "—", exact: true }).click();
+      // Opponent text can contain another roster player's name (Matt Gay @NY Jets).
+      // Bind the row to its exact player link, and never choose first() from ambiguous rows.
+      const dropRow = PW.getByRole("row").filter({ has: PW.getByRole("link", { name: L.drop.name, exact: true }) });
+      r.dropRows = await dropRow.count();
+      if (r.dropRows !== 1) return stop(r, "STOP_DROP_ROW_NOT_EXACT");
+      await dropRow.getByRole("button", { name: "—", exact: true }).click();
       await settle(r, PW.getByRole("button", { name: final, exact: true }));
       s = await lines(); r.confirmUrl = await T.url();
       if (alarmCheck(r, s)) return stop(r, "STOP_ALARM_NOT_CLICKED");
