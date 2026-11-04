@@ -4,10 +4,10 @@
 // globals or references to anything else in this module. All site interaction goes through
 // the bound tab's goto/url and playwright domSnapshot/semantic locators.
 
-export const RELEASE_BROWSER_VERSION = "yahoo-release-browser-2026-10-28.2";
+export const RELEASE_BROWSER_VERSION = "yahoo-release-browser-2026-11-04.1";
 
 export function createReleaseBrowser(config) {
-  const VERSION = "yahoo-release-browser-2026-10-28.2";
+  const VERSION = "yahoo-release-browser-2026-11-04.1";
   const { tab: T, league, team, expires: EXPIRES, waitMs: WAIT } = config ?? {};
   if (!T?.playwright || !/^[1-9][0-9]*$/.test(league ?? "") || !/^[1-9][0-9]*$/.test(team ?? "") ||
       !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(EXPIRES ?? "") || Number.isNaN(Date.parse(EXPIRES)) ||
@@ -83,22 +83,31 @@ export function createReleaseBrowser(config) {
       stop(r, alarmCheck(r, s) ? "STOP_ALARM_OBSERVED" : "INSPECTED_NO_ALARM");
     }, true);
   }
+  // Yahoo can show DEF nicknames on the FA form and city names on confirmation.
+  const describeLeg = ({ add, drop, week }) => {
+    const addName = add.name, dropName = drop.name;
+    const addConfirmation = add.confirmationName ?? addName, dropConfirmation = drop.confirmationName ?? dropName;
+    return { addId: add.id, addName, dropName, week,
+      signature: [add.id, drop.id, addName, dropName, addConfirmation, dropConfirmation, week],
+      final: `Add ${addConfirmation}, Drop ${dropConfirmation}`,
+      done: `You have successfully added ${addConfirmation} and dropped ${dropConfirmation}` };
+  };
   // Fresh goto, exact FA form, select only the exact drop, verify the exact confirmation. Never clicks the final button.
   function stage(L) {
     last = null;
     return run(begin(L.add.id), async r => {
-      const final = `Add ${L.add.name}, Drop ${L.drop.name}`;
-      await operation(r, "stage.navigate", () => T.goto(`${BASE}addplayer?apid=${L.add.id}`));
+      const { addId, addName, dropName, week, final, signature } = describeLeg(L);
+      await operation(r, "stage.navigate", () => T.goto(`${BASE}addplayer?apid=${addId}`));
       await operation(r, "stage.wait-form", () => settle(r, PW.getByRole("heading", { name: "Add Free Agent", exact: true })));
       let s = await operation(r, "stage.snapshot-form", lines); r.url = await T.url();
       if (alarmCheck(r, s)) return stop(r, "STOP_ALARM_NOT_CLICKED");
       r.bad = claimish(s);
-      if (!r.url.startsWith(BASE) || !s.includes('- heading "Add Free Agent" [level=2]') || !s.some(x => x.startsWith(`- heading "${L.add.name} `)) || r.bad.length) {
+      if (!r.url.startsWith(BASE) || !s.includes('- heading "Add Free Agent" [level=2]') || !s.some(x => x.startsWith(`- heading "${addName} `)) || r.bad.length) {
         r.form = s.filter(x => x.startsWith("- heading ")).slice(0, 8); return stop(r, "STOP_NOT_EXACT_FA_ADD_FORM");
       }
       // Opponent text can contain another roster player's name (Matt Gay @NY Jets).
       // Bind the row to its exact player link, and never choose first() from ambiguous rows.
-      const dropRow = PW.getByRole("row").filter({ has: PW.getByRole("link", { name: L.drop.name, exact: true }) });
+      const dropRow = PW.getByRole("row").filter({ has: PW.getByRole("link", { name: dropName, exact: true }) });
       r.dropRows = await operation(r, "stage.locate-drop", () => dropRow.count());
       if (r.dropRows !== 1) return stop(r, "STOP_DROP_ROW_NOT_EXACT");
       await operation(r, "stage.select-drop", () => dropRow.getByRole("button", { name: "—", exact: true }).click());
@@ -108,8 +117,8 @@ export function createReleaseBrowser(config) {
       r.bad = claimish(s);
       r.buttons = s.filter(x => x.startsWith('- button "Add ')); r.week = s.filter(x => x.startsWith("- strong: Week"));
       const exact = r.confirmUrl.startsWith(BASE) && r.buttons.length === 1 && r.buttons[0].startsWith(`- button "${final}"`) &&
-        r.week.length === 1 && r.week[0] === `- strong: ${L.week}` && s.some(x => x.startsWith('- heading "Player to Drop')) && !r.bad.length;
-      if (exact) last = { leg: L.add.id, url: r.confirmUrl };
+        r.week.length === 1 && r.week[0] === `- strong: ${week}` && s.some(x => x.startsWith('- heading "Player to Drop')) && !r.bad.length;
+      if (exact) last = { signature, url: r.confirmUrl };
       stop(r, exact ? "STAGED_NOT_SUBMITTED" : "STOP_CONFIRMATION_MISMATCH");
     });
   }
@@ -118,11 +127,12 @@ export function createReleaseBrowser(config) {
   function submit(L, next) {
     const staged = last; last = null;
     return run({ ...begin(L.add.id), err: null }, async r => {
-      const final = `Add ${L.add.name}, Drop ${L.drop.name}`, done = `You have successfully added ${L.add.name} and dropped ${L.drop.name}`;
+      const { week, final, done, signature } = describeLeg(L);
       let s = await lines(); r.url = await T.url();
       if (alarmCheck(r, s)) return stop(r, "STOP_ALARM_NOT_CLICKED");
-      const exact = staged?.leg === L.add.id && r.url === staged.url && r.url.startsWith(BASE) && s.filter(x => x.startsWith('- button "Add ')).length === 1 &&
-        s.some(x => x.startsWith(`- button "${final}"`)) && s.filter(x => x.startsWith("- strong: Week")).join() === `- strong: ${L.week}` && !claimish(s).length;
+      const exact = staged && signature.every((value, i) => value === staged.signature[i]) && r.url === staged.url && r.url.startsWith(BASE) &&
+        s.filter(x => x.startsWith('- button "Add ')).length === 1 && s.some(x => x.startsWith(`- button "${final}"`)) &&
+        s.filter(x => x.startsWith("- strong: Week")).join() === `- strong: ${week}` && !claimish(s).length;
       if (!exact) return stop(r, "STOP_STAGE_STALE_OR_CHANGED_NOT_CLICKED");
       if (expired()) return stop(r, "STOP_EXPIRED_NOT_CLICKED");
       r.click = now(); r.finalActionMayHaveOccurred = true;

@@ -320,6 +320,47 @@ test("ad iframe metadata never alarms and an explicit success clicks the final b
   assert.equal(seen.result, "INSPECTED_NO_ALARM"); assert.equal(seen.iframeMetadataLines, 2);
 });
 
+test("DEF nickname rows stage the exact city confirmation and submit it only once", async () => {
+  const def = { add: { id: "90006", name: "Texans", confirmationName: "Houston" },
+    drop: { id: "90007", name: "Bears", confirmationName: "Chicago" }, week: "Week 4" };
+  const final = roleKey("button", "Add Houston, Drop Chicago");
+  const page = confirm("Houston", "Chicago");
+  const pages = { [addUrl(def.add.id)]: faForm("Texans", [...playerRow("Blake Fixture", "@Bears"), ...playerRow("Bears")]),
+    [`after:${dropKey("Bears")}`]: `confirm:${def.add.id}`, [`confirm:${def.add.id}`]: page,
+    [`after:${final}`]: "done", done: success("Houston", "Chicago") };
+  let tab = browserTab(pages), hp = await loadRelease(tab);
+  assert.equal(evidence(await hp.stage(def)).result, "STAGED_NOT_SUBMITTED");
+  assert.deepEqual(tab.log.filter(x => x[0] === "click"), [["click", dropKey("Bears")]]);
+  const submitted = evidence(await hp.submit(structuredClone(def)));
+  assert.equal(submitted.result, "SUBMITTED_SUCCESS_TEXT");
+  assert.deepEqual(submitted.lines, ["- paragraph: You have successfully added Houston and dropped Chicago"]);
+  assert.equal(evidence(await hp.submit(def)).result, "STOP_STAGE_STALE_OR_CHANGED_NOT_CLICKED");
+  assert.deepEqual(tab.log.filter(x => x[0] === "click"), [["click", dropKey("Bears")], ["click", final]]);
+
+  const drift = [
+    ["add", "id", "90008", page], ["drop", "id", "90009", page],
+    ["add", "name", "Colts", page], ["drop", "name", "Packers", page],
+    ["add", "confirmationName", "Indianapolis", confirm("Indianapolis", "Chicago")],
+    ["drop", "confirmationName", "Green Bay", confirm("Houston", "Green Bay")],
+  ].map(([key, field, changed, render]) => [{ ...def, [key]: { ...def[key], [field]: changed } }, render]);
+  drift.push([{ ...def, week: "Week 5" }, page.map(x => x.replace("Week 4", "Week 5"))]);
+  for (const [changed, render] of drift) {
+    tab = browserTab(pages); hp = await loadRelease(tab);
+    assert.equal(evidence(await hp.stage(def)).result, "STAGED_NOT_SUBMITTED");
+    tab.playwright.domSnapshot = async () => render.join("\n");
+    assert.equal(evidence(await hp.submit(changed)).result, "STOP_STAGE_STALE_OR_CHANGED_NOT_CLICKED");
+    assert.equal(clicks(tab), 1);
+  }
+
+  for (const [render, expected] of [[confirm("Houston", "Green Bay"), "STOP_CONFIRMATION_MISMATCH"],
+    [[...page, "- alert: Daily add limit reached"], "STOP_ALARM_NOT_CLICKED"]]) {
+    tab = browserTab({ ...pages, [`confirm:${def.add.id}`]: render }); hp = await loadRelease(tab);
+    assert.equal(evidence(await hp.stage(def)).result, expected);
+    assert.equal(evidence(await hp.submit(def)).result, "STOP_HALTED_AFTER_PRIOR_ALARM_OR_ERROR");
+    assert.equal(clicks(tab), 1);
+  }
+});
+
 test("visible iframe content, unparsed iframe lines and top-level stop signals alarm before any final click", async () => {
   for (const signal of [[AD, "- paragraph: Error loading roster"], ['- iframe [id="frame"]: Something went wrong'],
     ['- iframe [name="1-0-45;<script>throw new Error(\\"x'], ["- paragraph: Transaction limit reached"], ["- alert: Your account is restricted"],
