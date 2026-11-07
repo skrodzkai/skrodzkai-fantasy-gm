@@ -57,6 +57,8 @@ function checked(state) {
   requireThat(Object.keys(state.actions).length === Object.keys(state.jobs).length, 'invalid_action_index');
   requireThat(Object.values(state.jobs).filter(j => ['Claimed','Running','Unknown'].includes(j.status)).length <= 1, 'multiple_active_jobs');
 }
+// Storage adapters validate persisted bytes before returning them to dispatch.
+export function validateLedger(state) { checked(state); return copy(state); }
 function owned(state, owner) { checked(state); requireThat(owner === state.owner, 'owner_mismatch'); }
 function changed(state) { const next = copy(state); next.revision++; return next; }
 function job(state, id) { const j = state.jobs[id]; requireThat(j, 'unknown_occurrence'); return j; }

@@ -1,4 +1,4 @@
-# Fantasy harness migration — source-only ledger seam
+# Fantasy harness migration — source-only ledger and durable store
 
 This candidate moves implementation forward without replacing the existing custom
 weekly strategy, installing an agent, changing any schedule, or performing Yahoo
@@ -16,8 +16,8 @@ status and elapsed time are never proof of the absence of a roster effect.
 
 This JavaScript seam belongs with the existing Fantasy operation modules. It does
 not alter a harness registry or claim that a production runner is already admitted.
-The durable-store and adapter interfaces are generic implementation contracts, not
-copied private runtime code. No host paths, account credentials, private repository
+The durable store reuses the reviewed local phase-store algorithm. Native adapter
+interfaces remain implementation contracts, not an available browser capability. No host paths, account credentials, private repository
 names, live schedules or private operational evidence are included.
 
 Use the existing `yahoo-fantasy-operations.mjs` GET-only connector for reads and
@@ -47,8 +47,10 @@ adoption decision; this patch neither imports nor installs that candidate.
   reconciliation. This candidate deliberately has no Unknown-to-retry operation.
 - A trusted adapter may return `{kind:'no_effect',stage:'before_submit',
   submissionStarted:false}` ONLY if it can positively prove it never began a final
-  submission. That is the sole retryable result, once, within the original window
-  and before a later occurrence. Timeouts/absence of a receipt are never proof.
+  submission. The original pure ledger exposes a once-only same-ID retry for that result,
+  but the durable adapter below deliberately rejects it: the newer admitted-turn
+  integration has not adopted that recovery contract. Timeouts/absence of a
+  receipt are never proof, and no live retry permission follows from this API.
 - Postflight requires an independent read after dispatch, at most 60 seconds old,
   exact target/week and full resulting roster, no pending claims, and a separately
   confirmed receipt. Mismatch remains Unknown. The trusted adapter must bind the
@@ -63,9 +65,10 @@ adoption decision; this patch neither imports nor installs that candidate.
 
 ## Production work deliberately still missing
 
-1. Durable store adapter: validate integrity on load; atomic expected-revision CAS;
-   durable fsync/commit acknowledgement; global writer fencing; no in-memory-only
-   or expired-lock takeover. Test real restart, disk-full and torn-write behavior.
+1. Durable-store adoption: the isolated adapter below now validates local journal
+   integrity and persists expected-revision commits. Global writer fencing, actual
+   filesystem durability under power/disk faults, operator crash/capacity handling
+   and production adoption remain unproven. No expired-lock takeover is supplied.
 2. Fixed Fantasy runner in the existing harness, including current strategy inputs,
    fresh API preflight, lock/eligibility/standing-scope enforcement, browser adapter
    and independent bound receipt/postflight adapter. The `submit` callback in these
@@ -88,3 +91,43 @@ become bypassable. No gambling, financial execution or security changes are adde
 only, including concurrent delivery, persistence loss, recovery, freshness and
 handoff checks. Existing `npm run test:draft` automatically includes this test.
 No dependency or CI workflow change is needed. Neither suite is live acceptance.
+
+
+## Isolated durable-store integration (not deployed)
+
+`openHarnessStore` in `analysis/fantasy-harness-durable-store.mjs` now supplies
+real private-file persistence for this ledger. It reuses the reviewed phase-store
+algorithm with only its three value helpers made local and its existing revision
+limit named. Expected-revision commits, hash-linked readback, exclusive writer
+lock, fsync/rename, and retained uncertain locks remain intact. No default path,
+automatic lock reclamation, credential access, native admission, browser call,
+scheduler, or owner adoption is included. A directory lock fences cooperating
+writers of that directory only; it does not establish globally unique authority.
+
+The caller must provide a private empty directory for explicit initialization and
+pin owner plus exact schedule fingerprint on every reopen. Loading never changes
+Running into permission to retry. The existing explicit recovery transition can
+persist Unknown, while an abrupt crash retains its lock for supervised evidence
+reconciliation. The adapter rejects the old same-ID retry transition; it is not
+adopted by the newer admitted-turn design. Any future bounded recovery still needs
+its own exact canonical binding and new decision ID.
+
+Before committing Running, the adapter reserves room for both that commit and its
+outcome. Near-capacity dispatch fails before the worker call. Storage exhaustion,
+retained crash locks and uncertain results are explicit operational holds, not
+automatic compaction or permission to create a second directory/owner. There is
+no force-unlock function. Same-OS-user malicious tampering or filesystem rollback
+is not prevented by local hashes.
+
+`node --test analysis/fantasy-harness-ledger.test.mjs analysis/fantasy-harness-durable-store.test.mjs`
+exercises the actual PR60 transitions against real filesystem persistence, clean
+restart, a competing process, an abrupt child exit, corrupt bytes, and journal
+capacity. Positive worker results remain fixtures; this does not prove Desktop
+CUA access, provider-side idempotency, installed behavior or live ownership.
+
+The documented app-server thread/start, thread/resume, turn/start, notifications
+and configured MCP methods still do not establish admission to the authorized
+Desktop browser runtime. No denied call, localhost callback or data URL was
+retried. Provider clarification and a permitted non-mutating native acceptance
+facility remain prerequisites, alongside actual canonical/control/preflight and
+browser-result adapters and the single-owner cutover/rollback package.
