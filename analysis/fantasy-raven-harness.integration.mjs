@@ -158,12 +158,12 @@ async function fixture(t, { grantExpiresAt = deadline, stopped = false } = {}) {
     const { season, league, team, week, after } = job.intent;
     return {
       evidence: { source: 'independent_read', observedAt: time - 1, season, league, team, week, roster: after, pendingClear: true, ...evidencePatch },
-      receipt: { occurrenceId: id, actionId: job.actionId, token: 'fixture-receipt', ...receiptPatch },
+      receipt: { occurrenceId: id, actionId: job.actionId, receiptId: 'fixture-receipt', ...receiptPatch },
     };
   };
   const verifyReceipt = async (receipt, context) => {
     assert.deepEqual(context, binding);
-    assert.equal(receipt.token, 'fixture-receipt');
+    assert.equal(receipt.receiptId, 'fixture-receipt');
     return verifierResult;
   };
   const outcomes = [];
