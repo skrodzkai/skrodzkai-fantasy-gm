@@ -16,7 +16,13 @@ test('dispatch uses the injected adapter and only independently verified, action
     owner, fingerprint, scheduledFor: 100, deadline: 200, now: 110, intent,
   });
   const binding = { deadline: 200, occurrenceId: '100', actionId: state.jobs['100'].actionId };
+  const attempts = Object.freeze({});
   const store = {
+    attemptsFor(context) {
+      assert.deepEqual(context, binding);
+      assert.ok(Object.isFrozen(context));
+      return attempts;
+    },
     async load() { return state; },
     async compareAndSwap(revision, next) {
       assert.equal(revision, state.revision);
@@ -30,9 +36,14 @@ test('dispatch uses the injected adapter and only independently verified, action
   let receiptOccurrence = 'other';
   let verified = false;
   const harness = createRavenHarness({
-    store, owner, clock, raven: { profileId: 'fixture' },
+    store, owner, clock, raven: {
+      profileId: 'fixture', attempts: { reserve: assert.fail }, resolvePagePlan: assert.fail, openSession: assert.fail,
+      readProposalEvidence: assert.fail, awaitOperatorGrant: assert.fail, readGrantEvidence: assert.fail, readStop: assert.fail,
+    },
     createRavenSubmitAdapter(options) {
-      assert.deepEqual(options, { profileId: 'fixture', clock });
+      assert.equal(options.profileId, 'fixture');
+      assert.equal(options.clock, clock);
+      assert.equal(options.attempts, attempts);
       return {
         async submit(submittedIntent, context) {
           calls.push('submit');
@@ -73,10 +84,10 @@ test('dispatch uses the injected adapter and only independently verified, action
   assert.equal(state.jobs['100'].status, 'Succeeded');
 });
 
-test('assembly requires independent postflight providers and a submit adapter', () => {
+test('assembly requires independent postflight, an adapter factory, and store-owned attempts', () => {
   const createRavenSubmitAdapter = () => ({});
+  const readers = { readPostflight: () => {}, verifyReceipt: () => {} };
   assert.throws(() => createRavenHarness({ createRavenSubmitAdapter }), /independent_postflight_required/);
-  assert.throws(() => createRavenHarness({
-    createRavenSubmitAdapter, readPostflight: () => {}, verifyReceipt: () => {},
-  }), /raven_submit_required/);
+  assert.throws(() => createRavenHarness(readers), /raven_submit_required/);
+  assert.throws(() => createRavenHarness({ createRavenSubmitAdapter, ...readers }), /durable_attempts_required/);
 });

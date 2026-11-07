@@ -10,6 +10,32 @@ read-back `Running` record precedes the adapter call. A dispatched input remains
 an action/occurrence-bound receipt. A browser input acknowledgement is not a
 verified website transaction. Replayed or unresolved jobs cannot submit again.
 
+The candidate opens a private v2 harness envelope in the existing hash-linked
+phase journal. Ledger CAS compares the ledger revision and carries forward the
+latest attempt map. Reserving, marking, and releasing advance only the journal
+revision. Each attempt matches the exact Running occurrence, action, and
+deadline. Only the dispatch that reserved it can mark or release it, and a
+Released entry stays in the journal. A clean reopen preserves all attempt
+states and never resumes them. An uncertain mark retains the writer lock and
+prevents both send and a confirmed no-submission result.
+
+The store checks the revision limit and serialized byte limit before committing
+Running. It budgets five writes for Running, Reserved, Submitting or Released,
+the outcome, and independent postflight. The byte projection covers the
+Submitting entry, the interruption reason, and the terminal status and
+watermark. Physical disk failure can still require supervised reconciliation.
+Opening the predecessor v1 envelope fails explicitly. This candidate provides
+no data migration.
+
+Each dispatch captures its own page plan. The owner seam accepts a parseable
+absolute HTTPS URL and compares the observed URL to the captured string exactly,
+including path, query, and fragment. Any differing redirect or normalization
+fails before proposal or grant. The owner snapshots observation, proposal,
+and grant evidence across awaits. The frozen Raven adapter still owns session
+cleanup and validates the full proposal and grant binding. Before forwarding
+`page_act`, the owner checks the durable Submitting entry under the same
+writer fence and rechecks the original deadline.
+
 The repository fixtures use synthetic player identities and injected providers.
 The separate integration fixture requires an explicit path to the reviewed Raven
 artifact and checks its pinned hash before import. It uses an in-memory fake
@@ -21,14 +47,10 @@ have that external artifact and does not run the separate integration fixture.
 
 - A fixed, admitted owner bootstrap with current canonical approval, preflight,
   Stop and unchanged schedule binding; importing this module is not activation.
-- Trusted page planning, full proposal and grant evidence readers, operator
-  authorization, and the existing registered native transport. The reviewed
-  adapter binds proposal URL to observed URL; this alone does not establish that
-  navigation reached the intended target from `plan.url`.
-- Durable Raven reservation/mark/release under the same writer fence. These
-  callbacks must not advance the main ledger revision during `submit`, because
-  `dispatchClaimed` commits its outcome against that revision. The fixture's
-  in-memory marks are not a production attempt journal.
+- Trusted production page planning, full proposal and grant evidence readers,
+  operator authorization, and the existing registered native transport.
+- An admitted private v2 journal and a supervised reconciliation decision for
+  any predecessor data.
 - Independent GET-only target/full-roster/pending-clear evidence and a receipt
   verifier bound to the exact action and occurrence, rather than a transport's
   self-reported success.

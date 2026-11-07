@@ -7,6 +7,10 @@ const check=(value,code)=>{if(!value)throw Error(code);};
 const clone=value=>structuredClone(value);
 const digest=value=>createHash('sha256').update(typeof value==='string'?value:JSON.stringify(value)).digest('hex');
 export const PHASE_STORE_MAX_REVISIONS=1000;
+const MAX_RECORD_BYTES=1024*1024;
+const record=(state,previous)=>JSON.stringify({revision:state.revision,previous,state,digest:digest(state)});
+const fits=(state,bytes)=>state.revision<PHASE_STORE_MAX_REVISIONS&&Buffer.byteLength(bytes)<=MAX_RECORD_BYTES;
+export const phaseRevisionFits=state=>fits(state,record(state,'0'.repeat(64)));
 export function openPhaseStore(root,{initialize=false}={}) {
  const dir=fs.lstatSync(root);check(dir.isDirectory()&&!dir.isSymbolicLink()&&(dir.mode&0o077)===0,'STORE_DIRECTORY_INVALID');
  const files=fs.readdirSync(root);
@@ -27,7 +31,7 @@ export function openPhaseStore(root,{initialize=false}={}) {
    for(let i=0;i<names.length;i++) {
     check(names[i]===`${String(i).padStart(6,'0')}.json`,'JOURNAL_GAP');
     const p=path.join(root,names[i]),st=fs.lstatSync(p);
-    check(st.isFile()&&!st.isSymbolicLink()&&st.nlink===1&&(st.mode&0o077)===0&&st.size<=1024*1024,'JOURNAL_FILE_INVALID');
+    check(st.isFile()&&!st.isSymbolicLink()&&st.nlink===1&&(st.mode&0o077)===0&&st.size<=MAX_RECORD_BYTES,'JOURNAL_FILE_INVALID');
     const bytes=fs.readFileSync(p,'utf8');let r;try{r=JSON.parse(bytes);}catch{throw Error('JOURNAL_TORN_OR_CORRUPT');}
     check(r.revision===i&&r.previous===(previous?digest(previous.bytes):null)&&r.state.revision===i&&r.digest===digest(r.state),'JOURNAL_INVALID');
     previous={bytes,state:r.state};
@@ -40,8 +44,8 @@ export function openPhaseStore(root,{initialize=false}={}) {
  }
  function append(state,previous){
   owns();const p=path.join(root,`${String(state.revision).padStart(6,'0')}.json`);
-  const bytes=JSON.stringify({revision:state.revision,previous,state,digest:digest(state)});
-  check(Buffer.byteLength(bytes)<=1024*1024&&state.revision<PHASE_STORE_MAX_REVISIONS,'JOURNAL_CAPACITY');
+  const bytes=record(state,previous);
+  check(fits(state,bytes),'JOURNAL_CAPACITY');
   const temp=path.join(root,`.${String(state.revision).padStart(6,'0')}.${randomUUID()}.tmp`);
   let f;try {f=fs.openSync(temp,'wx',0o600);fs.writeFileSync(f,bytes);fs.fsyncSync(f);fs.closeSync(f);f=undefined;
    owns();check(!fs.existsSync(p),'REVISION_ALREADY_EXISTS');fs.renameSync(temp,p);fs.fsyncSync(directoryFd);
